@@ -75,8 +75,10 @@ export function parseTime(raw: string): string | null {
   if (!m) return null;
   let h = Number(m[1]);
   const min = Number(m[2] ?? "0");
-  if (m[3] === "pm" && h < 12) h += 12;
-  if (m[3] === "am" && h === 12) h = 0;
+  // "7:30-8:30pm": the am/pm at the end applies to the start too.
+  const ampm = m[3] ?? s.match(/(am|pm)/)?.[1];
+  if (ampm === "pm" && h < 12) h += 12;
+  if (ampm === "am" && h === 12) h = 0;
   if (h > 23 || min > 59) return null;
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
 }
@@ -189,22 +191,35 @@ Deno.serve(async (req) => {
   const fullName = [firstName, lastName].filter(Boolean).join(" ");
   const displayName = initiated ? `${initiated} (${fullName || email})` : fullName || email;
 
-  const { data: fac, error: facErr } = await db
-    .from("facilitators")
-    .upsert({
+  // Existing facilitators are never overwritten by a public form; only empty fields are filled in.
+  let { data: fac } = await db.from("facilitators").select("*").eq("email", email).maybeSingle();
+  if (fac) {
+    const fill: Record<string, string> = {};
+    if (!fac.phone && phone) fill.phone = phone;
+    if (!fac.first_name && firstName) fill.first_name = firstName;
+    if (!fac.last_name && lastName) fill.last_name = lastName;
+    if (!fac.initiated_name && initiated) fill.initiated_name = initiated;
+    if (Object.keys(fill).length) await db.from("facilitators").update(fill).eq("id", fac.id);
+  } else {
+    const { data: created, error: facErr } = await db.from("facilitators").insert({
       name: displayName, email, phone: phone || null,
       first_name: firstName || null, last_name: lastName || null, initiated_name: initiated || null,
-    }, { onConflict: "email" })
-    .select("id")
-    .single();
-  if (facErr) {
-    await audit("intake_failed", { submissionId, error: facErr.message });
-    return json({ error: facErr.message }, 500);
+    }).select("*").single();
+    if (facErr) {
+      await audit("intake_failed", { submissionId, error: facErr.message });
+      return json({ error: facErr.message }, 500);
+    }
+    fac = created;
   }
+
+  // Flag likely duplicates: same facilitator already has a circle that isn't ended or rejected.
+  const { data: existing } = await db.from("circles").select("name")
+    .eq("facilitator_id", fac.id).not("status", "in", "(ended,rejected)");
 
   const notes = [
     specify && `Specified: ${specify}`,
     !tzExact && tzLabel && `Timezone "${tzLabel}" was not recognised exactly; check it.`,
+    existing?.length && `Possible duplicate: this facilitator already has ${existing.map((c) => `"${c.name}"`).join(", ")}.`,
   ].filter(Boolean).join("\n") || null;
 
   const { data: circle, error: circErr } = await db
@@ -231,7 +246,12 @@ Deno.serve(async (req) => {
     .single();
 
   if (circErr) {
-    if (circErr.code === "23505") return json({ ok: true, duplicate: true }); // Tally retry
+    if (circErr.code === "23505") {
+      // Tally retry of a submission we already have: make sure it isn't stuck without a licence.
+      const { data: prev } = await db.from("circles").select("id,status").eq("tally_submission_id", submissionId).maybeSingle();
+      if (prev?.status === "conflict") await db.rpc("allocate_circle", { p_circle: prev.id });
+      return json({ ok: true, duplicate: true });
+    }
     await audit("intake_failed", { submissionId, error: circErr.message });
     return json({ error: circErr.message }, 500);
   }

@@ -323,3 +323,7 @@ fieldset.group legend { font-size: 12px; color: var(--muted); font-weight: 600; 
 .approve-bar.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 35%, transparent); color: var(--warn); }
 .approve-bar > div { flex: 1; min-width: 200px; }
 .approve-title { font-weight: 700; margin-bottom: 2px; }
+.holder { display: grid; grid-template-columns: 90px 1fr; gap: 0 10px; text-align: left; white-space: normal; padding: 8px 10px; margin-top: 4px; background: var(--surface); }
+.holder .muted { grid-column: 2; }
+.manage-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-top: 6px; }
+.manage-row label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; flex: 1; min-width: 200px; }

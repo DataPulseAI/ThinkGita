@@ -18,6 +18,14 @@ function When({ c, block }) {
   );
 }
 
+// Turn database errors into plain English.
+function friendlyError(e) {
+  const m = e?.message ?? String(e);
+  if (/no_licence_clash/.test(m)) return "That licence is already booked at this time. Pick another time or licence.";
+  if (/term_order/.test(m)) return "The term end date must be after the term start date.";
+  return m;
+}
+
 export default function Admin() {
   const [tab, setTab] = useState("Overview");
   const [day, setDay] = useState(1);
@@ -57,10 +65,11 @@ export default function Admin() {
       const out = await fn();
       if (okText) notify("ok", typeof okText === "function" ? okText(out) : okText);
       await load();
-      return out;
+      return out ?? true;
     } catch (e) {
-      notify("error", e.message ?? String(e));
+      notify("error", friendlyError(e));
       await load();
+      return null;
     }
   };
 
@@ -104,10 +113,13 @@ export default function Admin() {
           data={data}
           run={run}
           onDelete={deleteCircle}
+          onOpen={(c) => setSelected(c)}
           onClose={() => setSelected(null)}
         />
       )}
-      {toast && <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>{toast.text}</div>}
+      <div aria-live="polite" role="status">
+        {toast && <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>{toast.text}</div>}
+      </div>
     </div>
   );
 }
@@ -300,7 +312,7 @@ function Schedule({ data, day, setDay, onSelect }) {
                   <Hover key={c.id} content={<CircleHoverCard c={c} />}>
                     <button
                       className={`block st-${c.status}`}
-                      style={{ left: pos(s), width: `calc(${pos(s + c.duration_min)} - ${pos(s)})`, top, height: lane.warn ? 26 : undefined }}
+                      style={{ left: pos(s), width: `calc(${pos(Math.min(s + c.duration_min, endH * 60))} - ${pos(s)})`, top, height: lane.warn ? 26 : undefined }}
                       onClick={() => onSelect(c)}
                       aria-label={`${c.name}, ${ukWhen(c)} UK, ${STATUS_LABEL[c.status]}`}
                     >
@@ -351,6 +363,13 @@ function CircleHoverCard({ c }) {
 
 /* ---------------- Queue ---------------- */
 function Queue({ data, run, onSelect }) {
+  const [approving, setApproving] = useState(null);
+  const clashes = data.circles.filter((c) => c.status === "conflict").length;
+  async function approveOne(c) {
+    setApproving(c.id);
+    await run(() => adminAction("provision", c.id), (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`);
+    setApproving(null);
+  }
   const items = data.circles
     .filter((c) => c.status === "pending" || c.status === "conflict")
     .sort((a, b) => (a.status === "conflict" ? -1 : 0) - (b.status === "conflict" ? -1 : 0) || ukDay(a) - ukDay(b) || ukStart(a).localeCompare(ukStart(b)));
@@ -397,15 +416,26 @@ function Queue({ data, run, onSelect }) {
     <section className="card">
       <div className="card-head">
         <h2>Queue</h2>
+        <div className="filters">
+        {clashes > 0 && (
+          <button onClick={() => run(async () => {
+            const { data: n, error } = await supabase.rpc("recheck_conflicts");
+            if (error) throw error;
+            return n;
+          }, (n) => n === true || !n ? "Re-checked: no licence has freed up yet" : `Re-checked: ${n} clash${n === 1 ? "" : "es"} now have a licence`)}>
+            Re-check all clashes ({clashes})
+          </button>
+        )}
         <button className="primary" disabled={!ready.length || bulk} onClick={provisionAll}>
           {bulk ? `Creating ${bulk.done + 1} of ${bulk.total}…` : `Approve all ready (${ready.length})`}
         </button>
+        </div>
       </div>
       {!items.length && <p className="muted">Nothing waiting. New Tally submissions appear here.</p>}
       <div className="list">
         {items.map((c) => (
           <div key={c.id} className={`row ${c.status === "conflict" ? "row-warn" : ""}`}>
-            <div className="row-main" onClick={() => onSelect(c)}>
+            <div className="row-main" role="button" tabIndex={0} onClick={() => onSelect(c)} onKeyDown={(e) => e.key === "Enter" && onSelect(c)}>
               <div className="row-title">
                 {c.name}
                 {c.is_demo && <span className="tag">demo</span>}
@@ -432,8 +462,8 @@ function Queue({ data, run, onSelect }) {
             </div>
             <div className="row-actions">
               {c.status === "pending" && (
-                <button className="primary" onClick={() => run(() => adminAction("provision", c.id), (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`)}>
-                  Approve + create Zoom
+                <button className="primary" disabled={approving === c.id} onClick={() => approveOne(c)}>
+                  {approving === c.id ? "Creating…" : "Approve + create Zoom"}
                 </button>
               )}
               {c.status === "conflict" && (
@@ -518,7 +548,12 @@ function Circles({ data, onSelect, onNew, onDelete }) {
 }
 
 /* ---------------- Circle drawer ---------------- */
-function CircleDrawer({ circle, data, run, onClose, onDelete }) {
+function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   const isNew = !circle;
   const live = circle?.status === "live";
   const editable = isNew || circle.status !== "ended";
@@ -542,29 +577,30 @@ function CircleDrawer({ circle, data, run, onClose, onDelete }) {
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const tzOptions = TIMEZONES.includes(f.timezone) ? TIMEZONES : [f.timezone, ...TIMEZONES];
 
+  // Same facilitator: update their details. Different email: link to that person (existing details untouched)
+  // or create them if new.
+  async function linkFacilitator(c, form) {
+    const email = form.facilitator_email.trim().toLowerCase();
+    if (!email) return c?.facilitator_id ?? null;
+    if (c?.facilitator && c.facilitator.email === email) {
+      const { error } = await supabase.from("facilitators").update({ name: form.facilitator_name || email, phone: form.phone || null }).eq("id", c.facilitator_id);
+      if (error) throw error;
+      return c.facilitator_id;
+    }
+    const { data: existing } = await supabase.from("facilitators").select("id").eq("email", email).maybeSingle();
+    if (existing) return existing.id;
+    const { data: created, error } = await supabase.from("facilitators")
+      .insert({ email, name: form.facilitator_name || email, phone: form.phone || null }).select("id").single();
+    if (error) throw error;
+    return created.id;
+  }
+
   // Live circles: details save directly; a new facilitator goes through handover (invite + email);
   // day/time/length/timezone changes move the existing Zoom meeting, so the link stays the same.
   async function saveLive() {
-    await run(async () => {
+    const ok = await run(async () => {
       const id = circle.id;
-      const hasAlt = f.alt_weekday && f.alt_start_time;
-      const { error } = await supabase.from("circles").update({
-        name: f.name, circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
-        alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
-      }).eq("id", id);
-      if (error) throw error;
-
-      const newEmail = f.facilitator_email.trim().toLowerCase();
       const done = [];
-      if (newEmail && newEmail !== circle.facilitator?.email) {
-        await adminAction("handover", id, { facilitator: { name: f.facilitator_name, email: newEmail } });
-        done.push("handed over");
-      } else if (circle.facilitator_id) {
-        const { error: e2 } = await supabase.from("facilitators")
-          .update({ name: f.facilitator_name || newEmail, phone: f.phone || null }).eq("id", circle.facilitator_id);
-        if (e2) throw e2;
-      }
-
       const patch = {};
       if (Number(f.weekday) !== circle.weekday) patch.weekday = Number(f.weekday);
       if (f.start_time !== hhmm(circle.start_time)) patch.start_time = f.start_time;
@@ -575,22 +611,32 @@ function CircleDrawer({ circle, data, run, onClose, onDelete }) {
         await adminAction("reschedule", id, { patch });
         done.push("Zoom meeting moved, same link");
       }
+
+      const newEmail = f.facilitator_email.trim().toLowerCase();
+      if (newEmail && newEmail !== circle.facilitator?.email) {
+        await adminAction("handover", id, { facilitator: { name: f.facilitator_name, email: newEmail } });
+        done.push("handed over");
+      } else if (circle.facilitator_id) {
+        const { error: e2 } = await supabase.from("facilitators")
+          .update({ name: f.facilitator_name || newEmail, phone: f.phone || null }).eq("id", circle.facilitator_id);
+        if (e2) throw e2;
+      }
+
+      const hasAlt = f.alt_weekday && f.alt_start_time;
+      const { error } = await supabase.from("circles").update({
+        name: f.name, circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
+        alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
+      }).eq("id", id);
+      if (error) throw error;
       return done;
     }, (done) => `Saved${done?.length ? `: ${done.join(", ")}` : ""}`);
-    onClose();
+    if (ok) onClose();
   }
 
   async function save() {
     if (live) return saveLive();
-    await run(async () => {
-      let facilitator_id = circle?.facilitator_id ?? null;
-      if (f.facilitator_email) {
-        const { data: fac, error } = await supabase.from("facilitators")
-          .upsert({ email: f.facilitator_email.trim().toLowerCase(), name: f.facilitator_name || f.facilitator_email, phone: f.phone || null }, { onConflict: "email" })
-          .select("id").single();
-        if (error) throw error;
-        facilitator_id = fac.id;
-      }
+    const ok = await run(async () => {
+      const facilitator_id = await linkFacilitator(circle, f);
       const hasAlt = f.alt_weekday && f.alt_start_time;
       const row = {
         name: f.name, facilitator_id, weekday: Number(f.weekday), start_time: f.start_time,
@@ -599,6 +645,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete }) {
         circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
       };
       if (circle?.status === "rejected") Object.assign(row, { status: "pending" });
+      // "Pick automatically" releases the current licence first, so a busy licence never blocks a free one.
+      if (f.licence_id === "auto") Object.assign(row, { licence_id: null, status: "pending", conflict_reason: null });
       let id = circle?.id;
       if (isNew) {
         const { data: created, error } = await supabase.from("circles").insert({ ...row, source: "manual" }).select("id").single();
@@ -618,12 +666,47 @@ function CircleDrawer({ circle, data, run, onClose, onDelete }) {
       if (error) throw new Error(/no_licence_clash/.test(error.message) ? "That licence is already booked at this time" : error.message);
       return out;
     }, (out) => `Saved: ${STATUS_LABEL[out.status]}${out.preference_used === 2 ? " (using 2nd preference)" : ""}`);
-    onClose();
+    if (ok) onClose();
   }
 
   const licence = data.licences.find((l) => l.id === circle?.licence_id);
   const requests = circle ? data.requests.filter((r) => r.circle_id === circle.id) : [];
   const [busy, setBusy] = useState(false);
+  const [holders, setHolders] = useState(null);
+  const [freeLicences, setFreeLicences] = useState(null);
+  const [moveTo, setMoveTo] = useState("");
+  const [endDate, setEndDate] = useState("");
+
+  // For clashes: who already holds this time. For live circles: which licences it could move to.
+  useEffect(() => {
+    if (!circle) return;
+    if (circle.status === "conflict") {
+      supabase.rpc("slot_holders", { p_circle: circle.id }).then(({ data: rows }) => setHolders(rows ?? []));
+    }
+    if (circle.status === "live") {
+      supabase.rpc("free_licences_for_circle", { p_circle: circle.id }).then(({ data: rows }) => setFreeLicences(rows ?? []));
+    }
+  }, [circle?.id, circle?.status, circle?.updated_at]);
+
+  async function moveLicence() {
+    const target = freeLicences.find((l) => l.licence_id === moveTo);
+    if (!target) return;
+    if (!confirm(`Move "${circle.name}" to ${target.label}?\n\nThis creates a new Zoom meeting on ${target.label}, so the join link changes. The facilitator is emailed the new link, and the old meeting is deleted. Remember to update the WhatsApp group.`)) return;
+    setBusy(true);
+    await run(() => adminAction("move_licence", circle.id, { licence_id: moveTo }), (o) => `Moved to ${o.licence}. New link sent to the facilitator.`);
+    setBusy(false);
+    setMoveTo("");
+  }
+
+  async function endOnDate() {
+    if (!endDate) return;
+    const now = endDate <= new Date().toISOString().slice(0, 10);
+    if (!confirm(now ? `End "${circle.name}" now? This deletes its Zoom meeting.` : `Make ${fmtDate(endDate)} the last date for "${circle.name}"? Sessions until then carry on with the same link.`)) return;
+    setBusy(true);
+    const ok = await run(() => adminAction("end_on", circle.id, { date: endDate }), now ? "Circle ended" : `Circle now ends on ${fmtDate(endDate)}`);
+    setBusy(false);
+    if (ok && now) onClose();
+  }
 
   // Approve straight from the drawer; it stays open and switches to the live Zoom details.
   async function approve() {
@@ -679,6 +762,22 @@ function CircleDrawer({ circle, data, run, onClose, onDelete }) {
             <button disabled={busy} onClick={recheck}>Re-check licences</button>
           </div>
         )}
+        {circle?.status === "conflict" && holders?.length > 0 && (
+          <div className="details">
+            <span className="section-title">Who's using this time</span>
+            {holders.map((h) => (
+              <button key={h.circle_id} type="button" className="holder" onClick={() => onOpen?.(data.circles.find((x) => x.id === h.circle_id) ?? { id: h.circle_id })}>
+                <b>{h.licence_label}</b>
+                <span>{h.circle_name}</span>
+                <span className="muted small">{DAYS[h.weekday]} {hhmm(h.start_time)} UK · {STATUS_LABEL[h.status]}{h.facilitator ? ` · ${h.facilitator}` : ""}</span>
+              </button>
+            ))}
+            <p className="muted small">To free a licence, open one of these and move it to another time (or, if it isn't live yet, to another licence), then re-check.</p>
+          </div>
+        )}
+        {circle?.uk_time_shifts && (
+          <p className="hint">This circle is in {tzName(circle.timezone)} time, where the clocks change on different dates to the UK. Its UK time shifts by an hour for a few weeks a year; clash checks already cover both times.</p>
+        )}
 
         {circle?.status === "live" && (
           <div className="details">
@@ -702,6 +801,33 @@ function CircleDrawer({ circle, data, run, onClose, onDelete }) {
               <button onClick={() => run(() => adminAction("resend", circle.id), (o) => `Email ${o.email}`)}>Resend details email</button>
               <button className="danger" onClick={() => confirm("Delete the Zoom meeting and end this circle?") && run(() => adminAction("cancel", circle.id), "Circle ended").then(onClose)}>End circle</button>
             </div>
+          </div>
+        )}
+
+        {live && (
+          <div className="details">
+            <span className="section-title">Manage</span>
+            <div className="manage-row">
+              <label>Move to another licence
+                <select value={moveTo} onChange={(e) => setMoveTo(e.target.value)} disabled={busy || !freeLicences}>
+                  <option value="">{freeLicences === null ? "Loading…" : freeLicences.length ? "Choose a free licence…" : "No other licence is free at this time"}</option>
+                  {(freeLicences ?? []).map((l) => (
+                    <option key={l.licence_id} value={l.licence_id} disabled={!l.is_mock && !l.has_zoom}>
+                      {l.label}{l.is_mock ? " (mock)" : ""}{!l.is_mock && !l.has_zoom ? " (no Zoom user set)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button disabled={!moveTo || busy} onClick={moveLicence}>Move</button>
+            </div>
+            <p className="muted small">Moving creates a new meeting, so the join link changes.</p>
+            <div className="manage-row">
+              <label>Last session date
+                <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} disabled={busy} />
+              </label>
+              <button className="danger" disabled={!endDate || busy} onClick={endOnDate}>Set end date</button>
+            </div>
+            <p className="muted small">Sessions carry on with the same link until that date. Today's date ends it now.</p>
           </div>
         )}
 
@@ -764,7 +890,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete }) {
               {data.licences.filter((l) => l.active).map((l) => <option key={l.id} value={l.id}>{l.label}{l.is_mock ? " (mock)" : ""}</option>)}
             </select>
           </label>
-          {live && <p className="muted small">The licence can't change while a circle is live. To move licence, end the circle and add it again.</p>}
+          {live && <p className="muted small">To change the licence of a live circle, use <b>Move to another licence</b> above.</p>}
           <label>Notes<textarea rows="3" value={f.notes} onChange={set("notes")} disabled={!editable} /></label>
           {live && <p className="hint">Changing the day, time or length moves the existing Zoom meeting. The join link stays the same, and the facilitator is emailed the update.</p>}
           {editable && (
@@ -802,9 +928,14 @@ function Detail({ label, value, copy, note }) {
 /* ---------------- Licences ---------------- */
 function Licences({ data, run, notify }) {
   const [rows, setRows] = useState(data.licences);
-  useEffect(() => setRows(data.licences), [data.licences]);
+  // Keep unsaved edits when data reloads after another action.
+  useEffect(() => setRows((prev) => data.licences.map((l) => prev.find((p) => p.id === l.id && p._dirty) ?? l)), [data.licences]);
   const edit = (id, k, v) => setRows(rows.map((r) => (r.id === id ? { ...r, [k]: v, _dirty: true } : r)));
-  const booked = (id) => data.circles.filter((c) => c.licence_id === id && ACTIVE.includes(c.status)).length;
+  const booked = (id) => data.circles.filter((c) => c.licence_id === id && [...ACTIVE, "paused"].includes(c.status)).length;
+  const nextLabel = () => {
+    const used = new Set(rows.map((r) => r.label));
+    for (let i = 1; ; i++) { const l = `Licence ${String(i).padStart(2, "0")}`; if (!used.has(l)) return l; }
+  };
   const dirty = rows.some((r) => r._dirty);
 
   async function saveAll() {
@@ -835,7 +966,7 @@ function Licences({ data, run, notify }) {
         <h2>Zoom licences</h2>
         <div className="filters">
           <button onClick={() => run(async () => {
-            const { error } = await supabase.from("licences").insert({ label: `Licence ${String(rows.length + 1).padStart(2, "0")}`, sort_order: rows.length + 1 });
+            const { error } = await supabase.from("licences").insert({ label: nextLabel(), sort_order: Math.max(0, ...rows.map((r) => r.sort_order ?? 0)) + 1 });
             if (error) throw error;
           }, "Licence added")}>Add licence</button>
           <button onClick={() => run(() => adminAction("sync_licences"), (o) => o.results.map((r) => `${r.label}: ${r.ok ? (r.licensed ? "ok" : "found, but not a licensed user") : r.error}`).join(" · ") || "No licences have a Zoom email yet")}>Check with Zoom</button>
@@ -872,20 +1003,44 @@ function Licences({ data, run, notify }) {
 
 /* ---------------- Requests ---------------- */
 // What "Apply" does for each request type. Types without an entry are handled by hand.
+const today = () => new Date().toISOString().slice(0, 10);
 const APPLY = {
   change_time: { label: "Apply new time", confirm: (r, c) => `Move "${c.name}" to ${requestSummary(r.request_type, r.details).replace(/^Move to /, "")}?${c.status === "live" ? " The Zoom link stays the same." : ""}` },
   change_start: { label: "Apply start date", confirm: (r, c) => `Change the start date of "${c.name}" to ${fmtDate(r.details.from)}?` },
   handover: { label: "Hand over", confirm: (r, c) => `Hand "${c.name}" over to ${r.details.name || r.details.email}?${c.status === "live" ? " They'll be invited and emailed the details." : ""}` },
-  stop: { label: "End circle", confirm: (r, c) => `End "${c.name}"?${c.status === "live" ? " This deletes its Zoom meeting." : ""}` },
+  stop: { label: "Set end date", confirm: (r, c) => r.details.from && r.details.from > today()
+    ? `Make ${fmtDate(r.details.from)} the last date for "${c.name}"? Sessions continue until then.`
+    : `End "${c.name}" now?${c.status === "live" ? " This deletes its Zoom meeting." : ""}` },
 };
+
+// Why a request can't be applied right now (or null if it can).
+function blockedReason(r, c) {
+  const d = r.details ?? {};
+  if (!c) return "Circle not found";
+  if (c.status === "ended") return "Circle has ended";
+  if (r.request_type === "change_time") {
+    if (!d.weekday || !d.start_time) return "Request is missing the day or time";
+    // A live circle can't change from a future date without cancelling the sessions before it.
+    if (c.status === "live" && d.from && d.from > today()) return `Due on ${fmtDate(d.from)}: apply on or after that date`;
+  }
+  if (r.request_type === "change_start") {
+    if (!d.from) return "Request is missing the date";
+    if (c.status === "live" && c.starts_on && c.starts_on <= today()) return "Already running, so the start date can't change";
+  }
+  if (r.request_type === "handover" && !d.email) return "Request is missing the new facilitator's email";
+  return null;
+}
 
 async function applyRequest(r, c) {
   const d = r.details ?? {};
   const live = c.status === "live";
   if (r.request_type === "change_time") {
-    const patch = { weekday: Number(d.weekday), start_time: d.start_time, ...(d.from ? { preferred_start: d.from } : {}) };
+    const patch = { weekday: Number(d.weekday), start_time: d.start_time };
     if (live) return adminAction("reschedule", c.id, { patch });
-    const { error } = await supabase.from("circles").update(patch).eq("id", c.id);
+    // Not live yet: release the licence and re-allocate at the new time.
+    const { error } = await supabase.from("circles")
+      .update({ ...patch, ...(d.from ? { preferred_start: d.from } : {}), licence_id: null, status: "pending", conflict_reason: null })
+      .eq("id", c.id);
     if (error) throw error;
     const { error: e2 } = await supabase.rpc("allocate_circle", { p_circle: c.id });
     if (e2) throw e2;
@@ -898,7 +1053,7 @@ async function applyRequest(r, c) {
     return;
   }
   if (r.request_type === "handover") return adminAction("handover", c.id, { facilitator: { name: d.name, email: d.email } });
-  if (r.request_type === "stop") return adminAction("cancel", c.id);
+  if (r.request_type === "stop") return adminAction("end_on", c.id, { date: d.from || today() });
 }
 
 function Requests({ data, run, onSelect }) {
@@ -935,15 +1090,17 @@ function Requests({ data, run, onSelect }) {
       <div className="list">
         {rows.map((r) => {
           const c = circleOf(r);
-          const canApply = r.status === "open" && APPLY[r.request_type] && c && c.status !== "ended";
+          const blocked = r.status === "open" && APPLY[r.request_type] ? blockedReason(r, c) : null;
+          const canApply = r.status === "open" && APPLY[r.request_type] && !blocked;
           return (
             <div key={r.id} className={`row ${r.status !== "open" ? "row-done" : ""}`}>
-              <div className="row-main" onClick={() => onSelect(r.circle_id)}>
+              <div className="row-main" role="button" tabIndex={0} onClick={() => onSelect(r.circle_id)} onKeyDown={(e) => e.key === "Enter" && onSelect(r.circle_id)}>
                 <div className="row-title">
                   {r.circle?.name}
                   <span className="tag info">{REQUEST_TYPES[r.request_type]?.label ?? "Request"}</span>
                 </div>
                 <div className="request-msg">{r.message}</div>
+                {blocked && <div className="small warn-text">{blocked}</div>}
                 {c && r.request_type === "change_time" && (
                   <div className="muted small">Currently {DAY_NAMES[c.weekday]}s {hhmm(c.start_time)} ({tzName(c.timezone)} time)</div>
                 )}
@@ -978,15 +1135,17 @@ function Settings({ data, run }) {
   const loadAdmins = () => supabase.from("admin_emails").select("*").order("email").then(({ data: d }) => setAdmins(d ?? []));
   useEffect(() => { loadAdmins(); }, []);
 
+  // One transaction: if the new buffer or term dates would create a clash, nothing is saved.
   const save = () => run(async () => {
-    const { error } = await supabase.from("settings").update({
-      buffer_minutes: Number(s.buffer_minutes), default_duration_min: Number(s.default_duration_min),
-      default_timezone: s.default_timezone, term_start: s.term_start || null, term_end: s.term_end || null,
-      updated_at: new Date().toISOString(),
-    }).eq("id", 1);
-    if (error) throw error;
-    const { error: e2 } = await supabase.rpc("recompute_slots");
-    if (e2) throw new Error(/no_licence_clash/.test(e2.message) ? "Saved settings, but the new buffer causes a clash on an existing licence. Reduce the buffer or move a circle." : e2.message);
+    const { error } = await supabase.rpc("save_settings", {
+      p_buffer: Number(s.buffer_minutes), p_duration: Number(s.default_duration_min), p_timezone: s.default_timezone,
+      p_term_start: s.term_start || null, p_term_end: s.term_end || null,
+    });
+    if (error) {
+      throw new Error(/no_licence_clash/.test(error.message)
+        ? "Not saved: with these settings two circles on the same licence would overlap. Reduce the buffer or move a circle first."
+        : error.message);
+    }
   }, "Settings saved");
 
   const demoCount = data.circles.filter((c) => c.is_demo).length;

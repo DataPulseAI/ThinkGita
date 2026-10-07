@@ -27,7 +27,10 @@ Supabase project: `rxvehsmunykipwevtpmb`.
 - Each circle takes a weekly slot: day, start time, length, plus a buffer (default 15 minutes) so overruns don't collide.
 - The allocator gives it the first active licence that is free for that slot. If none is free the circle is marked **No licence free** and the dashboard suggests the nearest free start times.
 - A database constraint makes double-booking a licence impossible, even if two forms arrive at once.
-- Live circles are never moved automatically. To change a live circle's time, end it and add it again.
+- Live circles are never moved automatically. Changing a live circle's day or time moves its Zoom meeting (same link). "Move to another licence" creates a new meeting on the new licence (new link, facilitator emailed).
+- A circle occupies every UK time it will have across its run, so clock-change weeks (US, Australia) and Sunday-night/Monday-morning overlaps are checked too.
+- When capacity frees up (a circle ends, is rejected, deleted or moved, or a licence is added), clashes are re-checked automatically.
+- Finished circles (past their end date) are closed every night at 02:15 UTC and release their licence.
 
 ## Roles
 

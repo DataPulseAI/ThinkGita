@@ -1,5 +1,6 @@
 // Admin-only actions that touch Zoom and email.
-// POST { action: "provision" | "cancel" | "resend" | "reschedule" | "handover" | "sync_licences", circle_id?, patch?, facilitator? }
+// POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences",
+//        circle_id?, patch?, facilitator?, date?, licence_id? }
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -27,17 +28,20 @@ const DAY_NAMES = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "
 
 // ---------- Zoom ----------
 let zoomToken: string | null = null;
+let zoomTokenExpires = 0;
 async function zoom(path: string, init: RequestInit = {}) {
   if (!ZOOM_ACCOUNT_ID || !ZOOM_CLIENT_ID || !ZOOM_CLIENT_SECRET) {
     throw new Error("Zoom credentials are not configured (ZOOM_ACCOUNT_ID, ZOOM_CLIENT_ID, ZOOM_CLIENT_SECRET)");
   }
-  if (!zoomToken) {
+  if (!zoomToken || Date.now() > zoomTokenExpires) {
     const r = await fetch(
       `https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${ZOOM_ACCOUNT_ID}`,
       { method: "POST", headers: { Authorization: "Basic " + btoa(`${ZOOM_CLIENT_ID}:${ZOOM_CLIENT_SECRET}`) } },
     );
     if (!r.ok) throw new Error(`Zoom auth failed: ${r.status} ${await r.text()}`);
-    zoomToken = (await r.json()).access_token;
+    const t = await r.json();
+    zoomToken = t.access_token;
+    zoomTokenExpires = Date.now() + ((t.expires_in ?? 3600) - 120) * 1000;
   }
   const r = await fetch(`https://api.zoom.us/v2${path}`, {
     ...init,
@@ -65,25 +69,30 @@ function weeksBetween(a: string, b: string) {
 }
 
 // ---------- Email ----------
+// Everything interpolated into email HTML is escaped (names come from a public form).
+const esc = (v: unknown) =>
+  String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]!));
 async function sendDetailsEmail(circle: any, facilitator: any, licence: any) {
   if (!RESEND_API_KEY || !EMAIL_FROM) return "skipped (RESEND_API_KEY / EMAIL_FROM not set)";
-  const when = `${DAY_NAMES[circle.weekday]}s at ${circle.start_time.slice(0, 5)} (${circle.timezone})`;
+  if (!facilitator?.email) return "skipped (no facilitator)";
+  const when = `${DAY_NAMES[circle.weekday]}s at ${String(circle.start_time).slice(0, 5)} (${circle.timezone})`;
+  const hostKey = licence?.host_key;
   const html = `
-    <p>Hi ${facilitator.name},</p>
-    <p>Your circle <b>${circle.name}</b> is set up on Zoom. It runs every ${when} for ${circle.duration_min} minutes,
-    from ${circle.starts_on} until ${circle.ends_on ?? "further notice"}.</p>
-    <p><b>Join link:</b> <a href="${circle.join_url}">${circle.join_url}</a><br/>
-    <b>Meeting ID:</b> ${circle.zoom_meeting_id}<br/>
-    <b>Passcode:</b> ${circle.passcode ?? "none"}<br/>
-    <b>Host key:</b> ${licence.host_key ?? "ask the ThinkGita team"}</p>
+    <p>Hi ${esc(facilitator?.name)},</p>
+    <p>Your circle <b>${esc(circle.name)}</b> is set up on Zoom. It runs every ${esc(when)} for ${esc(circle.duration_min)} minutes,
+    from ${esc(circle.starts_on)} until ${esc(circle.ends_on ?? "further notice")}.</p>
+    <p><b>Join link:</b> <a href="${esc(circle.join_url)}">${esc(circle.join_url)}</a><br/>
+    <b>Meeting ID:</b> ${esc(circle.zoom_meeting_id)}<br/>
+    <b>Passcode:</b> ${esc(circle.passcode ?? "none")}<br/>
+    <b>Host key:</b> ${esc(hostKey ?? "ask the ThinkGita team")} (private: for you only, never share it)</p>
     <p>To run the session: join with the link, open <i>Participants</i>, choose <i>Claim host</i> and enter the host key.
     The link stays the same every week, so you can pin it in your WhatsApp group.</p>
-    ${APP_URL ? `<p>You can always see these details at <a href="${APP_URL}">${APP_URL}</a> by signing in with this email address.</p>` : ""}
+    ${APP_URL ? `<p>You can always see these details at <a href="${esc(APP_URL)}">${esc(APP_URL)}</a> by signing in with this email address.</p>` : ""}
     <p>Thank you for leading a circle.</p>`;
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: EMAIL_FROM, to: facilitator.email, subject: `Your circle: ${circle.name}`, html }),
+    body: JSON.stringify({ from: EMAIL_FROM, to: facilitator.email, subject: `Your circle: ${String(circle.name).replace(/[\r\n]/g, " ")}`, html }),
   });
   return r.ok ? "sent" : `failed: ${r.status} ${await r.text()}`;
 }
@@ -122,10 +131,18 @@ function mockMeeting() {
 // ---------- Actions ----------
 async function provision(circleId: string, actor: string) {
   const c = await loadCircle(circleId);
-  if (!["pending", "approved"].includes(c.status)) throw new Error(`Circle is ${c.status}, not pending`);
+  if (c.status !== "pending") throw new Error(c.status === "approved" ? "This circle is already being approved" : `Circle is ${c.status}, not awaiting approval`);
   if (!c.licence) throw new Error("Circle has no licence assigned");
+  if (!c.licence.active) throw new Error(`${c.licence.label} is inactive. Re-check licences first.`);
   if (!c.licence.is_mock && !c.licence.zoom_user_email) throw new Error(`${c.licence.label} has no Zoom user email set`);
   if (!c.facilitator) throw new Error("Circle has no facilitator");
+
+  // Claim the circle so a double click can't create two Zoom meetings.
+  const { data: claimed } = await db.from("circles").update({ status: "approved" })
+    .eq("id", c.id).eq("status", "pending").select("id");
+  if (!claimed?.length) throw new Error("This circle is already being approved");
+  const release = () => db.from("circles").update({ status: "pending" }).eq("id", c.id).eq("status", "approved");
+  try {
 
   const { data: s } = await db.from("settings").select("*").eq("id", 1).single();
   const today = isoDate(new Date());
@@ -139,6 +156,7 @@ async function provision(circleId: string, actor: string) {
   };
   let endsOn: string | null = null;
   if (s.term_end) {
+    if (s.term_end < startsOn) throw new Error("The term ends before this circle's first session. Check the term dates in Settings.");
     if (weeksBetween(startsOn, s.term_end) > MAX_OCCURRENCES) {
       throw new Error(`Term is longer than ${MAX_OCCURRENCES} weeks; shorten term_end in Settings`);
     }
@@ -186,12 +204,20 @@ async function provision(circleId: string, actor: string) {
     .eq("id", c.id)
     .select("*")
     .single();
-  if (error) throw new Error(`Meeting ${meeting.id} created but saving failed: ${error.message}`);
+  if (error) {
+    // Don't leave an orphan Zoom meeting behind.
+    if (!c.licence.is_mock) await zoom(`/meetings/${meeting.id}`, { method: "DELETE" }).catch(() => {});
+    throw new Error(`Saving failed, so the Zoom meeting was removed again: ${error.message}`);
+  }
 
   const invite = await inviteFacilitator(c.facilitator.email);
   const email = await sendDetailsEmail(updated, c.facilitator, c.licence);
   await audit(actor, "provision", c.id, { meeting_id: meeting.id, invite, email, mock: Boolean(c.licence.is_mock) });
   return { status: "live", meeting_id: meeting.id, join_url: meeting.join_url, invite, email, mock: Boolean(c.licence.is_mock) };
+  } catch (e) {
+    await release();
+    throw e;
+  }
 }
 
 async function cancel(circleId: string, actor: string) {
@@ -229,12 +255,13 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
   const { data: updated, error } = await db.from("circles").update(clean).eq("id", c.id).select("*").single();
   if (error) {
     throw new Error(/no_licence_clash/.test(error.message)
-      ? `That time clashes with another circle on ${c.licence?.label}. Pick another time, or end the circle and add it again to use a different licence.`
+      ? `That time clashes with another circle on ${c.licence?.label}. Pick another time, or move the circle to another licence first.`
       : error.message);
   }
 
   const today = isoDate(new Date());
-  const from = [today, updated.preferred_start].filter(Boolean).sort().pop() as string;
+  // Never pull a not-yet-started circle earlier than planned.
+  const from = [today, updated.preferred_start, c.starts_on].filter(Boolean).sort().pop() as string;
   const startsOn = firstOccurrence(from, updated.weekday);
 
   if (!c.licence?.is_mock && c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
@@ -268,10 +295,14 @@ async function handover(circleId: string, actor: string, person: { name?: string
   const email = String(person?.email ?? "").trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("A valid email for the new facilitator is needed");
   const c = await loadCircle(circleId);
-  const { data: fac, error } = await db.from("facilitators")
-    .upsert({ email, name: person?.name?.trim() || email }, { onConflict: "email" })
-    .select("*").single();
-  if (error) throw new Error(error.message);
+  // Reuse an existing facilitator as-is; only create one if new.
+  let { data: fac } = await db.from("facilitators").select("*").eq("email", email).maybeSingle();
+  if (!fac) {
+    const { data: created, error } = await db.from("facilitators")
+      .insert({ email, name: person?.name?.trim() || email }).select("*").single();
+    if (error) throw new Error(error.message);
+    fac = created;
+  }
   await db.from("circles").update({ facilitator_id: fac.id }).eq("id", c.id);
   let invite = "not needed yet (circle not live)";
   let sent = "";
@@ -281,6 +312,81 @@ async function handover(circleId: string, actor: string, person: { name?: string
   }
   await audit(actor, "handover", c.id, { from: c.facilitator?.email, to: email, invite, email: sent });
   return { invite, email: sent };
+}
+
+// End a circle on a given date: the Zoom series stops after that date (same link until then).
+// A date today or earlier ends it now.
+async function endOn(circleId: string, actor: string, date: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date ?? ""))) throw new Error("A valid end date is needed");
+  const today = isoDate(new Date());
+  if (date <= today) return cancel(circleId, actor);
+  const c = await loadCircle(circleId);
+  if (c.status !== "live") {
+    await db.from("circles").update({ ends_on: date }).eq("id", c.id);
+    await audit(actor, "end_on", c.id, { date });
+    return { status: c.status, ends_on: date };
+  }
+  if (!c.licence?.is_mock && c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
+    await zoom(`/meetings/${c.zoom_meeting_id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        recurrence: { type: 2, repeat_interval: 1, weekly_days: String((c.weekday % 7) + 1), end_date_time: `${date}T23:59:00Z` },
+      }),
+    });
+  }
+  await db.from("circles").update({ ends_on: date }).eq("id", c.id);
+  await audit(actor, "end_on", c.id, { date });
+  return { status: "live", ends_on: date };
+}
+
+// Move a LIVE circle to another licence: new meeting on the new licence's Zoom user,
+// facilitator emailed the new link, old meeting deleted. The join link changes.
+async function moveLicence(circleId: string, actor: string, licenceId: string) {
+  const c = await loadCircle(circleId);
+  if (c.status !== "live") throw new Error("Only live circles are moved here; for others pick the licence in the circle panel");
+  const { data: target } = await db.from("licences").select("*").eq("id", licenceId).maybeSingle();
+  if (!target) throw new Error("Choose a licence to move to");
+  if (!target.active) throw new Error(`${target.label} is inactive`);
+  if (!target.is_mock && !target.zoom_user_email) throw new Error(`${target.label} has no Zoom user email set`);
+
+  const { error: moveErr } = await db.from("circles").update({ licence_id: target.id }).eq("id", c.id);
+  if (moveErr) {
+    throw new Error(/no_licence_clash/.test(moveErr.message) ? `${target.label} is already booked at this circle's time` : moveErr.message);
+  }
+
+  const today = isoDate(new Date());
+  const from = [today, c.starts_on].filter(Boolean).sort().pop() as string;
+  const startsOn = firstOccurrence(from, c.weekday);
+  const recurrence: Record<string, unknown> = { type: 2, repeat_interval: 1, weekly_days: String((c.weekday % 7) + 1) };
+  if (c.ends_on) recurrence.end_date_time = `${c.ends_on}T23:59:00Z`;
+  else recurrence.end_times = MAX_OCCURRENCES;
+
+  let meeting;
+  try {
+    meeting = target.is_mock ? mockMeeting() : await zoom(`/users/${encodeURIComponent(target.zoom_user_email)}/meetings`, {
+      method: "POST",
+      body: JSON.stringify({
+        topic: c.name, type: 8, start_time: `${startsOn}T${String(c.start_time).slice(0, 5)}:00`,
+        timezone: c.timezone, duration: c.duration_min, recurrence,
+        settings: { join_before_host: true, jbh_time: 0, waiting_room: false, mute_upon_entry: true,
+          host_video: false, participant_video: false, approval_type: 2, auto_recording: "none" },
+      }),
+    });
+  } catch (e) {
+    await db.from("circles").update({ licence_id: c.licence_id }).eq("id", c.id);
+    throw e;
+  }
+
+  const { data: updated } = await db.from("circles").update({
+    zoom_meeting_id: String(meeting.id), join_url: meeting.join_url, passcode: meeting.password ?? null, starts_on: startsOn,
+  }).eq("id", c.id).select("*").single();
+
+  if (c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
+    await zoom(`/meetings/${c.zoom_meeting_id}`, { method: "DELETE" }).catch(() => {});
+  }
+  const email = await sendDetailsEmail(updated, c.facilitator, target);
+  await audit(actor, "move_licence", c.id, { from: c.licence?.label, to: target.label, old_meeting: c.zoom_meeting_id, new_meeting: meeting.id, email });
+  return { licence: target.label, join_url: meeting.join_url, email };
 }
 
 async function syncLicences(actor: string) {
@@ -314,7 +420,7 @@ Deno.serve(async (req) => {
   if (!admin) return json({ error: "Admins only" }, 403);
 
   try {
-    const { action, circle_id, patch, facilitator } = await req.json();
+    const { action, circle_id, patch, facilitator, date, licence_id } = await req.json();
     switch (action) {
       case "provision": return json(await provision(circle_id, email));
       case "cancel": return json(await cancel(circle_id, email));
@@ -322,6 +428,8 @@ Deno.serve(async (req) => {
       case "sync_licences": return json(await syncLicences(email));
       case "reschedule": return json(await reschedule(circle_id, email, patch));
       case "handover": return json(await handover(circle_id, email, facilitator));
+      case "end_on": return json(await endOn(circle_id, email, date));
+      case "move_licence": return json(await moveLicence(circle_id, email, licence_id));
       default: return json({ error: `Unknown action ${action}` }, 400);
     }
   } catch (e) {
