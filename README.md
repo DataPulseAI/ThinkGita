@@ -55,7 +55,7 @@ Supabase project: `rxvehsmunykipwevtpmb`.
    - [marketplace.zoom.us](https://marketplace.zoom.us) → Develop → Build App → **Server-to-Server OAuth App**. Name it "ThinkGita Circles".
    - Scopes (Add Scopes):
      - Meeting: `meeting:write:meeting:admin` (create), `meeting:update:meeting:admin` (change time or end date), `meeting:delete:meeting:admin` (cancel), `meeting:read:meeting:admin`.
-     - User: `user:read:user:admin` (Check with Zoom, reads each licence's host key).
+     - User: `user:read:list_users:admin` (Sync from Zoom lists the account's users) and `user:read:user:admin` (reads each user's host key).
      - Older Zoom accounts show classic scopes instead: `meeting:write:admin`, `meeting:read:admin`, `user:read:admin`.
    - Fill in the required Information page (name, contact email), then **Activate**. The app only works once activated.
    - Copy Account ID, Client ID and Client Secret straight into Supabase secrets (step 4). Don't paste them in chat or email.
@@ -80,7 +80,7 @@ Supabase project: `rxvehsmunykipwevtpmb`.
    - Submissions that can't be read (no email, unreadable day or time) show up in Settings → Activity as `intake_failed`. Tally's webhook page also shows each delivery and its response.
    - Rotate the Tally API key that was shared in chat. The webhook doesn't need it.
 6. **Dashboard**
-   - Licences: enter each licensed Zoom user's email and host key, Save, then **Check with Zoom**.
+   - Licences: click **Sync from Zoom**. Every licensed user in the Zoom account becomes a licence with its email and host key (labels are kept). Untick Active on any user who shouldn't host circles, such as the account owner.
    - Settings: set term start and end dates (meetings repeat weekly between them, max 50 weeks), confirm buffer and default length, add Niraj and team as admins (then invite them in Supabase Auth).
 7. **Test end to end, then clear demo data**
    - Submit the Tally form with your own details, approve it in Queue, check the Zoom meeting and email arrive, sign in as that email to see the facilitator view.
@@ -97,9 +97,10 @@ Supabase project: `rxvehsmunykipwevtpmb`.
 ## Facilitator emails
 
 - Edited in the dashboard's **Emails** tab: the approval email, and a "details changed" email sent when a live circle's time or licence changes. Plain text with `{{placeholders}}`; click a placeholder to insert it. Lines in CAPITALS become headings and links become clickable. The preview uses a real circle, and **Send test to me** emails the current draft to you.
-- Shared links and contacts (YouTube playlist, Drive folder, participant sign-up link, support contact, sender name) are set at the top of the Emails tab. In the sign-up link, `{circle_code}` becomes each circle's short code. Each circle's WhatsApp group link, and any per-circle overrides, are set in that circle's drawer.
-- Before approving, the drawer and Queue warn about any placeholder with no value; blanks are sent as "to follow".
-- `{{zoom_password}}` sends the licence's login password (set per licence, admins only). Anyone with it can sign in to the whole licence, so `{{host_key}}` is the safer option.
+- Shared links (Google Drive folder, support contact, optional default YouTube playlist) are set at the top of the Emails tab.
+- **Approving asks for the circle's WhatsApp group link and YouTube playlist**, since those are created per circle at that point. Anything still blank is sent as "to follow".
+- Emails are signed by the admin who sends them: set your name under Settings → Admins (the approve dialog also asks the first time).
+- Facilitators get the licence **host key**, never the licence password: they join with the meeting link and use Claim host.
 - The renderer lives in `app/src/emailTemplate.js` and is copied to `supabase/functions/provision-circle/template.ts`, so the preview and the sent email match. Edit the app file, then copy it over.
 
 ## Local development

@@ -83,12 +83,17 @@ async function sendEmail(to: string, subject: string, html: string, text: string
   });
   return r.ok ? "sent" : `failed: ${r.status} ${await r.text()}`;
 }
-async function sendDetailsEmail(key: TemplateKey, circle: any, facilitator: any, licence: any) {
+// The admin who triggers an email signs it (their name under Settings > Admins).
+async function adminName(email: string) {
+  const { data } = await db.from("admin_emails").select("name").eq("email", email).maybeSingle();
+  return data?.name ?? "";
+}
+async function sendDetailsEmail(key: TemplateKey, circle: any, facilitator: any, licence: any, actor: string) {
   if (!RESEND_API_KEY || !EMAIL_FROM) return "skipped (RESEND_API_KEY / EMAIL_FROM not set)";
   if (!facilitator?.email) return "skipped (no facilitator)";
   const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
   const template = await loadTemplate(key);
-  const vars = buildVars({ circle, facilitator, licence, settings, appUrl: APP_URL });
+  const vars = buildVars({ circle, facilitator, licence, settings, appUrl: APP_URL, sender: await adminName(actor) });
   const { subject, html, text } = render(template, vars);
   return await sendEmail(facilitator.email, subject, html, text);
 }
@@ -99,7 +104,7 @@ async function testEmail(circleId: string, actor: string, key: TemplateKey, draf
   const c = await loadCircle(circleId);
   const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
   const template = draft?.subject != null && draft?.body != null ? draft : await loadTemplate(key);
-  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: c.licence, settings, appUrl: APP_URL });
+  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: c.licence, settings, appUrl: APP_URL, sender: await adminName(actor) });
   const { subject, html, text } = render(template as { subject: string; body: string }, vars);
   const result = await sendEmail(actor, `[TEST] ${subject}`, html, text);
   if (result !== "sent") throw new Error(`Test email ${result}`);
@@ -221,7 +226,7 @@ async function provision(circleId: string, actor: string) {
   }
 
   const invite = await inviteFacilitator(c.facilitator.email);
-  const email = await sendDetailsEmail("approved", updated, c.facilitator, c.licence);
+  const email = await sendDetailsEmail("approved", updated, c.facilitator, c.licence, actor);
   await audit(actor, "provision", c.id, { meeting_id: meeting.id, invite, email, mock: Boolean(c.licence.is_mock) });
   return { status: "live", meeting_id: meeting.id, join_url: meeting.join_url, invite, email, mock: Boolean(c.licence.is_mock) };
   } catch (e) {
@@ -247,7 +252,7 @@ async function cancel(circleId: string, actor: string) {
 async function resend(circleId: string, actor: string) {
   const c = await loadCircle(circleId);
   if (c.status !== "live") throw new Error("Only live circles have details to send");
-  const email = await sendDetailsEmail("approved", c, c.facilitator, c.licence);
+  const email = await sendDetailsEmail("approved", c, c.facilitator, c.licence, actor);
   await audit(actor, "resend", c.id, { email });
   return { email };
 }
@@ -295,7 +300,7 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
   }
 
   const { data: final } = await db.from("circles").update({ starts_on: startsOn }).eq("id", c.id).select("*").single();
-  const email = await sendDetailsEmail("updated", final, c.facilitator, c.licence);
+  const email = await sendDetailsEmail("updated", final, c.facilitator, c.licence, actor);
   await audit(actor, "reschedule", c.id, { from: old, to: clean, email });
   return { status: "live", starts_on: startsOn, email };
 }
@@ -318,7 +323,7 @@ async function handover(circleId: string, actor: string, person: { name?: string
   let sent = "";
   if (c.status === "live") {
     invite = await inviteFacilitator(email);
-    sent = await sendDetailsEmail("approved", c, fac, c.licence);
+    sent = await sendDetailsEmail("approved", c, fac, c.licence, actor);
   }
   await audit(actor, "handover", c.id, { from: c.facilitator?.email, to: email, invite, email: sent });
   return { invite, email: sent };
@@ -394,27 +399,78 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
   if (c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
     await zoom(`/meetings/${c.zoom_meeting_id}`, { method: "DELETE" }).catch(() => {});
   }
-  const email = await sendDetailsEmail("updated", updated, c.facilitator, target);
+  const email = await sendDetailsEmail("updated", updated, c.facilitator, target, actor);
   await audit(actor, "move_licence", c.id, { from: c.licence?.label, to: target.label, old_meeting: c.zoom_meeting_id, new_meeting: meeting.id, email });
   return { licence: target.label, join_url: meeting.join_url, email };
 }
 
+// Pull every licensed Zoom user into Licences: existing licences are matched by Zoom user ID or email
+// and get their host key refreshed; new users fill empty licence slots (labels kept) or get a new licence.
+// Nothing is deleted or deactivated: licences whose Zoom user wasn't found are reported instead.
 async function syncLicences(actor: string) {
-  const { data: licences } = await db.from("licences").select("*").not("zoom_user_email", "is", null);
-  const results = [];
-  for (const l of licences ?? []) {
-    try {
-      const u = await zoom(`/users/${encodeURIComponent(l.zoom_user_email)}`);
-      const patch: Record<string, unknown> = { zoom_user_id: u.id };
-      if (u.host_key) patch.host_key = u.host_key;
-      await db.from("licences").update(patch).eq("id", l.id);
-      results.push({ label: l.label, ok: true, licensed: u.type === 2, host_key: Boolean(u.host_key) });
-    } catch (e) {
-      results.push({ label: l.label, ok: false, error: String(e) });
+  const users: any[] = [];
+  let token = "";
+  do {
+    const page = await zoom(`/users?status=active&page_size=300${token ? `&next_page_token=${encodeURIComponent(token)}` : ""}`)
+      .catch((e) => {
+        throw new Error(/4711|scope|invalid access token/i.test(String(e))
+          ? "The Zoom app can't list users. Add the user:read:list_users:admin scope (or user:read:admin) and re-activate the app."
+          : String(e));
+      });
+    users.push(...(page?.users ?? []));
+    token = page?.next_page_token ?? "";
+  } while (token);
+  const licensed = users.filter((u) => u.type === 2);
+
+  const { data: rows } = await db.from("licences").select("*").order("sort_order").order("label");
+  const licences = rows ?? [];
+  const results: Record<string, unknown>[] = [];
+  const used = new Set<string>();
+  let nextSort = Math.max(0, ...licences.map((l) => l.sort_order ?? 0)) + 1;
+  const labels = new Set(licences.map((l) => l.label));
+  const newLabel = () => {
+    for (let i = 1; ; i++) { const l = `Licence ${String(i).padStart(2, "0")}`; if (!labels.has(l)) { labels.add(l); return l; } }
+  };
+
+  for (const u of licensed) {
+    const email = String(u.email).toLowerCase();
+    const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.display_name || "";
+    let hostKey: string | null = null;
+    try { hostKey = (await zoom(`/users/${encodeURIComponent(u.id)}`))?.host_key ?? null; } catch { /* reported below */ }
+    const patch: Record<string, unknown> = { zoom_user_id: u.id, zoom_user_email: email };
+    if (hostKey) patch.host_key = hostKey;
+
+    let match = licences.find((l) => !used.has(l.id) && (l.zoom_user_id === u.id || (l.zoom_user_email ?? "").toLowerCase() === email));
+    let action = "updated";
+    if (!match) {
+      match = licences.find((l) => !used.has(l.id) && !l.zoom_user_email && !l.zoom_user_id && !l.is_mock);
+      action = "linked to an empty licence";
+    }
+    if (match) {
+      const { error } = await db.from("licences").update(patch).eq("id", match.id);
+      if (error) { results.push({ label: match.label, email, name, ok: false, error: error.message }); continue; }
+      used.add(match.id);
+      results.push({ label: match.label, email, name, ok: true, action, host_key: Boolean(hostKey) });
+    } else {
+      const label = newLabel();
+      const { data: created, error } = await db.from("licences")
+        .insert({ ...patch, label, sort_order: nextSort++, active: true }).select("id").single();
+      if (error) { results.push({ label, email, name, ok: false, error: error.message }); continue; }
+      used.add(created.id);
+      results.push({ label, email, name, ok: true, action: "added", host_key: Boolean(hostKey) });
     }
   }
-  await audit(actor, "sync_licences", null, results);
-  return { results };
+
+  for (const l of licences) {
+    if (used.has(l.id) || l.is_mock) continue;
+    results.push({
+      label: l.label, email: l.zoom_user_email, ok: false,
+      action: l.zoom_user_email ? "not found as a licensed Zoom user" : "no Zoom user (empty slot)",
+    });
+  }
+  const summary = { zoom_users: users.length, licensed: licensed.length, results };
+  await audit(actor, "sync_licences", null, summary);
+  return summary;
 }
 
 Deno.serve(async (req) => {

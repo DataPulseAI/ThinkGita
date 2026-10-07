@@ -352,3 +352,12 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .email-check { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 6px 0 10px; }
 .secret { display: flex; align-items: center; gap: 6px; }
 .secret input { min-width: 110px; }
+.approve-modal { width: min(480px, 100%); z-index: 41; }
+.approve-modal label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.approve-modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-bg:has(.approve-modal) { z-index: 40; }
+.row .inline input { max-width: 220px; }
+.sync-result { margin-bottom: 12px; }
+.sync-row { display: grid; grid-template-columns: 110px minmax(0, 1.4fr) minmax(0, 1fr); gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.sync-row:last-of-type { border-bottom: 0; }
+@media (max-width: 700px) { .sync-row { grid-template-columns: 1fr; gap: 2px; } }

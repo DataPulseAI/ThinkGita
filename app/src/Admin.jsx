@@ -13,7 +13,7 @@ const APP_URL = window.location.href.split("#")[0];
 // Approval email values still blank for a circle (Zoom details are filled in on approval).
 function emailGaps(c, data) {
   const template = data.templates.approved;
-  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: data.licences.find((l) => l.id === c.licence_id), settings: data.settings, appUrl: APP_URL });
+  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: data.licences.find((l) => l.id === c.licence_id), settings: data.settings, appUrl: APP_URL, sender: data.me?.name });
   return missingValues(template, vars, { beforeApproval: true });
 }
 const placeholderLabel = (k) => PLACEHOLDERS.find((p) => p.key === k)?.label ?? k;
@@ -53,15 +53,17 @@ export default function Admin() {
   const [toast, setToast] = useState(null);
 
   const load = useCallback(async () => {
-    const [circles, licences, settings, requests, log, templates] = await Promise.all([
+    const { data: { user } } = await supabase.auth.getUser();
+    const [circles, licences, settings, requests, log, templates, admins] = await Promise.all([
       supabase.from("circles").select("*, facilitator:facilitators(*), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time"),
       supabase.from("licences").select("*").order("sort_order").order("label"),
       supabase.from("settings").select("*").eq("id", 1).single(),
       supabase.from("change_requests").select("*, circle:circles(name)").order("created_at", { ascending: false }),
       supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(60),
       supabase.from("email_templates").select("*"),
+      supabase.from("admin_emails").select("*").order("email"),
     ]);
-    const err = [circles, licences, settings, requests, log, templates].find((r) => r.error);
+    const err = [circles, licences, settings, requests, log, templates, admins].find((r) => r.error);
     if (err) setToast({ kind: "error", text: err.error.message });
     setData({
       circles: circles.data ?? [],
@@ -69,6 +71,8 @@ export default function Admin() {
       settings: settings.data,
       requests: requests.data ?? [],
       log: log.data ?? [],
+      admins: admins.data ?? [],
+      me: (admins.data ?? []).find((a) => a.email === user?.email?.toLowerCase()) ?? { email: user?.email },
       templates: {
         approved: templates.data?.find((t) => t.key === "approved") ?? { key: "approved", ...DEFAULT_TEMPLATES.approved },
         updated: templates.data?.find((t) => t.key === "updated") ?? { key: "updated", ...DEFAULT_TEMPLATES.updated },
@@ -230,7 +234,7 @@ function SetupChecklist({ data, onTab }) {
     {
       done: real.length > 0 && connected === real.length,
       what: `Connect Zoom licences (${connected} of ${real.length} have a Zoom user and host key)`,
-      how: "Licences tab: add each licensed Zoom user's email and host key, then Check with Zoom.",
+      how: "Licences tab: click Sync from Zoom to bring in every licensed Zoom user with their host key.",
       tab: "Licences",
     },
     {
@@ -390,12 +394,8 @@ function CircleHoverCard({ c }) {
 function Queue({ data, run, onSelect }) {
   const [approving, setApproving] = useState(null);
   const clashes = data.circles.filter((c) => c.status === "conflict").length;
-  async function approveOne(c) {
-    if (!confirmGaps([c], data)) return;
-    setApproving(c.id);
-    await run(() => adminAction("provision", c.id), (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`);
-    setApproving(null);
-  }
+  const [dialog, setDialog] = useState(null);
+  const approveOne = (c) => setDialog(c);
   const items = data.circles
     .filter((c) => c.status === "pending" || c.status === "conflict")
     .sort((a, b) => (a.status === "conflict" ? -1 : 0) - (b.status === "conflict" ? -1 : 0) || ukDay(a) - ukDay(b) || ukStart(a).localeCompare(ukStart(b)));
@@ -441,6 +441,7 @@ function Queue({ data, run, onSelect }) {
 
   return (
     <section className="card">
+      {dialog && <ApproveDialog circle={dialog} data={data} run={run} onBusy={(b) => setApproving(b ? dialog.id : null)} onClose={() => setDialog(null)} />}
       <div className="card-head">
         <h2>Queue</h2>
         <div className="filters">
@@ -717,7 +718,6 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
   const [endDate, setEndDate] = useState("");
   const [showEmail, setShowEmail] = useState(false);
   const gaps = circle && ["pending", "conflict"].includes(circle.status) ? emailGaps(circle, data) : [];
-  const signupDefault = (data.settings.participant_signup_link ?? "").replace(/\{circle_code\}/g, circle ? String(circle.id).slice(0, 8) : "{circle_code}");
 
   // For clashes: who already holds this time. For live circles: which licences it could move to.
   useEffect(() => {
@@ -751,13 +751,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
   }
 
   // Approve straight from the drawer; it stays open and switches to the live Zoom details.
-  async function approve() {
-    if (!confirmGaps([circle], data)) return;
-    setBusy(true);
-    await run(() => adminAction("provision", circle.id),
-      (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`);
-    setBusy(false);
-  }
+  const [approveOpen, setApproveOpen] = useState(false);
+  const approve = () => setApproveOpen(true);
   async function recheck() {
     setBusy(true);
     await run(async () => {
@@ -806,6 +801,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
             <button className="link small" onClick={() => setShowEmail(!showEmail)}>{showEmail ? "Hide email" : "Preview email"}</button>
           </div>
         )}
+        {approveOpen && circle && <ApproveDialog circle={{ ...circle, ...linkFields() }} data={data} run={run} onBusy={setBusy} onClose={() => setApproveOpen(false)} />}
         {showEmail && circle && <div><EmailPreview compact template={data.templates.approved} circle={{ ...circle, ...linkFields() }} data={data} /></div>}
         {circle?.status === "conflict" && (
           <div className="approve-bar warn">
@@ -948,12 +944,9 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
           <fieldset className="group" disabled={!editable}>
             <legend>Links for this circle (used in emails)</legend>
             <label>WhatsApp group link<input type="url" value={f.whatsapp_group_link} onChange={set("whatsapp_group_link")} placeholder="https://chat.whatsapp.com/…" /></label>
-            <label>Participant sign-up link<input type="url" value={f.participant_signup_link} onChange={set("participant_signup_link")} placeholder={signupDefault || "Set a default under Emails"} /></label>
-            <div className="grid2">
-              <label>YouTube playlist<input type="url" value={f.youtube_playlist_link} onChange={set("youtube_playlist_link")} placeholder={data.settings.youtube_playlist_link || "Default from Emails"} /></label>
-              <label>Drive folder<input type="url" value={f.drive_folder_link} onChange={set("drive_folder_link")} placeholder={data.settings.drive_folder_link || "Default from Emails"} /></label>
-            </div>
-            <p className="muted small">Leave sign-up, YouTube and Drive blank to use the defaults set under Emails.</p>
+            <label>YouTube playlist<input type="url" value={f.youtube_playlist_link} onChange={set("youtube_playlist_link")} placeholder={data.settings.youtube_playlist_link || "https://youtube.com/playlist?list=…"} /></label>
+            <label>Drive folder<input type="url" value={f.drive_folder_link} onChange={set("drive_folder_link")} placeholder={data.settings.drive_folder_link || "Default from Emails"} /></label>
+            <p className="muted small">Leave Drive blank to use the shared folder set under Emails.</p>
           </fieldset>
           <label>Notes<textarea rows="3" value={f.notes} onChange={set("notes")} disabled={!editable} /></label>
           {live && <p className="hint">Changing the day, time or length moves the existing Zoom meeting. The join link stays the same, and the facilitator is emailed the update.</p>}
@@ -1001,13 +994,24 @@ function Licences({ data, run, notify }) {
     for (let i = 1; ; i++) { const l = `Licence ${String(i).padStart(2, "0")}`; if (!used.has(l)) return l; }
   };
   const dirty = rows.some((r) => r._dirty);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState(null);
+
+  async function syncFromZoom() {
+    if (dirty && !confirm("You have unsaved licence changes. Sync anyway? Unsaved edits to synced licences may be overwritten.")) return;
+    setSyncing(true);
+    const out = await run(() => adminAction("sync_licences"),
+      (o) => `Zoom: ${o.licensed} licensed user${o.licensed === 1 ? "" : "s"} found`);
+    setSyncing(false);
+    if (out && out !== true) setSyncResult(out);
+  }
 
   async function saveAll() {
     await run(async () => {
       for (const r of rows.filter((x) => x._dirty)) {
         const { error } = await supabase.from("licences").update({
           label: r.label, zoom_user_email: r.zoom_user_email ? r.zoom_user_email.trim().toLowerCase() : null,
-          host_key: r.host_key || null, zoom_password: r.zoom_password || null, active: r.active, is_mock: r.is_mock,
+          host_key: r.host_key || null, active: r.active, is_mock: r.is_mock,
         }).eq("id", r.id);
         if (error) throw error;
       }
@@ -1033,28 +1037,41 @@ function Licences({ data, run, notify }) {
             const { error } = await supabase.from("licences").insert({ label: nextLabel(), sort_order: Math.max(0, ...rows.map((r) => r.sort_order ?? 0)) + 1 });
             if (error) throw error;
           }, "Licence added")}>Add licence</button>
-          <button onClick={() => run(() => adminAction("sync_licences"), (o) => o.results.map((r) => `${r.label}: ${r.ok ? (r.licensed ? "ok" : "found, but not a licensed user") : r.error}`).join(" · ") || "No licences have a Zoom email yet")}>Check with Zoom</button>
+          <button disabled={syncing} onClick={syncFromZoom}>{syncing ? "Syncing…" : "Sync from Zoom"}</button>
           <button className="primary" disabled={!dirty} onClick={saveAll}>{dirty ? "Save changes" : "Saved"}</button>
         </div>
       </div>
       <p className="muted small">
-        Each licence is one licensed Zoom user. Meetings are created under that user, and facilitators get its host key so they can claim host without a password.
+        Each licence is one licensed Zoom user. <b>Sync from Zoom</b> brings in every licensed user in your Zoom account with their email and host key, keeping your labels.
+        Meetings are created under that user, and facilitators get its host key so they can claim host without a password.
         <b> Mock</b> is for testing only: approving a circle on a mock licence creates fake Zoom details.
       </p>
-      <p className="muted small">
-        <b>Login password</b> is only used if an email template includes {"{{zoom_password}}"}. Anyone with it can sign in to the whole licence,
-        including other circles' meetings, so the host key is the safer option. Only admins can see it.
-      </p>
+
+      {syncResult && (
+        <div className="details sync-result">
+          <div className="details-head">
+            <span className="section-title">Last sync: {syncResult.licensed} licensed of {syncResult.zoom_users} Zoom users</span>
+            <button className="link small" onClick={() => setSyncResult(null)}>Hide</button>
+          </div>
+          {syncResult.results.map((r, i) => (
+            <div key={i} className={`sync-row ${r.ok ? "" : "warn-text"}`}>
+              <b>{r.label}</b>
+              <span>{r.email ?? "–"}{r.name ? ` (${r.name})` : ""}</span>
+              <span className="small">{r.ok ? `${r.action}${r.host_key ? "" : ", no host key returned"}` : (r.error ?? r.action)}</span>
+            </div>
+          ))}
+          <p className="muted small">Every licensed Zoom user becomes a licence. If one of them shouldn't host circles (for example the account owner), untick Active. Empty slots with no Zoom user can be deleted once their circles are moved or cleared.</p>
+        </div>
+      )}
       <div className="table-wrap">
         <table className="table edit">
-          <thead><tr><th>Label</th><th>Zoom user email</th><th>Host key</th><th>Login password</th><th>Active</th><th>Mock</th><th>Booked</th><th></th></tr></thead>
+          <thead><tr><th>Label</th><th>Zoom user email</th><th>Host key</th><th>Active</th><th>Mock</th><th>Booked</th><th></th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id} className={r._dirty ? "dirty" : ""}>
                 <td><input value={r.label} onChange={(e) => edit(r.id, "label", e.target.value)} /></td>
                 <td><input value={r.zoom_user_email ?? ""} placeholder={r.is_mock ? "not needed for mock" : "zoom-user@…"} onChange={(e) => edit(r.id, "zoom_user_email", e.target.value)} /></td>
                 <td><input value={r.host_key ?? ""} placeholder="6 digits" onChange={(e) => edit(r.id, "host_key", e.target.value)} /></td>
-                <td><SecretInput value={r.zoom_password ?? ""} placeholder="optional" onChange={(v) => edit(r.id, "zoom_password", v)} /></td>
                 <td><input type="checkbox" checked={r.active} onChange={(e) => edit(r.id, "active", e.target.checked)} /></td>
                 <td><input type="checkbox" checked={r.is_mock} onChange={(e) => edit(r.id, "is_mock", e.target.checked)} /></td>
                 <td>{booked(r.id)}</td>
@@ -1243,6 +1260,7 @@ function Settings({ data, run }) {
           {admins.map((a) => (
             <div key={a.email} className="row">
               <div className="row-main">{a.email}</div>
+              <AdminName admin={a} run={run} onSaved={loadAdmins} />
               <div className="row-actions">
                 <IconButton icon="trash" label={`Remove ${a.email}`} danger disabled={admins.length < 2}
                   title={admins.length < 2 ? "There must be at least one admin" : "Remove admin"}
@@ -1297,20 +1315,10 @@ function Settings({ data, run }) {
 }
 
 /* ---------------- Emails ---------------- */
-function SecretInput({ value, onChange, placeholder }) {
-  const [show, setShow] = useState(false);
-  return (
-    <span className="secret">
-      <input type={show ? "text" : "password"} autoComplete="new-password" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
-      <button type="button" className="link small" onClick={() => setShow(!show)}>{show ? "Hide" : "Show"}</button>
-    </span>
-  );
-}
-
 // Renders a template for one circle, marking anything not set yet.
 function EmailPreview({ template, circle, data, compact }) {
   const licence = data.licences.find((l) => l.id === circle?.licence_id);
-  const vars = buildVars({ circle: circle ?? {}, facilitator: circle?.facilitator, licence, settings: data.settings, appUrl: APP_URL });
+  const vars = buildVars({ circle: circle ?? {}, facilitator: circle?.facilitator, licence, settings: data.settings, appUrl: APP_URL, sender: data.me?.name });
   // Before approval, show where the Zoom details will go instead of flagging them as missing.
   if (circle?.status !== "live") {
     for (const p of PLACEHOLDERS) if (p.auto && !vars[p.key]) vars[p.key] = `[${p.label.toLowerCase()}, added on approval]`;
@@ -1330,11 +1338,9 @@ const TEMPLATE_TABS = [
   ["updated", "Details changed", "Sent when a live circle's day or time changes, or it moves to another licence."],
 ];
 const LINK_SETTINGS = [
-  ["youtube_playlist_link", "YouTube playlist", "https://youtube.com/playlist?list=…"],
   ["drive_folder_link", "Google Drive folder", "https://drive.google.com/…"],
-  ["participant_signup_link", "Participant sign-up link", "https://tally.so/r/…?circle={circle_code}"],
-  ["support_contact", "Support contact", "e.g. circles@thinkgita.org or +44 …"],
-  ["sender_name", "Sender name (signs the email)", "e.g. Niraj Mulji"],
+  ["support_contact", "Support contact", "e.g. circles@thinkgita.org"],
+  ["youtube_playlist_link", "Default YouTube playlist (optional)", "Used if a circle has none of its own"],
 ];
 
 function Emails({ data, run }) {
@@ -1358,7 +1364,7 @@ function Emails({ data, run }) {
   const used = new Set(usedPlaceholders(draft));
   const previewCircle = data.circles.find((c) => c.id === previewId);
   const previewData = { ...data, settings: { ...data.settings, ...links } };
-  const previewVars = previewCircle && buildVars({ circle: previewCircle, facilitator: previewCircle.facilitator, licence: data.licences.find((l) => l.id === previewCircle.licence_id), settings: previewData.settings, appUrl: APP_URL });
+  const previewVars = previewCircle && buildVars({ circle: previewCircle, facilitator: previewCircle.facilitator, licence: data.licences.find((l) => l.id === previewCircle.licence_id), settings: previewData.settings, appUrl: APP_URL, sender: data.me?.name });
   const missing = previewVars ? missingValues(draft, previewVars, { beforeApproval: previewCircle.status !== "live" }) : [];
 
   function insert(k) {
@@ -1401,13 +1407,12 @@ function Emails({ data, run }) {
           <h2>Links and contacts</h2>
           <button className="primary" disabled={!linksDirty} onClick={saveLinks}>{linksDirty ? "Save" : "Saved"}</button>
         </div>
-        <p className="muted small">Used in every email. A circle can override the YouTube, Drive and sign-up links in its own drawer. WhatsApp groups are set per circle.</p>
+        <p className="muted small">Used in every email. Each circle's WhatsApp group and YouTube playlist are asked for when you approve it. Emails are signed by the admin who sends them (set your name under Settings → Admins).</p>
         <div className="form grid2">
           {LINK_SETTINGS.map(([k, label, ph]) => (
             <label key={k}>{label}<input value={links[k] ?? ""} placeholder={ph} onChange={(e) => setLinks({ ...links, [k]: e.target.value })} /></label>
           ))}
         </div>
-        <p className="muted small">In the sign-up link, <code>{"{circle_code}"}</code> is replaced with each circle's short code, so sign-ups can be matched to the circle.</p>
       </section>
 
       <section className="card">
@@ -1430,9 +1435,6 @@ function Emails({ data, run }) {
               <textarea ref={bodyRef} className="template-body" rows="26" value={draft.body} onChange={(e) => setDraft({ body: e.target.value })} spellCheck />
             </label>
             {unknown.length > 0 && <p className="error small">Not recognised: {unknown.map((k) => `{{${k}}}`).join(", ")}. Check the spelling, or pick from the list.</p>}
-            {used.has("zoom_password") && (
-              <p className="hint">This email includes the licence login password. Anyone with it can sign in to the whole licence and other circles' meetings. <code>{"{{host_key}}"}</code> lets a facilitator take host of their own meeting without that access.</p>
-            )}
             <div className="placeholders">
               <span className="muted small">Click to insert at the cursor:</span>
               {groups.map((g) => (
@@ -1472,5 +1474,88 @@ function Emails({ data, run }) {
         </div>
       </section>
     </>
+  );
+}
+
+// Approving: ask for the circle's WhatsApp group and YouTube playlist (created for each circle at this point),
+// and make sure the approving admin has a name to sign the email with.
+function ApproveDialog({ circle, data, run, onBusy, onClose }) {
+  const [wa, setWa] = useState(circle.whatsapp_group_link ?? "");
+  const [yt, setYt] = useState(circle.youtube_playlist_link ?? "");
+  const [name, setName] = useState(data.me?.name ?? "");
+  const [busy, setBusy] = useState(false);
+  const licence = data.licences.find((l) => l.id === circle.licence_id);
+  const badUrl = (v) => v.trim() && !/^https?:\/\/\S+$/i.test(v.trim());
+  const draft = { ...circle, whatsapp_group_link: wa.trim() || null, youtube_playlist_link: yt.trim() || null };
+  const gaps = emailGaps(draft, { ...data, me: { ...data.me, name: name.trim() } });
+  const otherGaps = gaps.filter((k) => !["whatsapp_group_link", "youtube_playlist_link"].includes(k));
+
+  async function approve(e) {
+    e.preventDefault();
+    if (badUrl(wa) || badUrl(yt) || !name.trim()) return;
+    if ((!wa.trim() || !yt.trim()) && !confirm(`${!wa.trim() ? "No WhatsApp group" : "No YouTube playlist"} yet. The email will say "to follow" there. Approve anyway?`)) return;
+    setBusy(true);
+    onBusy?.(true);
+    const ok = await run(async () => {
+      if (name.trim() !== (data.me?.name ?? "")) {
+        const { error } = await supabase.from("admin_emails").update({ name: name.trim() }).eq("email", data.me.email);
+        if (error) throw error;
+      }
+      const { error } = await supabase.from("circles")
+        .update({ whatsapp_group_link: wa.trim() || null, youtube_playlist_link: yt.trim() || null }).eq("id", circle.id);
+      if (error) throw error;
+      return adminAction("provision", circle.id);
+    }, (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`);
+    setBusy(false);
+    onBusy?.(false);
+    if (ok) onClose();
+  }
+
+  return (
+    <div className="modal-bg" onClick={busy ? undefined : onClose}>
+      <form className="card modal approve-modal" onClick={(e) => e.stopPropagation()} onSubmit={approve}>
+        <h2>Approve {circle.name}</h2>
+        <p className="muted small">
+          Creates the weekly Zoom meeting on {licence?.label ?? "its licence"}{licence?.is_mock ? " (mock)" : ""} and emails{" "}
+          {circle.facilitator?.name || "the facilitator"} their details.
+        </p>
+        <label>WhatsApp group link
+          <input type="url" autoFocus value={wa} onChange={(e) => setWa(e.target.value)} placeholder="https://chat.whatsapp.com/…" />
+        </label>
+        {badUrl(wa) && <p className="error small">That doesn't look like a link. It should start with https://</p>}
+        <label>YouTube playlist link
+          <input type="url" value={yt} onChange={(e) => setYt(e.target.value)} placeholder={data.settings.youtube_playlist_link || "https://youtube.com/playlist?list=…"} />
+        </label>
+        {badUrl(yt) && <p className="error small">That doesn't look like a link. It should start with https://</p>}
+        <label>Email signed by
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" required />
+        </label>
+        <p className="muted small">Saved as your name for future emails. Change it any time under Settings → Admins.</p>
+        {otherGaps.length > 0 && (
+          <p className="small warn-text">Also not set: {otherGaps.map(placeholderLabel).join(", ")}. Those lines will say "to follow".</p>
+        )}
+        <div className="actions">
+          <button type="button" className="ghost" disabled={busy} onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={busy || badUrl(wa) || badUrl(yt) || !name.trim()}>{busy ? "Creating…" : "Approve + create Zoom"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AdminName({ admin, run, onSaved }) {
+  const [name, setName] = useState(admin.name ?? "");
+  const dirty = name.trim() !== (admin.name ?? "");
+  return (
+    <span className="inline">
+      <input value={name} placeholder="Name (signs emails)" onChange={(e) => setName(e.target.value)} />
+      {dirty && (
+        <button onClick={() => run(async () => {
+          const { error } = await supabase.from("admin_emails").update({ name: name.trim() || null }).eq("email", admin.email);
+          if (error) throw error;
+          onSaved?.();
+        }, "Name saved")}>Save</button>
+      )}
+    </span>
   );
 }

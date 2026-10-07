@@ -19,16 +19,14 @@ export const PLACEHOLDERS = [
   { key: "zoom_meeting_id", label: "Zoom meeting ID", group: "Zoom", auto: true },
   { key: "zoom_passcode", label: "Zoom passcode", group: "Zoom", auto: true },
   { key: "zoom_login_email", label: "Licence login email", group: "Zoom" },
-  { key: "zoom_password", label: "Licence password (gives full account access)", group: "Zoom" },
-  { key: "host_key", label: "Host key (safer alternative to password)", group: "Zoom" },
+  { key: "host_key", label: "Host key (private, for the facilitator)", group: "Zoom" },
   { key: "licence_name", label: "Licence name", group: "Zoom" },
-  { key: "youtube_playlist_link", label: "YouTube playlist", group: "Links" },
+  { key: "youtube_playlist_link", label: "YouTube playlist (asked for at approval)", group: "Links" },
   { key: "drive_folder_link", label: "Google Drive folder", group: "Links" },
-  { key: "whatsapp_group_link", label: "WhatsApp group (set per circle)", group: "Links" },
-  { key: "participant_signup_link", label: "Participant sign-up link", group: "Links" },
+  { key: "whatsapp_group_link", label: "WhatsApp group (asked for at approval)", group: "Links" },
   { key: "dashboard_link", label: "Circles dashboard link", group: "Links" },
   { key: "support_contact", label: "Support contact", group: "Team" },
-  { key: "sender_name", label: "Sender name", group: "Team" },
+  { key: "sender_name", label: "Sender (the admin sending it)", group: "Team" },
 ];
 const KNOWN = new Set(PLACEHOLDERS.map((p) => p.key));
 const AUTO = new Set(PLACEHOLDERS.filter((p) => p.auto).map((p) => p.key));
@@ -65,7 +63,8 @@ function expectedStart(circle, settings) {
 const firstWord = (s) => String(s ?? "").trim().split(/\s+/)[0] ?? "";
 const pick = (...vals) => vals.find((v) => v != null && String(v).trim() !== "") ?? "";
 
-export function buildVars({ circle = {}, facilitator = {}, licence = {}, settings = {}, appUrl = "" }) {
+// sender: display name of the admin sending the email (signs it). Falls back to settings, then a team name.
+export function buildVars({ circle = {}, facilitator = {}, licence = {}, settings = {}, appUrl = "", sender = "" }) {
   const code = circle.id ? String(circle.id).slice(0, 8) : "";
   const nameIsEmail = /@/.test(facilitator?.name ?? "");
   const signupPattern = pick(settings?.participant_signup_link);
@@ -85,7 +84,6 @@ export function buildVars({ circle = {}, facilitator = {}, licence = {}, setting
     zoom_meeting_id: pick(circle.zoom_meeting_id),
     zoom_passcode: pick(circle.passcode),
     zoom_login_email: pick(licence?.zoom_user_email),
-    zoom_password: pick(licence?.zoom_password),
     host_key: pick(licence?.host_key),
     licence_name: pick(licence?.label),
     youtube_playlist_link: pick(circle.youtube_playlist_link, settings?.youtube_playlist_link),
@@ -94,7 +92,7 @@ export function buildVars({ circle = {}, facilitator = {}, licence = {}, setting
     participant_signup_link: pick(circle.participant_signup_link, signupPattern.replace(/\{circle_code\}/g, code)),
     dashboard_link: pick(appUrl),
     support_contact: pick(settings?.support_contact),
-    sender_name: pick(settings?.sender_name),
+    sender_name: pick(sender, settings?.sender_name, "The Think Gita team"),
   };
 }
 
@@ -180,9 +178,8 @@ ZOOM
 Meeting link: {{zoom_meeting_link}}
 Meeting ID: {{zoom_meeting_id}}
 Passcode: {{zoom_passcode}}
-Host login: {{zoom_login_email}}
-Host password: {{zoom_password}}
-Please sign in with this host account to start each session.
+Host key: {{host_key}}
+To start each session, join with the meeting link, open Participants, choose Claim host and enter your host key. Please keep the host key to yourself and don't post it in the group.
 
 CONTENT AND RESOURCES
 YouTube playlist: {{youtube_playlist_link}}
@@ -191,18 +188,14 @@ Please request access to the Drive folder and we'll approve it on our end.
 
 COMMUNICATION
 WhatsApp group: {{whatsapp_group_link}}
-This is your Circle's group for reminders, updates and discussion.
-
-PARTICIPANT SIGN-UP
-Your sign-up link: {{participant_signup_link}}
-Please share this exact link when inviting people. Everyone who registers through it is automatically linked to your Circle.
+This is your Circle's group for reminders, updates and discussion. Share this link when inviting people to join your Circle.
 
 GETTING STARTED
 
-1. Sign in to Zoom with the host login above and check that your meeting opens.
+1. Open your meeting link and practise claiming host with your host key.
 2. Open the Google Drive folder and read through the facilitator guide and session materials.
 3. Join the WhatsApp group and post a short welcome message.
-4. Share your sign-up link with your network, community and social channels.
+4. Share your WhatsApp group link with your network, community and social channels.
 
 If anything is missing or not working, reply to this email or contact {{support_contact}} and we'll sort it out.
 
@@ -227,8 +220,7 @@ ZOOM
 Meeting link: {{zoom_meeting_link}}
 Meeting ID: {{zoom_meeting_id}}
 Passcode: {{zoom_passcode}}
-Host login: {{zoom_login_email}}
-Host password: {{zoom_password}}
+Host key: {{host_key}}
 
 If the meeting link has changed, please share the new one in your WhatsApp group: {{whatsapp_group_link}}
 
