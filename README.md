@@ -47,27 +47,37 @@ Supabase project: `rxvehsmunykipwevtpmb`.
 2. **Supabase Auth** (Dashboard → Authentication)
    - URL Configuration: set Site URL and add a Redirect URL for the Pages address above.
    - Sign In / Providers: turn **off** "Allow new users to sign up".
-   - Emails → SMTP: add a custom SMTP sender (Resend works). The built-in sender only emails project team members and is heavily rate-limited, so facilitator invites won't arrive without this.
+   - Emails → SMTP: add a custom SMTP sender. With Resend: host `smtp.resend.com`, port `465`, user `resend`, password = a Resend API key, sender = the same address as `EMAIL_FROM`. The built-in sender only emails project team members and is heavily rate-limited, so facilitator invites won't arrive without this.
+   - How facilitators sign in: approving a circle emails them an invite. The invite link signs them in and asks them to choose a password. Later they sign in with email and password, or use "Forgot or never set a password?" on the sign-in page.
    - Users → Invite user: invite yourself (the admin email already in the `admin_emails` table) so you can sign in.
    - New project only: add the first admin in the SQL editor with `insert into public.admin_emails (email) values ('<your-admin-email>');`
-3. **Zoom** (in ThinkGita's Zoom account, as an admin)
-   - Zoom App Marketplace → Develop → Build app → **Server-to-Server OAuth**.
-   - Scopes: create, read and delete meetings for users in the account, and read users.
-   - Copy Account ID, Client ID, Client Secret.
-   - Account settings: allow "Join before host" and make sure every licensed user has a host key.
+3. **Zoom** (signed in to ThinkGita's Zoom account as the owner or an admin)
+   - [marketplace.zoom.us](https://marketplace.zoom.us) → Develop → Build App → **Server-to-Server OAuth App**. Name it "ThinkGita Circles".
+   - Scopes (Add Scopes):
+     - Meeting: `meeting:write:meeting:admin` (create), `meeting:update:meeting:admin` (change time or end date), `meeting:delete:meeting:admin` (cancel), `meeting:read:meeting:admin`.
+     - User: `user:read:user:admin` (Check with Zoom, reads each licence's host key).
+     - Older Zoom accounts show classic scopes instead: `meeting:write:admin`, `meeting:read:admin`, `user:read:admin`.
+   - Fill in the required Information page (name, contact email), then **Activate**. The app only works once activated.
+   - Copy Account ID, Client ID and Client Secret straight into Supabase secrets (step 4). Don't paste them in chat or email.
+   - Each licence must be a **Licensed** user in this same Zoom account. Their email goes in the dashboard's Licences page.
+   - Account settings → Meeting: allow "Join before host" (meetings are set up so participants can join first).
 4. **Edge function secrets** (Dashboard → Edge Functions → Secrets)
 
    | Secret | Value |
    | --- | --- |
    | `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET` | From the Zoom app |
-   | `TALLY_SIGNING_SECRET` | Any long random string; the same value goes into Tally |
-   | `RESEND_API_KEY`, `EMAIL_FROM` | For the facilitator details email, e.g. `ThinkGita <circles@yourdomain>` |
-   | `APP_URL` | The GitHub Pages address |
+   | `TALLY_SIGNING_SECRET` | A long random string, e.g. from `openssl rand -base64 32`. The same value goes into Tally |
+   | `TALLY_FORM_ID` | `w5lkx6` (the id at the end of the form link). Submissions from any other form are ignored |
+   | `RESEND_API_KEY`, `EMAIL_FROM` | For the facilitator details email, e.g. `ThinkGita Circles <circles@thinkgita.org>`. The domain must be verified in Resend |
+   | `APP_URL` | `https://datapulseai.github.io/ThinkGita/` |
 
-5. **Tally**
-   - Form → Integrations → Webhooks → URL `https://rxvehsmunykipwevtpmb.supabase.co/functions/v1/tally-intake`, signing secret = `TALLY_SIGNING_SECRET`.
-   - The webhook finds fields by their labels. Keep labels containing: **circle name**, **your name**, **email**, **phone** or **WhatsApp**, **day**, **time**, and optionally **duration** and **timezone**. Days can be "Wednesday", "Wed" etc. Times like "19:30" or "7:30pm" both work.
-   - Submissions that can't be read (no email, unreadable day or time) show up in Settings → Activity as `intake_failed`.
+5. **Tally** (in the Tally account that owns the form, form `w5lkx6` only)
+   - Open the form → **Integrations** → **Webhooks** → Connect.
+   - Endpoint URL: `https://rxvehsmunykipwevtpmb.supabase.co/functions/v1/tally-intake`
+   - Signing secret: the `TALLY_SIGNING_SECRET` value. Leave HTTP headers empty.
+   - Tally webhooks belong to a single form, so other forms in that account send nothing. `TALLY_FORM_ID` is a second safety check.
+   - Fields are found by label: First Name, Last Name, Initiated Name, Email Address, Phone Number, "Do you wish to facilitate a", Day + Time (twice: first then second preference), Time Zone, Language, Preferred Start Date. Renaming those labels can break intake; adding new questions is fine.
+   - Submissions that can't be read (no email, unreadable day or time) show up in Settings → Activity as `intake_failed`. Tally's webhook page also shows each delivery and its response.
    - Rotate the Tally API key that was shared in chat. The webhook doesn't need it.
 6. **Dashboard**
    - Licences: enter each licensed Zoom user's email and host key, Save, then **Check with Zoom**.
@@ -83,6 +93,14 @@ Supabase project: `rxvehsmunykipwevtpmb`.
 - **Timezones**: Tally's "(GMT +x) City" options are mapped to real timezones (e.g. London to Europe/London) so clock changes are handled. Circles store the facilitator's own time (used for Zoom) and a UK reference time (used for clash checks and admin views).
 - **Mock licences** (testing only): tick Mock on a licence and approving a circle on it creates fake Zoom details instead of calling Zoom. The Overview "Before going live" checklist reminds you to turn this off.
 - **Theme**: light by default, with a dark mode toggle in the header (remembered per browser).
+
+## Facilitator emails
+
+- Edited in the dashboard's **Emails** tab: the approval email, and a "details changed" email sent when a live circle's time or licence changes. Plain text with `{{placeholders}}`; click a placeholder to insert it. Lines in CAPITALS become headings and links become clickable. The preview uses a real circle, and **Send test to me** emails the current draft to you.
+- Shared links and contacts (YouTube playlist, Drive folder, participant sign-up link, support contact, sender name) are set at the top of the Emails tab. In the sign-up link, `{circle_code}` becomes each circle's short code. Each circle's WhatsApp group link, and any per-circle overrides, are set in that circle's drawer.
+- Before approving, the drawer and Queue warn about any placeholder with no value; blanks are sent as "to follow".
+- `{{zoom_password}}` sends the licence's login password (set per licence, admins only). Anyone with it can sign in to the whole licence, so `{{host_key}}` is the safer option.
+- The renderer lives in `app/src/emailTemplate.js` and is copied to `supabase/functions/provision-circle/template.ts`, so the preview and the sent email match. Edit the app file, then copy it over.
 
 ## Local development
 

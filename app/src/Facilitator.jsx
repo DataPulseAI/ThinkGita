@@ -9,7 +9,7 @@ export default function Facilitator({ email }) {
 
   const load = async () => {
     const [c, r] = await Promise.all([
-      supabase.rpc("my_circles"),
+      supabase.rpc("my_circles_v2"),
       supabase.from("change_requests").select("*").order("created_at", { ascending: false }),
     ]);
     if (c.error) setError(c.error.message);
@@ -38,6 +38,29 @@ export default function Facilitator({ email }) {
 }
 
 const REQUEST_STATUS = { open: "Waiting for the team", done: "Done", dismissed: "Closed" };
+
+// WhatsApp group, participant sign-up and resources, when the team has set them.
+function CircleLinks({ c }) {
+  const links = [
+    ["WhatsApp group", c.whatsapp_group_link],
+    ["Participant sign-up link", c.participant_signup_link, "Share this exact link so sign-ups are linked to your circle."],
+    ["YouTube playlist", c.youtube_playlist_link],
+    ["Google Drive folder", c.drive_folder_link, "Request access and the team will approve it."],
+  ].filter(([, v]) => v);
+  if (!links.length) return null;
+  return (
+    <div className="details">
+      <span className="section-title">Links</span>
+      {links.map(([label, v, note]) => (
+        <div key={label} className="detail">
+          <span className="muted small">{label}</span>
+          <span className="detail-value"><a href={v} target="_blank" rel="noreferrer">{v}</a>{note && <span className="detail-note muted">{note}</span>}</span>
+          <CopyButton text={v} />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function CircleCard({ c, requests, onSent }) {
   const live = c.status === "live";
@@ -81,6 +104,7 @@ function CircleCard({ c, requests, onSent }) {
             <li>Enter the host key above. You now have host controls.</li>
           </ol>
           <p className="muted small">The link is the same every week, from {fmtDate(c.starts_on)} until {fmtDate(c.ends_on)}. Pin it in your WhatsApp group.</p>
+          <CircleLinks c={c} />
         </>
       ) : (
         <p className="muted">Your Zoom link will appear here once the team approves your circle.</p>

@@ -327,3 +327,28 @@ fieldset.group legend { font-size: 12px; color: var(--muted); font-weight: 600; 
 .holder .muted { grid-column: 2; }
 .manage-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-top: 6px; }
 .manage-row label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; flex: 1; min-width: 200px; }
+.login-links { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-top: 14px; }
+.login-links button.link { font-weight: 500; font-size: 13px; }
+
+/* Emails */
+.email-editor { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; margin-top: 8px; }
+@media (max-width: 1000px) { .email-editor { grid-template-columns: 1fr; } }
+.template-body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; resize: vertical; }
+.placeholders { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
+.ph-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ph-group-name { font-size: 12px; font-weight: 600; color: var(--muted); min-width: 74px; }
+.ph-chip { padding: 2px 8px; font-size: 12px; border-radius: 999px; font-family: ui-monospace, Menlo, monospace; background: var(--surface-2); border-color: var(--line); color: var(--ink); }
+.ph-chip.used { border-color: var(--teal); color: var(--teal); background: var(--surface); font-weight: 600; }
+.preview-col { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.preview-head { display: flex; gap: 10px; align-items: flex-end; }
+.preview-head label { flex: 1; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.email-preview { border: 1px solid var(--line); border-radius: 10px; background: #fff; color: #1f2a30; overflow: hidden; }
+.email-subject { padding: 10px 14px; border-bottom: 1px solid #e3e9ea; background: #f7f9f9; font-weight: 600; font-size: 14px; }
+.email-subject .muted { color: #6b7d80; font-weight: 500; margin-right: 6px; }
+.email-body { padding: 16px 18px; max-height: 70vh; overflow: auto; }
+.email-body a { word-break: break-all; }
+.email-preview.compact .email-body { max-height: 420px; }
+mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding: 0 4px; font-size: 13px; }
+.email-check { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 6px 0 10px; }
+.secret { display: flex; align-items: center; gap: 6px; }
+.secret input { min-width: 110px; }

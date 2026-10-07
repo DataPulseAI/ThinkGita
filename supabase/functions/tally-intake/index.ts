@@ -4,6 +4,8 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SIGNING_SECRET = Deno.env.get("TALLY_SIGNING_SECRET") ?? "";
+// Optional: only accept submissions from this Tally form (the id in the form's link, e.g. w5lkx6).
+const FORM_ID = (Deno.env.get("TALLY_FORM_ID") ?? "").trim();
 const db = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -153,6 +155,11 @@ Deno.serve(async (req) => {
 
   const payload = JSON.parse(body);
   const data = payload?.data ?? {};
+  if (payload?.eventType && payload.eventType !== "FORM_RESPONSE") return json({ ok: true, ignored: payload.eventType });
+  if (FORM_ID && data.formId && data.formId !== FORM_ID) {
+    await audit("intake_ignored", { reason: "different form", formId: data.formId, formName: data.formName });
+    return json({ ok: true, ignored: "different form" });
+  }
   const fields: TallyField[] = data.fields ?? [];
   const submissionId: string = data.responseId ?? data.submissionId ?? payload.eventId;
 

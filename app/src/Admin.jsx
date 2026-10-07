@@ -1,12 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   supabase, adminAction, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
 } from "./lib.js";
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
+import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders } from "./emailTemplate.js";
 
 const ACTIVE = ["pending", "approved", "live"];
-const TABS = ["Overview", "Schedule", "Queue", "Circles", "Licences", "Requests", "Settings"];
+const TABS = ["Overview", "Schedule", "Queue", "Circles", "Licences", "Requests", "Emails", "Settings"];
+const APP_URL = window.location.href.split("#")[0];
+
+// Approval email values still blank for a circle (Zoom details are filled in on approval).
+function emailGaps(c, data) {
+  const template = data.templates.approved;
+  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: data.licences.find((l) => l.id === c.licence_id), settings: data.settings, appUrl: APP_URL });
+  return missingValues(template, vars, { beforeApproval: true });
+}
+const placeholderLabel = (k) => PLACEHOLDERS.find((p) => p.key === k)?.label ?? k;
+// Ask before approving when the email would say "to follow" for something.
+function confirmGaps(circles, data) {
+  const withGaps = circles.map((c) => [c, emailGaps(c, data)]).filter(([, g]) => g.length);
+  if (!withGaps.length) return true;
+  if (circles.length === 1) {
+    return confirm(`The approval email has nothing set for: ${withGaps[0][1].map(placeholderLabel).join(", ")}.\n\nThose lines will say "to follow". Approve anyway?`);
+  }
+  return confirm(`${withGaps.length} of these circles have blanks in their approval email (e.g. ${withGaps[0][0].name}: ${withGaps[0][1].map(placeholderLabel).join(", ")}).\n\nThose lines will say "to follow". Approve them all anyway?`);
+}
 
 // "Wed 19:30–20:30" plus local time when the facilitator isn't in the UK.
 function When({ c, block }) {
@@ -34,14 +53,15 @@ export default function Admin() {
   const [toast, setToast] = useState(null);
 
   const load = useCallback(async () => {
-    const [circles, licences, settings, requests, log] = await Promise.all([
+    const [circles, licences, settings, requests, log, templates] = await Promise.all([
       supabase.from("circles").select("*, facilitator:facilitators(*), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time"),
       supabase.from("licences").select("*").order("sort_order").order("label"),
       supabase.from("settings").select("*").eq("id", 1).single(),
       supabase.from("change_requests").select("*, circle:circles(name)").order("created_at", { ascending: false }),
       supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(60),
+      supabase.from("email_templates").select("*"),
     ]);
-    const err = [circles, licences, settings, requests, log].find((r) => r.error);
+    const err = [circles, licences, settings, requests, log, templates].find((r) => r.error);
     if (err) setToast({ kind: "error", text: err.error.message });
     setData({
       circles: circles.data ?? [],
@@ -49,6 +69,10 @@ export default function Admin() {
       settings: settings.data,
       requests: requests.data ?? [],
       log: log.data ?? [],
+      templates: {
+        approved: templates.data?.find((t) => t.key === "approved") ?? { key: "approved", ...DEFAULT_TEMPLATES.approved },
+        updated: templates.data?.find((t) => t.key === "updated") ?? { key: "updated", ...DEFAULT_TEMPLATES.updated },
+      },
     });
   }, []);
 
@@ -105,6 +129,7 @@ export default function Admin() {
         {tab === "Circles" && <Circles data={data} onSelect={select} onNew={() => setSelected("new")} onDelete={deleteCircle} />}
         {tab === "Licences" && <Licences data={data} run={run} notify={notify} />}
         {tab === "Requests" && <Requests data={data} run={run} onSelect={(id) => select(data.circles.find((c) => c.id === id))} />}
+        {tab === "Emails" && <Emails data={data} run={run} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
       </main>
       {selected && (
@@ -366,6 +391,7 @@ function Queue({ data, run, onSelect }) {
   const [approving, setApproving] = useState(null);
   const clashes = data.circles.filter((c) => c.status === "conflict").length;
   async function approveOne(c) {
+    if (!confirmGaps([c], data)) return;
     setApproving(c.id);
     await run(() => adminAction("provision", c.id), (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`);
     setApproving(null);
@@ -395,6 +421,7 @@ function Queue({ data, run, onSelect }) {
 
   async function provisionAll() {
     if (!confirm(`Create Zoom meetings for ${ready.length} circles and email their facilitators?`)) return;
+    if (!confirmGaps(ready, data)) return;
     const results = [];
     for (let i = 0; i < ready.length; i++) {
       setBulk({ done: i, total: ready.length });
@@ -573,7 +600,17 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
     language: circle?.language ?? "",
     licence_id: circle?.licence_id ?? "auto",
     notes: circle?.notes ?? "",
+    whatsapp_group_link: circle?.whatsapp_group_link ?? "",
+    participant_signup_link: circle?.participant_signup_link ?? "",
+    youtube_playlist_link: circle?.youtube_playlist_link ?? "",
+    drive_folder_link: circle?.drive_folder_link ?? "",
   }));
+  const linkFields = () => ({
+    whatsapp_group_link: f.whatsapp_group_link.trim() || null,
+    participant_signup_link: f.participant_signup_link.trim() || null,
+    youtube_playlist_link: f.youtube_playlist_link.trim() || null,
+    drive_folder_link: f.drive_folder_link.trim() || null,
+  });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const tzOptions = TIMEZONES.includes(f.timezone) ? TIMEZONES : [f.timezone, ...TIMEZONES];
 
@@ -626,6 +663,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
       const { error } = await supabase.from("circles").update({
         name: f.name, circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
         alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
+        ...linkFields(),
       }).eq("id", id);
       if (error) throw error;
       return done;
@@ -643,6 +681,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
         alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
         duration_min: Number(f.duration_min), timezone: f.timezone, preferred_start: f.preferred_start || null,
         circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
+        ...linkFields(),
       };
       if (circle?.status === "rejected") Object.assign(row, { status: "pending" });
       // "Pick automatically" releases the current licence first, so a busy licence never blocks a free one.
@@ -676,6 +715,9 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
   const [freeLicences, setFreeLicences] = useState(null);
   const [moveTo, setMoveTo] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [showEmail, setShowEmail] = useState(false);
+  const gaps = circle && ["pending", "conflict"].includes(circle.status) ? emailGaps(circle, data) : [];
+  const signupDefault = (data.settings.participant_signup_link ?? "").replace(/\{circle_code\}/g, circle ? String(circle.id).slice(0, 8) : "{circle_code}");
 
   // For clashes: who already holds this time. For live circles: which licences it could move to.
   useEffect(() => {
@@ -710,6 +752,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
 
   // Approve straight from the drawer; it stays open and switches to the live Zoom details.
   async function approve() {
+    if (!confirmGaps([circle], data)) return;
     setBusy(true);
     await run(() => adminAction("provision", circle.id),
       (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`);
@@ -753,6 +796,17 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
             <button className="primary" disabled={busy} onClick={approve}>{busy ? "Creating…" : "Approve + create Zoom"}</button>
           </div>
         )}
+        {circle && ["pending", "conflict", "live"].includes(circle.status) && (
+          <div className="email-check">
+            {gaps.length > 0 ? (
+              <span className="small warn-text">Approval email has nothing for: {gaps.map(placeholderLabel).join(", ")}. Fill these in below or under Emails.</span>
+            ) : (
+              <span className="small muted">{circle.status === "live" ? "Facilitator email" : "Approval email is complete."}</span>
+            )}
+            <button className="link small" onClick={() => setShowEmail(!showEmail)}>{showEmail ? "Hide email" : "Preview email"}</button>
+          </div>
+        )}
+        {showEmail && circle && <div><EmailPreview compact template={data.templates.approved} circle={{ ...circle, ...linkFields() }} data={data} /></div>}
         {circle?.status === "conflict" && (
           <div className="approve-bar warn">
             <div>
@@ -891,6 +945,16 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
             </select>
           </label>
           {live && <p className="muted small">To change the licence of a live circle, use <b>Move to another licence</b> above.</p>}
+          <fieldset className="group" disabled={!editable}>
+            <legend>Links for this circle (used in emails)</legend>
+            <label>WhatsApp group link<input type="url" value={f.whatsapp_group_link} onChange={set("whatsapp_group_link")} placeholder="https://chat.whatsapp.com/…" /></label>
+            <label>Participant sign-up link<input type="url" value={f.participant_signup_link} onChange={set("participant_signup_link")} placeholder={signupDefault || "Set a default under Emails"} /></label>
+            <div className="grid2">
+              <label>YouTube playlist<input type="url" value={f.youtube_playlist_link} onChange={set("youtube_playlist_link")} placeholder={data.settings.youtube_playlist_link || "Default from Emails"} /></label>
+              <label>Drive folder<input type="url" value={f.drive_folder_link} onChange={set("drive_folder_link")} placeholder={data.settings.drive_folder_link || "Default from Emails"} /></label>
+            </div>
+            <p className="muted small">Leave sign-up, YouTube and Drive blank to use the defaults set under Emails.</p>
+          </fieldset>
           <label>Notes<textarea rows="3" value={f.notes} onChange={set("notes")} disabled={!editable} /></label>
           {live && <p className="hint">Changing the day, time or length moves the existing Zoom meeting. The join link stays the same, and the facilitator is emailed the update.</p>}
           {editable && (
@@ -943,7 +1007,7 @@ function Licences({ data, run, notify }) {
       for (const r of rows.filter((x) => x._dirty)) {
         const { error } = await supabase.from("licences").update({
           label: r.label, zoom_user_email: r.zoom_user_email ? r.zoom_user_email.trim().toLowerCase() : null,
-          host_key: r.host_key || null, active: r.active, is_mock: r.is_mock,
+          host_key: r.host_key || null, zoom_password: r.zoom_password || null, active: r.active, is_mock: r.is_mock,
         }).eq("id", r.id);
         if (error) throw error;
       }
@@ -977,15 +1041,20 @@ function Licences({ data, run, notify }) {
         Each licence is one licensed Zoom user. Meetings are created under that user, and facilitators get its host key so they can claim host without a password.
         <b> Mock</b> is for testing only: approving a circle on a mock licence creates fake Zoom details.
       </p>
+      <p className="muted small">
+        <b>Login password</b> is only used if an email template includes {"{{zoom_password}}"}. Anyone with it can sign in to the whole licence,
+        including other circles' meetings, so the host key is the safer option. Only admins can see it.
+      </p>
       <div className="table-wrap">
         <table className="table edit">
-          <thead><tr><th>Label</th><th>Zoom user email</th><th>Host key</th><th>Active</th><th>Mock</th><th>Booked</th><th></th></tr></thead>
+          <thead><tr><th>Label</th><th>Zoom user email</th><th>Host key</th><th>Login password</th><th>Active</th><th>Mock</th><th>Booked</th><th></th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id} className={r._dirty ? "dirty" : ""}>
                 <td><input value={r.label} onChange={(e) => edit(r.id, "label", e.target.value)} /></td>
                 <td><input value={r.zoom_user_email ?? ""} placeholder={r.is_mock ? "not needed for mock" : "zoom-user@…"} onChange={(e) => edit(r.id, "zoom_user_email", e.target.value)} /></td>
                 <td><input value={r.host_key ?? ""} placeholder="6 digits" onChange={(e) => edit(r.id, "host_key", e.target.value)} /></td>
+                <td><SecretInput value={r.zoom_password ?? ""} placeholder="optional" onChange={(v) => edit(r.id, "zoom_password", v)} /></td>
                 <td><input type="checkbox" checked={r.active} onChange={(e) => edit(r.id, "active", e.target.checked)} /></td>
                 <td><input type="checkbox" checked={r.is_mock} onChange={(e) => edit(r.id, "is_mock", e.target.checked)} /></td>
                 <td>{booked(r.id)}</td>
@@ -1221,6 +1290,185 @@ function Settings({ data, run }) {
             </div>
           ))}
           {!data.log.length && <p className="muted">Nothing yet.</p>}
+        </div>
+      </section>
+    </>
+  );
+}
+
+/* ---------------- Emails ---------------- */
+function SecretInput({ value, onChange, placeholder }) {
+  const [show, setShow] = useState(false);
+  return (
+    <span className="secret">
+      <input type={show ? "text" : "password"} autoComplete="new-password" value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+      <button type="button" className="link small" onClick={() => setShow(!show)}>{show ? "Hide" : "Show"}</button>
+    </span>
+  );
+}
+
+// Renders a template for one circle, marking anything not set yet.
+function EmailPreview({ template, circle, data, compact }) {
+  const licence = data.licences.find((l) => l.id === circle?.licence_id);
+  const vars = buildVars({ circle: circle ?? {}, facilitator: circle?.facilitator, licence, settings: data.settings, appUrl: APP_URL });
+  // Before approval, show where the Zoom details will go instead of flagging them as missing.
+  if (circle?.status !== "live") {
+    for (const p of PLACEHOLDERS) if (p.auto && !vars[p.key]) vars[p.key] = `[${p.label.toLowerCase()}, added on approval]`;
+    if (vars.start_date && !circle?.starts_on) vars.start_date = `${vars.start_date} (expected)`;
+  }
+  const { subject, html } = render(template, vars, { preview: true });
+  return (
+    <div className={`email-preview ${compact ? "compact" : ""}`}>
+      <div className="email-subject"><span className="muted small">Subject</span> {subject}</div>
+      <div className="email-body" dangerouslySetInnerHTML={{ __html: html }} />
+    </div>
+  );
+}
+
+const TEMPLATE_TABS = [
+  ["approved", "Approval email", "Sent when a circle is approved, and by Resend details or a handover."],
+  ["updated", "Details changed", "Sent when a live circle's day or time changes, or it moves to another licence."],
+];
+const LINK_SETTINGS = [
+  ["youtube_playlist_link", "YouTube playlist", "https://youtube.com/playlist?list=…"],
+  ["drive_folder_link", "Google Drive folder", "https://drive.google.com/…"],
+  ["participant_signup_link", "Participant sign-up link", "https://tally.so/r/…?circle={circle_code}"],
+  ["support_contact", "Support contact", "e.g. circles@thinkgita.org or +44 …"],
+  ["sender_name", "Sender name (signs the email)", "e.g. Niraj Mulji"],
+];
+
+function Emails({ data, run }) {
+  const [key, setKey] = useState("approved");
+  const [drafts, setDrafts] = useState(() => ({
+    approved: { subject: data.templates.approved.subject, body: data.templates.approved.body },
+    updated: { subject: data.templates.updated.subject, body: data.templates.updated.body },
+  }));
+  const [links, setLinks] = useState(() => Object.fromEntries(LINK_SETTINGS.map(([k]) => [k, data.settings[k] ?? ""])));
+  const candidates = data.circles.filter((c) => !c.is_demo && c.status !== "rejected");
+  const [previewId, setPreviewId] = useState(() => (candidates.find((c) => c.status === "live") ?? candidates[0] ?? data.circles[0])?.id ?? "");
+  const [sending, setSending] = useState(false);
+  const bodyRef = useRef(null);
+
+  const draft = drafts[key];
+  const saved = data.templates[key];
+  const dirty = draft.subject !== saved.subject || draft.body !== saved.body;
+  const linksDirty = LINK_SETTINGS.some(([k]) => (links[k] ?? "") !== (data.settings[k] ?? ""));
+  const setDraft = (patch) => setDrafts({ ...drafts, [key]: { ...draft, ...patch } });
+  const unknown = unknownPlaceholders(draft);
+  const used = new Set(usedPlaceholders(draft));
+  const previewCircle = data.circles.find((c) => c.id === previewId);
+  const previewData = { ...data, settings: { ...data.settings, ...links } };
+  const previewVars = previewCircle && buildVars({ circle: previewCircle, facilitator: previewCircle.facilitator, licence: data.licences.find((l) => l.id === previewCircle.licence_id), settings: previewData.settings, appUrl: APP_URL });
+  const missing = previewVars ? missingValues(draft, previewVars, { beforeApproval: previewCircle.status !== "live" }) : [];
+
+  function insert(k) {
+    const el = bodyRef.current;
+    const token = `{{${k}}}`;
+    if (!el) return setDraft({ body: draft.body + token });
+    const start = el.selectionStart ?? draft.body.length;
+    const end = el.selectionEnd ?? start;
+    setDraft({ body: draft.body.slice(0, start) + token + draft.body.slice(end) });
+    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(start + token.length, start + token.length); });
+  }
+
+  const saveTemplate = () => run(async () => {
+    if (!draft.subject.trim() || !draft.body.trim()) throw new Error("Subject and body can't be empty");
+    const { data: { user } } = await supabase.auth.getUser();
+    const { error } = await supabase.from("email_templates").upsert({
+      key, subject: draft.subject, body: draft.body, updated_at: new Date().toISOString(), updated_by: user?.email ?? null,
+    });
+    if (error) throw error;
+  }, "Email saved. It's used from the next email sent.");
+
+  const saveLinks = () => run(async () => {
+    const patch = Object.fromEntries(LINK_SETTINGS.map(([k]) => [k, (links[k] ?? "").trim() || null]));
+    const { error } = await supabase.from("settings").update(patch).eq("id", 1);
+    if (error) throw error;
+  }, "Links and contacts saved");
+
+  async function sendTest() {
+    setSending(true);
+    await run(() => adminAction("test_email", previewId, { template_key: key, template: draft }), (o) => `Test email sent to ${o.to}`);
+    setSending(false);
+  }
+
+  const groups = [...new Set(PLACEHOLDERS.map((p) => p.group))];
+
+  return (
+    <>
+      <section className="card">
+        <div className="card-head">
+          <h2>Links and contacts</h2>
+          <button className="primary" disabled={!linksDirty} onClick={saveLinks}>{linksDirty ? "Save" : "Saved"}</button>
+        </div>
+        <p className="muted small">Used in every email. A circle can override the YouTube, Drive and sign-up links in its own drawer. WhatsApp groups are set per circle.</p>
+        <div className="form grid2">
+          {LINK_SETTINGS.map(([k, label, ph]) => (
+            <label key={k}>{label}<input value={links[k] ?? ""} placeholder={ph} onChange={(e) => setLinks({ ...links, [k]: e.target.value })} /></label>
+          ))}
+        </div>
+        <p className="muted small">In the sign-up link, <code>{"{circle_code}"}</code> is replaced with each circle's short code, so sign-ups can be matched to the circle.</p>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <h2>Facilitator emails</h2>
+          <div className="seg">
+            {TEMPLATE_TABS.map(([k, label]) => (
+              <button key={k} className={k === key ? "active" : ""} onClick={() => setKey(k)}>
+                {label}{(drafts[k].subject !== data.templates[k].subject || drafts[k].body !== data.templates[k].body) ? " •" : ""}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="muted small">{TEMPLATE_TABS.find(([k]) => k === key)[2]} Write in plain text. Lines in CAPITALS become headings, and links become clickable.</p>
+
+        <div className="email-editor">
+          <div className="form">
+            <label>Subject<input value={draft.subject} onChange={(e) => setDraft({ subject: e.target.value })} /></label>
+            <label>Body
+              <textarea ref={bodyRef} className="template-body" rows="26" value={draft.body} onChange={(e) => setDraft({ body: e.target.value })} spellCheck />
+            </label>
+            {unknown.length > 0 && <p className="error small">Not recognised: {unknown.map((k) => `{{${k}}}`).join(", ")}. Check the spelling, or pick from the list.</p>}
+            {used.has("zoom_password") && (
+              <p className="hint">This email includes the licence login password. Anyone with it can sign in to the whole licence and other circles' meetings. <code>{"{{host_key}}"}</code> lets a facilitator take host of their own meeting without that access.</p>
+            )}
+            <div className="placeholders">
+              <span className="muted small">Click to insert at the cursor:</span>
+              {groups.map((g) => (
+                <div key={g} className="ph-group">
+                  <span className="ph-group-name">{g}</span>
+                  {PLACEHOLDERS.filter((p) => p.group === g).map((p) => (
+                    <button key={p.key} type="button" className={`ph-chip ${used.has(p.key) ? "used" : ""}`} title={p.label} onClick={() => insert(p.key)}>{p.key}</button>
+                  ))}
+                </div>
+              ))}
+            </div>
+            <div className="actions">
+              <button className="ghost" onClick={() => confirm("Replace this email with the original wording? Unsaved edits are lost.") && setDraft({ ...DEFAULT_TEMPLATES[key] })}>Reset to original</button>
+              <button disabled={!dirty} onClick={() => setDraft({ subject: saved.subject, body: saved.body })}>Undo changes</button>
+              <button className="primary" disabled={!dirty} onClick={saveTemplate}>{dirty ? "Save email" : "Saved"}</button>
+            </div>
+            {saved.updated_at && <p className="muted small">Last saved {new Date(saved.updated_at).toLocaleString()}{saved.updated_by ? ` by ${saved.updated_by}` : ""}.</p>}
+          </div>
+
+          <div className="preview-col">
+            <div className="preview-head">
+              <label>Preview with
+                <select value={previewId} onChange={(e) => setPreviewId(e.target.value)}>
+                  {data.circles.map((c) => <option key={c.id} value={c.id}>{c.name} ({STATUS_LABEL[c.status]})</option>)}
+                </select>
+              </label>
+              <button disabled={!previewId || sending} onClick={sendTest} title="Sends this version (saved or not) to your own email">{sending ? "Sending…" : "Send test to me"}</button>
+            </div>
+            {missing.length > 0 && (
+              <p className="small warn-text">Nothing set for this circle: {missing.map(placeholderLabel).join(", ")}. These lines will say "to follow".</p>
+            )}
+            {previewCircle && previewCircle.status !== "live" && (
+              <p className="muted small">Zoom link, meeting ID, passcode and exact first date are filled in when the circle is approved.</p>
+            )}
+            {previewCircle ? <EmailPreview template={draft} circle={previewCircle} data={previewData} /> : <p className="muted">Add a circle to preview.</p>}
+          </div>
         </div>
       </section>
     </>

@@ -9,6 +9,10 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Remember whether we arrived from an invite or reset email before the auth client tidies the URL.
+      window.__authLinkType = (location.hash.match(/type=(invite|recovery)/) || [])[1] || null;
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

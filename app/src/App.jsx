@@ -10,11 +10,15 @@ const LOGO_TEAL = `${import.meta.env.BASE_URL}logo-teal.png`;
 export default function App() {
   const [session, setSession] = useState(undefined);
   const [isAdmin, setIsAdmin] = useState(null);
-  const [pwOpen, setPwOpen] = useState(false);
+  // "setup" when someone arrives from an invite or password-reset email: ask them to choose a password.
+  const [pwOpen, setPwOpen] = useState(window.__authLinkType ? "setup" : false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    const { data: sub } = supabase.auth.onAuthStateChange((e, s) => {
+      setSession(s);
+      if (e === "PASSWORD_RECOVERY") setPwOpen("setup");
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -47,7 +51,7 @@ export default function App() {
         </div>
       </header>
       {isAdmin ? <Admin /> : <Facilitator email={session.user.email} />}
-      {pwOpen && <PasswordModal onClose={() => setPwOpen(false)} />}
+      {pwOpen && <PasswordModal setup={pwOpen === "setup"} onClose={() => { window.__authLinkType = null; setPwOpen(false); }} />}
     </div>
   );
 }
@@ -57,18 +61,29 @@ function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [state, setState] = useState({ status: "idle" });
+  const switchMode = (m) => { setMode(m); setState({ status: "idle" }); };
 
   async function submit(e) {
     e.preventDefault();
     setState({ status: "sending" });
     const address = email.trim().toLowerCase();
+    if (mode === "reset") {
+      const { error } = await supabase.auth.resetPasswordForEmail(address, { redirectTo: window.location.href.split("#")[0] });
+      if (error) {
+        setState({
+          status: "error",
+          message: /rate limit/i.test(error.message) ? "Too many emails sent recently. Try again in a little while." : error.message,
+        });
+      } else setState({ status: "sent" });
+      return;
+    }
     if (mode === "password") {
       const { error } = await supabase.auth.signInWithPassword({ email: address, password });
       if (error) {
         setState({
           status: "error",
           message: /invalid/i.test(error.message)
-            ? "Email or password is wrong. If you haven't set a password yet, use an email link once, then choose Change password."
+            ? "Email or password is wrong. If you haven't set one yet, or have forgotten it, use \"Forgot password\" below."
             : error.message,
         });
       }
@@ -98,7 +113,11 @@ function Login() {
         <img className="login-logo" src={getTheme() === "dark" ? LOGO_WHITE : LOGO_TEAL} alt="ThinkGita" />
         <p className="login-sub">Circles: sign in to manage or view your circle.</p>
         {state.status === "sent" ? (
-          <p>Check <b>{email}</b> for a sign-in link. You can close this tab.</p>
+          <p>
+            {mode === "reset"
+              ? <>If <b>{email}</b> has an account, we've sent a link to choose a new password. You can close this tab.</>
+              : <>Check <b>{email}</b> for a sign-in link. You can close this tab.</>}
+          </p>
         ) : (
           <form onSubmit={submit}>
             <label>Email address</label>
@@ -110,11 +129,13 @@ function Login() {
               </>
             )}
             <button className="primary wide" disabled={state.status === "sending"}>
-              {state.status === "sending" ? "Please wait…" : mode === "password" ? "Sign in" : "Email me a sign-in link"}
+              {state.status === "sending" ? "Please wait…" : mode === "password" ? "Sign in" : mode === "reset" ? "Email me a reset link" : "Email me a sign-in link"}
             </button>
-            <button type="button" className="link" style={{ marginTop: 12 }} onClick={() => { setMode(mode === "password" ? "link" : "password"); setState({ status: "idle" }); }}>
-              {mode === "password" ? "No password yet? Email me a sign-in link" : "Sign in with a password instead"}
-            </button>
+            <div className="login-links">
+              {mode !== "password" && <button type="button" className="link" onClick={() => switchMode("password")}>Sign in with a password</button>}
+              {mode !== "reset" && <button type="button" className="link" onClick={() => switchMode("reset")}>Forgot or never set a password?</button>}
+              {mode !== "link" && <button type="button" className="link" onClick={() => switchMode("link")}>Email me a sign-in link</button>}
+            </div>
             {state.status === "error" && <p className="error">{state.message}</p>}
           </form>
         )}
@@ -130,7 +151,7 @@ const PASSWORD_RULES = [
   { label: "A number", test: (p) => /[0-9]/.test(p) },
 ];
 
-function PasswordModal({ onClose }) {
+function PasswordModal({ onClose, setup = false }) {
   const [pw, setPw] = useState("");
   const [confirm, setConfirm] = useState("");
   const [show, setShow] = useState(false);
@@ -163,7 +184,8 @@ function PasswordModal({ onClose }) {
           </>
         ) : (
           <form onSubmit={save} className="form">
-            <h2>Change password</h2>
+            <h2>{setup ? "Choose your password" : "Change password"}</h2>
+            {setup && <p className="muted small">Welcome to ThinkGita Circles. Choose a password so you can sign in with it next time.</p>}
             <label>New password
               <input type={show ? "text" : "password"} autoFocus autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} />
             </label>
@@ -179,7 +201,7 @@ function PasswordModal({ onClose }) {
             <label className="check"><input type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} /> Show password</label>
             {state.status === "error" && <p className="error small">{state.message}</p>}
             <div className="actions">
-              <button type="button" className="ghost" onClick={onClose}>Cancel</button>
+              <button type="button" className="ghost" onClick={onClose}>{setup ? "Later" : "Cancel"}</button>
               <button className="primary" disabled={!allMet || !matches || state.status === "saving"}>
                 {state.status === "saving" ? "Saving…" : "Save password"}
               </button>

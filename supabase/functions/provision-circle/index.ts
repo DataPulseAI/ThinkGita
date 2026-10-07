@@ -1,7 +1,8 @@
 // Admin-only actions that touch Zoom and email.
-// POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences",
-//        circle_id?, patch?, facilitator?, date?, licence_id? }
+// POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences" | "test_email",
+//        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template? }
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { buildVars, render, DEFAULT_TEMPLATES } from "./template.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const db = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
@@ -24,7 +25,6 @@ const cors = {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
-const DAY_NAMES = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 // ---------- Zoom ----------
 let zoomToken: string | null = null;
@@ -69,32 +69,42 @@ function weeksBetween(a: string, b: string) {
 }
 
 // ---------- Email ----------
-// Everything interpolated into email HTML is escaped (names come from a public form).
-const esc = (v: unknown) =>
-  String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]!));
-async function sendDetailsEmail(circle: any, facilitator: any, licence: any) {
-  if (!RESEND_API_KEY || !EMAIL_FROM) return "skipped (RESEND_API_KEY / EMAIL_FROM not set)";
-  if (!facilitator?.email) return "skipped (no facilitator)";
-  const when = `${DAY_NAMES[circle.weekday]}s at ${String(circle.start_time).slice(0, 5)} (${circle.timezone})`;
-  const hostKey = licence?.host_key;
-  const html = `
-    <p>Hi ${esc(facilitator?.name)},</p>
-    <p>Your circle <b>${esc(circle.name)}</b> is set up on Zoom. It runs every ${esc(when)} for ${esc(circle.duration_min)} minutes,
-    from ${esc(circle.starts_on)} until ${esc(circle.ends_on ?? "further notice")}.</p>
-    <p><b>Join link:</b> <a href="${esc(circle.join_url)}">${esc(circle.join_url)}</a><br/>
-    <b>Meeting ID:</b> ${esc(circle.zoom_meeting_id)}<br/>
-    <b>Passcode:</b> ${esc(circle.passcode ?? "none")}<br/>
-    <b>Host key:</b> ${esc(hostKey ?? "ask the ThinkGita team")} (private: for you only, never share it)</p>
-    <p>To run the session: join with the link, open <i>Participants</i>, choose <i>Claim host</i> and enter the host key.
-    The link stays the same every week, so you can pin it in your WhatsApp group.</p>
-    ${APP_URL ? `<p>You can always see these details at <a href="${esc(APP_URL)}">${esc(APP_URL)}</a> by signing in with this email address.</p>` : ""}
-    <p>Thank you for leading a circle.</p>`;
+// Text comes from the editable templates (dashboard Emails tab); template.ts escapes all values.
+type TemplateKey = "approved" | "updated";
+async function loadTemplate(key: TemplateKey) {
+  const { data } = await db.from("email_templates").select("subject, body").eq("key", key).maybeSingle();
+  return data ?? DEFAULT_TEMPLATES[key];
+}
+async function sendEmail(to: string, subject: string, html: string, text: string) {
   const r = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: EMAIL_FROM, to: facilitator.email, subject: `Your circle: ${String(circle.name).replace(/[\r\n]/g, " ")}`, html }),
+    body: JSON.stringify({ from: EMAIL_FROM, to, subject, html, text }),
   });
   return r.ok ? "sent" : `failed: ${r.status} ${await r.text()}`;
+}
+async function sendDetailsEmail(key: TemplateKey, circle: any, facilitator: any, licence: any) {
+  if (!RESEND_API_KEY || !EMAIL_FROM) return "skipped (RESEND_API_KEY / EMAIL_FROM not set)";
+  if (!facilitator?.email) return "skipped (no facilitator)";
+  const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
+  const template = await loadTemplate(key);
+  const vars = buildVars({ circle, facilitator, licence, settings, appUrl: APP_URL });
+  const { subject, html, text } = render(template, vars);
+  return await sendEmail(facilitator.email, subject, html, text);
+}
+
+// Send a rendered template (saved or unsaved draft) for one circle to the admin's own inbox.
+async function testEmail(circleId: string, actor: string, key: TemplateKey, draft?: { subject?: string; body?: string }) {
+  if (!RESEND_API_KEY || !EMAIL_FROM) throw new Error("Email isn't set up yet (RESEND_API_KEY / EMAIL_FROM)");
+  const c = await loadCircle(circleId);
+  const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
+  const template = draft?.subject != null && draft?.body != null ? draft : await loadTemplate(key);
+  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: c.licence, settings, appUrl: APP_URL });
+  const { subject, html, text } = render(template as { subject: string; body: string }, vars);
+  const result = await sendEmail(actor, `[TEST] ${subject}`, html, text);
+  if (result !== "sent") throw new Error(`Test email ${result}`);
+  await audit(actor, "test_email", c.id, { template: key });
+  return { email: result, to: actor };
 }
 
 async function inviteFacilitator(email: string) {
@@ -211,7 +221,7 @@ async function provision(circleId: string, actor: string) {
   }
 
   const invite = await inviteFacilitator(c.facilitator.email);
-  const email = await sendDetailsEmail(updated, c.facilitator, c.licence);
+  const email = await sendDetailsEmail("approved", updated, c.facilitator, c.licence);
   await audit(actor, "provision", c.id, { meeting_id: meeting.id, invite, email, mock: Boolean(c.licence.is_mock) });
   return { status: "live", meeting_id: meeting.id, join_url: meeting.join_url, invite, email, mock: Boolean(c.licence.is_mock) };
   } catch (e) {
@@ -237,7 +247,7 @@ async function cancel(circleId: string, actor: string) {
 async function resend(circleId: string, actor: string) {
   const c = await loadCircle(circleId);
   if (c.status !== "live") throw new Error("Only live circles have details to send");
-  const email = await sendDetailsEmail(c, c.facilitator, c.licence);
+  const email = await sendDetailsEmail("approved", c, c.facilitator, c.licence);
   await audit(actor, "resend", c.id, { email });
   return { email };
 }
@@ -285,7 +295,7 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
   }
 
   const { data: final } = await db.from("circles").update({ starts_on: startsOn }).eq("id", c.id).select("*").single();
-  const email = await sendDetailsEmail(final, c.facilitator, c.licence);
+  const email = await sendDetailsEmail("updated", final, c.facilitator, c.licence);
   await audit(actor, "reschedule", c.id, { from: old, to: clean, email });
   return { status: "live", starts_on: startsOn, email };
 }
@@ -308,7 +318,7 @@ async function handover(circleId: string, actor: string, person: { name?: string
   let sent = "";
   if (c.status === "live") {
     invite = await inviteFacilitator(email);
-    sent = await sendDetailsEmail(c, fac, c.licence);
+    sent = await sendDetailsEmail("approved", c, fac, c.licence);
   }
   await audit(actor, "handover", c.id, { from: c.facilitator?.email, to: email, invite, email: sent });
   return { invite, email: sent };
@@ -384,7 +394,7 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
   if (c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
     await zoom(`/meetings/${c.zoom_meeting_id}`, { method: "DELETE" }).catch(() => {});
   }
-  const email = await sendDetailsEmail(updated, c.facilitator, target);
+  const email = await sendDetailsEmail("updated", updated, c.facilitator, target);
   await audit(actor, "move_licence", c.id, { from: c.licence?.label, to: target.label, old_meeting: c.zoom_meeting_id, new_meeting: meeting.id, email });
   return { licence: target.label, join_url: meeting.join_url, email };
 }
@@ -420,7 +430,7 @@ Deno.serve(async (req) => {
   if (!admin) return json({ error: "Admins only" }, 403);
 
   try {
-    const { action, circle_id, patch, facilitator, date, licence_id } = await req.json();
+    const { action, circle_id, patch, facilitator, date, licence_id, template_key, template } = await req.json();
     switch (action) {
       case "provision": return json(await provision(circle_id, email));
       case "cancel": return json(await cancel(circle_id, email));
@@ -430,6 +440,7 @@ Deno.serve(async (req) => {
       case "handover": return json(await handover(circle_id, email, facilitator));
       case "end_on": return json(await endOn(circle_id, email, date));
       case "move_licence": return json(await moveLicence(circle_id, email, licence_id));
+      case "test_email": return json(await testEmail(circle_id, email, template_key === "updated" ? "updated" : "approved", template));
       default: return json({ error: `Unknown action ${action}` }, 400);
     }
   } catch (e) {
