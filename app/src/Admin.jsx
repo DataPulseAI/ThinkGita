@@ -7,7 +7,7 @@ import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders } from "./emailTemplate.js";
 
 const ACTIVE = ["pending", "approved", "live"];
-const TABS = ["Overview", "Schedule", "Queue", "Circles", "Licences", "Requests", "Emails", "Settings"];
+const TABS = ["Overview", "Schedule", "Queue", "Circles", "Licences", "Zoom", "Attendance", "Requests", "Emails", "Settings"];
 const APP_URL = window.location.href.split("#")[0];
 
 // Approval email values still blank for a circle (Zoom details are filled in on approval).
@@ -55,7 +55,8 @@ export default function Admin() {
   const [toast, setToast] = useState(null);
 
   const load = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+    const { data: { session } } = await supabase.auth.getSession();
+    const user = session?.user;
     const [circles, licences, settings, requests, log, templates, admins] = await Promise.all([
       supabase.from("circles").select("*, facilitator:facilitators(*), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time"),
       supabase.from("licences").select("*").order("sort_order").order("label"),
@@ -120,7 +121,7 @@ export default function Admin() {
   return (
     <div className="admin">
       <nav className="tabs">
-        {TABS.map((t) => (
+        {TABS.filter((t) => t !== "Attendance" || data.me?.is_super).map((t) => (
           <button key={t} className={t === tab ? "tab active" : "tab"} onClick={() => setTab(t)}>
             {t}
             {t === "Queue" && queueCount > 0 && <span className="count">{queueCount}</span>}
@@ -135,6 +136,8 @@ export default function Admin() {
         {tab === "Circles" && <Circles data={data} onSelect={select} onNew={() => setSelected("new")} onDelete={deleteCircle} />}
         {tab === "Licences" && <Licences data={data} run={run} notify={notify} />}
         {tab === "Requests" && <Requests data={data} run={run} onSelect={(id) => select(data.circles.find((c) => c.id === id))} />}
+        {tab === "Zoom" && <ZoomMeetings data={data} run={run} onSelect={select} />}
+        {tab === "Attendance" && data.me?.is_super && <Attendance data={data} run={run} />}
         {tab === "Emails" && <Emails data={data} run={run} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
       </main>
@@ -1030,17 +1033,7 @@ function Licences({ data, run, notify }) {
   const dirty = rows.some((r) => r._dirty);
   const [syncing, setSyncing] = useState(false);
   const [keyBusy, setKeyBusy] = useState(null);
-  const [listing, setListing] = useState(false);
-  const [meetings, setMeetings] = useState(null);
-  async function listMeetings() {
-    setListing(true);
-    const out = await run(() => adminAction("list_zoom_meetings"), (o) => {
-      const n = o.accounts.reduce((t, a) => t + a.meetings.length, 0);
-      return `${n} meeting${n === 1 ? "" : "s"} across ${o.accounts.length} Zoom accounts`;
-    });
-    setListing(false);
-    if (out && out !== true) setMeetings(out);
-  }
+
 
   // Zoom no longer reveals existing host keys, so the system sets a new random one on the Zoom user.
   async function setHostKey(r) {
@@ -1096,7 +1089,6 @@ function Licences({ data, run, notify }) {
             if (error) throw error;
           }, "Licence added")}>Add licence</button>
           <button disabled={syncing} onClick={syncFromZoom}>{syncing ? "Syncing…" : "Sync from Zoom"}</button>
-          <button disabled={listing} onClick={listMeetings}>{listing ? "Loading…" : "Zoom meetings"}</button>
           <button className="primary" disabled={!dirty} onClick={saveAll}>{dirty ? "Save changes" : "Saved"}</button>
         </div>
       </div>
@@ -1107,29 +1099,6 @@ function Licences({ data, run, notify }) {
         <b> Mock</b> is for testing only: approving a circle on a mock licence creates fake Zoom details.
       </p>
 
-      {meetings && (
-        <div className="details zoom-meetings">
-          <div className="details-head">
-            <span className="section-title">Meetings in Zoom ({new Date(meetings.taken_at).toLocaleString()})</span>
-            <button className="link small" onClick={() => setMeetings(null)}>Hide</button>
-          </div>
-          {meetings.accounts.map((a) => (
-            <div key={a.email} className="zm-account">
-              <div className="zm-head"><b>{a.label}</b> <span className="muted small">{a.email}{a.active ? "" : " · inactive here"}</span></div>
-              {a.error && <p className="error small">{a.error}</p>}
-              {!a.error && !a.meetings.length && <p className="muted small">No scheduled meetings.</p>}
-              {a.meetings.map((m) => (
-                <div key={m.id} className="zm-row">
-                  <span className="zm-topic">{m.topic}{m.circle ? <span className="pill small st-live">this system</span> : null}</span>
-                  <span className="small">{m.repeats ?? m.type}{m.next ? ` · next ${new Date(m.next).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : m.start_time ? ` · ${new Date(m.start_time).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : ""}{m.duration ? ` · ${m.duration} min` : ""}</span>
-                  <span className="muted small">{m.ends ? `ends ${String(m.ends).startsWith("after") ? m.ends : fmtDate(String(m.ends).slice(0, 10))}` : ""}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-          <p className="muted small">Times are shown in your browser's timezone. Meetings marked "this system" were created by the dashboard; the rest were set up directly in Zoom and aren't known to the clash checks.</p>
-        </div>
-      )}
       {syncResult && (
         <div className="details sync-result">
           <div className="details-head">
@@ -1649,5 +1618,417 @@ function AdminName({ admin, run, onSaved }) {
         }, "Name saved")}>Save</button>
       )}
     </span>
+  );
+}
+
+/* ---------------- Zoom (what's actually booked in Zoom) ---------------- */
+const fmtWhen = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+function ago(iso) {
+  const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const h = Math.round(mins / 60);
+  if (h < 24) return `${h} hour${h > 1 ? "s" : ""} ago`;
+  const d = Math.round(h / 24);
+  return `${d} day${d > 1 ? "s" : ""} ago`;
+}
+const csvCell = (v) => {
+  const s = v == null ? "" : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+function ZoomMeetings({ data, run, onSelect }) {
+  const [snap, setSnap] = useState(undefined); // undefined = loading, null = never synced
+  const [syncing, setSyncing] = useState(false);
+  const [q, setQ] = useState("");
+  const [account, setAccount] = useState("all");
+  const [kind, setKind] = useState("all");
+  const [source, setSource] = useState("all");
+
+  const loadLatest = useCallback(async () => {
+    const { data: rows } = await supabase.from("audit_log").select("at, actor, detail")
+      .eq("action", "zoom_meetings_snapshot").order("at", { ascending: false }).limit(1);
+    setSnap(rows?.[0] ?? null);
+  }, []);
+  useEffect(() => { loadLatest(); }, [loadLatest]);
+
+  async function sync() {
+    setSyncing(true);
+    await run(() => adminAction("list_zoom_meetings"), (o) => {
+      const n = o.accounts.reduce((t, a) => t + a.meetings.length, 0);
+      return `Synced: ${n} meeting${n === 1 ? "" : "s"} across ${o.accounts.length} Zoom accounts`;
+    });
+    await loadLatest();
+    setSyncing(false);
+  }
+
+  const accounts = snap?.detail?.accounts ?? [];
+  const rows = useMemo(() => accounts.flatMap((a) => a.meetings.map((m) => ({
+    ...m, account: a.label, account_email: a.email, account_active: a.active,
+    weekly: m.type === "weekly/recurring", ours: Boolean(m.circle),
+    when: m.next ?? m.start_time ?? null,
+  }))).sort((x, y) => x.account.localeCompare(y.account, undefined, { numeric: true }) || String(x.when ?? "~").localeCompare(String(y.when ?? "~"))), [snap]);
+
+  const shown = rows.filter((r) =>
+    (account === "all" || r.account === account) &&
+    (kind === "all" || (kind === "weekly" ? r.weekly : !r.weekly)) &&
+    (source === "all" || (source === "ours" ? r.ours : !r.ours)) &&
+    (!q || `${r.topic} ${r.account} ${r.account_email} ${r.circle ?? ""}`.toLowerCase().includes(q.toLowerCase())));
+
+  const weekly = rows.filter((r) => r.weekly).length;
+  const ours = rows.filter((r) => r.ours).length;
+  const outside = rows.length - ours;
+  const errors = accounts.filter((a) => a.error);
+  const outsideActive = rows.filter((r) => !r.ours && r.account_active).length;
+
+  function exportCsv() {
+    const head = ["Account", "Account email", "Meeting", "Type", "Repeats", "Next or start (UTC)", "Length (min)", "Meeting timezone", "Ends", "Sessions left", "Source", "Circle", "Zoom meeting ID"];
+    const lines = shown.map((r) => [r.account, r.account_email, r.topic, r.weekly ? "Weekly" : r.type, r.repeats ?? "", r.when ?? "", r.duration ?? "",
+      r.timezone ?? "", r.ends ?? "", r.sessions_left ?? "", r.ours ? "This system" : "Outside this system", r.circle ?? "", r.id].map(csvCell).join(","));
+    const blob = new Blob([[head.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `zoom-meetings-${(snap?.at ?? new Date().toISOString()).slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const openCircle = (r) => {
+    const c = data.circles.find((x) => String(x.zoom_meeting_id) === String(r.id));
+    if (c) onSelect(c);
+  };
+
+  return (
+    <section className="card zoom-tab">
+      <div className="card-head">
+        <div>
+          <h2>Meetings in Zoom</h2>
+          <p className="muted small zoom-synced">
+            {snap === undefined ? "Loading…" : snap
+              ? <>Last synced <b>{ago(snap.at)}</b> · {new Date(snap.at).toLocaleString()} · by {snap.actor}</>
+              : "Not synced yet."}
+          </p>
+        </div>
+        <div className="filters">
+          <button disabled={!shown.length} onClick={exportCsv} title="Downloads a CSV of the meetings in the table below">
+            {shown.length === rows.length ? "Export all (CSV)" : `Export filtered: ${shown.length} of ${rows.length} (CSV)`}
+          </button>
+          <button className="primary" disabled={syncing} onClick={sync}>{syncing ? "Syncing…" : "Sync now"}</button>
+        </div>
+      </div>
+
+      {snap === null && (
+        <div className="empty">
+          <p>See every meeting booked on your Zoom accounts, including ones set up directly in Zoom, so nothing clashes with new circles.</p>
+          <p className="muted small">Needs the Zoom app scope <code>meeting:read:list_meetings:admin</code>.</p>
+        </div>
+      )}
+
+      {snap && (
+        <>
+          <div className="stats zoom-stats">
+            <Stat label="Weekly series" value={weekly} onClick={() => { setKind("weekly"); setSource("all"); }} />
+            <Stat label="One-off meetings" value={rows.length - weekly} onClick={() => { setKind("oneoff"); setSource("all"); }} />
+            <Stat label="Created by this system" value={ours} tone="live" onClick={() => { setSource("ours"); setKind("all"); }} />
+            <Stat label="Set up outside this system" value={outside} tone={outside ? "warn" : undefined} onClick={() => { setSource("outside"); setKind("all"); }} />
+          </div>
+          {outsideActive > 0 && (
+            <p className="hint">{outsideActive} meeting{outsideActive > 1 ? "s were" : " was"} set up directly in Zoom on active licences. The clash checks don't know about {outsideActive > 1 ? "them" : "it"}, so a new circle could be booked over {outsideActive > 1 ? "them" : "it"}. Filter by "Outside" to review.</p>
+          )}
+          {errors.length > 0 && (
+            <p className="error small">Couldn't read {errors.map((a) => a.label).join(", ")}: {errors[0].error}</p>
+          )}
+
+          <div className="zoom-accounts">
+            {accounts.map((a) => {
+              const n = a.meetings.length;
+              const w = a.meetings.filter((m) => m.type === "weekly/recurring").length;
+              const out = a.meetings.filter((m) => !m.circle).length;
+              return (
+                <button key={a.email} className={`zoom-acc ${account === a.label ? "on" : ""} ${a.active ? "" : "inactive"}`}
+                  onClick={() => setAccount(account === a.label ? "all" : a.label)} title={a.email}>
+                  <span className="za-label">{a.label}</span>
+                  <span className="za-count">{a.error ? "!" : n}</span>
+                  <span className="za-sub">{a.error ? "error" : n ? `${w} weekly${out ? ` · ${out} outside` : ""}` : "free"}{a.active ? "" : " · inactive"}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="zoom-filters">
+            <input type="search" placeholder="Search meeting, account or circle…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <div className="seg">
+              {[["all", "All"], ["weekly", "Weekly"], ["oneoff", "One-off"]].map(([k, l]) => <button key={k} className={kind === k ? "active" : ""} onClick={() => setKind(k)}>{l}</button>)}
+            </div>
+            <div className="seg">
+              {[["all", "Any source"], ["ours", "This system"], ["outside", "Outside"]].map(([k, l]) => <button key={k} className={source === k ? "active" : ""} onClick={() => setSource(k)}>{l}</button>)}
+            </div>
+            {(account !== "all" || kind !== "all" || source !== "all" || q) && (
+              <button className="link small" onClick={() => { setAccount("all"); setKind("all"); setSource("all"); setQ(""); }}>Clear filters</button>
+            )}
+          </div>
+
+          <div className="table-wrap">
+            <table className="table zoom-table">
+              <thead><tr><th>Meeting</th><th>Account</th><th>Repeats</th><th>Next session</th><th>Length</th><th>Ends</th><th>Source</th></tr></thead>
+              <tbody>
+                {shown.map((r) => (
+                  <tr key={`${r.account}-${r.id}`} className={r.ours ? "clickable" : ""} onClick={() => r.ours && openCircle(r)}>
+                    <td><div className="zt-topic">{r.topic}<span className="muted small">ID {r.id}</span></div></td>
+                    <td>{r.account}{!r.account_active && <span className="muted small"> (inactive)</span>}</td>
+                    <td>{r.weekly ? (r.repeats ?? "Weekly").replace(/^weekly/, "Weekly") : "One-off"}</td>
+                    <td>{fmtWhen(r.when) || "–"}</td>
+                    <td>{r.duration ? `${r.duration} min` : "–"}</td>
+                    <td className="small">{r.ends ? (String(r.ends).startsWith("after") ? r.ends : fmtDate(String(r.ends).slice(0, 10))) : r.weekly ? "–" : ""}{r.sessions_left ? <span className="muted"> · {r.sessions_left} left</span> : null}</td>
+                    <td>{r.ours ? <span className="pill st-live">This system</span> : <span className="pill st-pending">Outside</span>}</td>
+                  </tr>
+                ))}
+                {!shown.length && <tr><td colSpan="7" className="muted">{rows.length ? "No meetings match these filters." : "No scheduled meetings on any account."}</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          <p className="muted small">Times are in your own timezone. Click a "This system" row to open its circle. Export includes every account unless you filter.</p>
+        </>
+      )}
+    </section>
+  );
+}
+
+/* ---------------- Attendance (super admins only) ---------------- */
+const DRIFT_SESSIONS = 3; // regulars missing this many sessions in a row are flagged
+const shortDate = (iso) => new Date(iso).toLocaleDateString([], { day: "numeric", month: "short" });
+
+// One circle's sessions and people, from raw rows.
+function buildCircle(sessions, rowsBySession) {
+  const ordered = [...sessions].sort((a, b) => a.started_at.localeCompare(b.started_at));
+  const people = new Map();
+  ordered.forEach((s, i) => {
+    for (const r of rowsBySession.get(s.id) ?? []) {
+      const p = people.get(r.person_key) ?? { key: r.person_key, name: r.name, email: r.email, attended: new Map(), lastIdx: -1 };
+      p.attended.set(s.id, r.minutes);
+      p.lastIdx = Math.max(p.lastIdx, i);
+      if (!p.name && r.name) p.name = r.name;
+      if (!p.email && r.email) p.email = r.email;
+      people.set(r.person_key, p);
+    }
+  });
+  const list = [...people.values()].map((p) => ({
+    ...p,
+    count: p.attended.size,
+    missedSince: ordered.length - 1 - p.lastIdx,
+    drifting: p.attended.size >= 2 && ordered.length - 1 - p.lastIdx >= DRIFT_SESSIONS,
+    lastSeen: ordered[p.lastIdx]?.started_at,
+  })).sort((a, b) => b.count - a.count || String(a.name).localeCompare(String(b.name)));
+  return { sessions: ordered, people: list };
+}
+
+function HeadcountBars({ sessions, max, compact }) {
+  const top = Math.max(1, max ?? Math.max(...sessions.map((s) => s.participant_count), 1));
+  return (
+    <div className={`hc-bars ${compact ? "compact" : ""}`} role="img"
+      aria-label={`Headcount per session: ${sessions.map((s) => `${shortDate(s.started_at)} ${s.participant_count}`).join(", ")}`}>
+      {sessions.map((s, i) => (
+        <Hover key={s.id} content={<div><b>{fmtWhen(s.started_at)}</b><div>{s.participant_count} attended</div></div>}>
+          <span className="hc-col" tabIndex={compact ? -1 : 0}>
+            {!compact && i === sessions.length - 1 && <span className="hc-val">{s.participant_count}</span>}
+            <span className="hc-bar" style={{ height: `${Math.max(4, (s.participant_count / top) * 100)}%` }} />
+            {!compact && <span className="hc-date">{shortDate(s.started_at)}</span>}
+          </span>
+        </Hover>
+      ))}
+    </div>
+  );
+}
+
+function Attendance({ data, run }) {
+  const [state, setState] = useState(null); // { sessions, rows, last }
+  const [syncing, setSyncing] = useState(false);
+  const [open, setOpen] = useState(null); // circle key being viewed
+  const [onlyDrift, setOnlyDrift] = useState(false);
+
+  const load = useCallback(async () => {
+    const [s, a, l] = await Promise.all([
+      supabase.from("attendance_sessions").select("*").order("started_at"),
+      supabase.from("attendance").select("session_id, person_key, name, email, minutes").range(0, 49999),
+      supabase.from("audit_log").select("at, actor, detail").eq("action", "sync_attendance").order("at", { ascending: false }).limit(1),
+    ]);
+    setState({ sessions: s.data ?? [], rows: a.data ?? [], last: l.data?.[0] ?? null, error: s.error?.message ?? a.error?.message });
+    return l.data?.[0] ?? null;
+  }, []);
+
+  async function sync() {
+    setSyncing(true);
+    let more = true, total = 0, guard = 0;
+    while (more && guard++ < 10) {
+      const out = await run(() => adminAction("sync_attendance"), null);
+      if (!out || out === true) break;
+      total += out.sessions_added;
+      more = out.more;
+    }
+    await load();
+    setSyncing(false);
+    return total;
+  }
+
+  // Load, then refresh automatically if the last sync is over 12 hours old.
+  useEffect(() => {
+    load().then((last) => { if (!last || Date.now() - Date.parse(last.at) > 12 * 3600e3) sync(); });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const model = useMemo(() => {
+    if (!state) return null;
+    const rowsBySession = new Map();
+    for (const r of state.rows) {
+      if (!rowsBySession.has(r.session_id)) rowsBySession.set(r.session_id, []);
+      rowsBySession.get(r.session_id).push(r);
+    }
+    const groups = new Map();
+    for (const s of state.sessions) {
+      const key = s.circle_id ?? `meeting:${s.zoom_meeting_id}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(s);
+    }
+    const circles = [...groups.entries()].map(([key, sessions]) => {
+      const live = data.circles.find((c) => c.id === key);
+      const built = buildCircle(sessions, rowsBySession);
+      const recent = built.sessions.slice(-4);
+      return {
+        key, name: live?.name ?? sessions[sessions.length - 1].circle_name ?? `Zoom meeting ${sessions[0].zoom_meeting_id}`,
+        status: live?.status, ...built,
+        avg: recent.length ? recent.reduce((t, s) => t + s.participant_count, 0) / recent.length : 0,
+        drifting: built.people.filter((p) => p.drifting).length,
+      };
+    }).sort((a, b) => String(b.sessions.at(-1)?.started_at).localeCompare(String(a.sessions.at(-1)?.started_at)));
+    const weekAgo = Date.now() - 7 * 86400e3, monthAgo = Date.now() - 28 * 86400e3;
+    const lastMonth = state.sessions.filter((s) => Date.parse(s.started_at) > monthAgo);
+    return {
+      circles, rowsBySession,
+      thisWeek: state.sessions.filter((s) => Date.parse(s.started_at) > weekAgo).length,
+      avg: lastMonth.length ? lastMonth.reduce((t, s) => t + s.participant_count, 0) / lastMonth.length : 0,
+      people: new Set(state.rows.map((r) => r.person_key)).size,
+      drifting: circles.reduce((t, c) => t + c.drifting, 0),
+    };
+  }, [state, data.circles]);
+
+  function exportCsv(circles) {
+    const head = ["Circle", "Session date", "Session start (UTC)", "Person", "Email", "Minutes"];
+    const lines = [];
+    for (const c of circles) for (const s of c.sessions) for (const r of model.rowsBySession.get(s.id) ?? []) {
+      lines.push([c.name, s.started_at.slice(0, 10), s.started_at, r.name ?? r.person_key, r.email ?? "", r.minutes].map(csvCell).join(","));
+    }
+    const blob = new Blob([[head.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `attendance-${circles.length === 1 ? "circle-" : ""}${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  if (!state || !model) return <section className="card"><p className="muted">Loading attendance…</p></section>;
+  const circle = open ? model.circles.find((c) => c.key === open) : null;
+
+  const header = (
+    <div className="card-head">
+      <div>
+        <h2>{circle ? <><button className="link" onClick={() => setOpen(null)}>Attendance</button> <span className="muted">/</span> {circle.name}</> : "Attendance"}</h2>
+        <p className="muted small zoom-synced">
+          {syncing ? "Syncing with Zoom…" : state.last ? <>Last synced <b>{ago(state.last.at)}</b> · {new Date(state.last.at).toLocaleString()}</> : "Not synced yet."}
+          {" "}· Super admins only
+        </p>
+      </div>
+      <div className="filters">
+        <button disabled={!state.rows.length} onClick={() => exportCsv(circle ? [circle] : model.circles)}>{circle ? "Export this circle (CSV)" : "Export all (CSV)"}</button>
+        <button className="primary" disabled={syncing} onClick={sync}>{syncing ? "Syncing…" : "Sync now"}</button>
+      </div>
+    </div>
+  );
+
+  if (circle) {
+    const people = onlyDrift ? circle.people.filter((p) => p.drifting) : circle.people;
+    return (
+      <section className="card attendance">
+        {header}
+        <div className="att-chart">
+          <span className="section-title">Headcount per session</span>
+          <HeadcountBars sessions={circle.sessions} />
+        </div>
+        <div className="att-people-head">
+          <span className="section-title">People ({circle.people.length})</span>
+          {circle.drifting > 0 && (
+            <label className="check"><input type="checkbox" checked={onlyDrift} onChange={(e) => setOnlyDrift(e.target.checked)} /> Only people not seen in {DRIFT_SESSIONS}+ sessions ({circle.drifting})</label>
+          )}
+        </div>
+        <div className="table-wrap">
+          <table className="table att-grid">
+            <thead>
+              <tr>
+                <th>Person</th><th>Attended</th><th>Last seen</th>
+                {circle.sessions.map((s) => <th key={s.id} className="att-col" title={fmtWhen(s.started_at)}>{shortDate(s.started_at)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {people.map((p) => (
+                <tr key={p.key}>
+                  <td><div className="att-person">{p.name || p.key}{p.email && <span className="muted small">{p.email}</span>}</div></td>
+                  <td>{p.count} of {circle.sessions.length} <span className="muted small">({Math.round((p.count / circle.sessions.length) * 100)}%)</span></td>
+                  <td>{shortDate(p.lastSeen)}{p.drifting && <span className="pill small st-conflict">Not seen in {p.missedSince}</span>}</td>
+                  {circle.sessions.map((s) => {
+                    const mins = p.attended.get(s.id);
+                    return <td key={s.id} className="att-cell" title={mins != null ? `${shortDate(s.started_at)}: ${mins} min` : `${shortDate(s.started_at)}: absent`}>
+                      {mins != null ? <span className="att-yes" aria-label="attended">●</span> : <span className="att-no" aria-label="absent">·</span>}
+                    </td>;
+                  })}
+                </tr>
+              ))}
+              {!people.length && <tr><td colSpan={3 + circle.sessions.length} className="muted">Nobody to show.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <p className="muted small">● attended · absent. Names are as shown in Zoom, so the same person under two names appears twice. Emails appear only for people signed in to Zoom.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="card attendance">
+      {header}
+      {state.error && <p className="error small">{state.error}</p>}
+      <div className="stats zoom-stats">
+        <Stat label="Sessions in the last 7 days" value={model.thisWeek} />
+        <Stat label="Average per session (4 weeks)" value={model.avg ? model.avg.toFixed(1) : "–"} />
+        <Stat label="People seen" value={model.people} />
+        <Stat label={`Regulars not seen in ${DRIFT_SESSIONS}+ sessions`} value={model.drifting} tone={model.drifting ? "warn" : undefined} />
+      </div>
+      {!model.circles.length ? (
+        <div className="empty">
+          <p>No sessions recorded yet. Attendance appears here after a circle's first Zoom session has finished and been synced.</p>
+          <p className="muted small">Needs a paid Zoom plan and the scopes <code>meeting:read:list_past_instances:admin</code> and <code>meeting:read:list_past_participants:admin</code>.</p>
+        </div>
+      ) : (
+        <div className="table-wrap">
+          <table className="table att-circles">
+            <thead><tr><th>Circle</th><th>Sessions</th><th>Avg (last 4)</th><th>Last session</th><th>Recent headcount</th><th>Not seen lately</th></tr></thead>
+            <tbody>
+              {model.circles.map((c) => {
+                const last = c.sessions.at(-1);
+                return (
+                  <tr key={c.key} className="clickable" onClick={() => { setOnlyDrift(false); setOpen(c.key); }}>
+                    <td>{blockName(c.name)}{c.status && c.status !== "live" && <span className="muted small"> ({STATUS_LABEL[c.status]})</span>}</td>
+                    <td>{c.sessions.length}</td>
+                    <td>{c.avg.toFixed(1)}</td>
+                    <td>{shortDate(last.started_at)} · {last.participant_count}</td>
+                    <td><HeadcountBars sessions={c.sessions.slice(-8)} compact /></td>
+                    <td>{c.drifting ? <span className="pill small st-conflict">{c.drifting}</span> : <span className="muted">0</span>}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="muted small">Synced from Zoom's participant lists; refreshes automatically when you open this tab if the last sync is over 12 hours old. Rejoins are merged into one attendance. Click a circle for its sessions and people.</p>
+    </section>
   );
 }

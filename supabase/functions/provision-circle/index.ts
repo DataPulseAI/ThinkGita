@@ -1,6 +1,6 @@
 // Admin-only actions that touch Zoom and email.
 // POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences"
-//          | "set_host_key" | "rename" | "list_zoom_meetings" | "test_email",
+//          | "set_host_key" | "rename" | "list_zoom_meetings" | "sync_attendance" | "test_email",
 //        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template? }
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildVars, render, DEFAULT_TEMPLATES } from "./template.ts";
@@ -567,6 +567,90 @@ async function listZoomMeetings(actor: string) {
   return summary;
 }
 
+// ---------- Attendance (super admins only) ----------
+// Zoom past-meeting UUIDs that start with "/" or contain "//" must be encoded twice.
+const encUuid = (u: string) => (u.startsWith("/") || u.includes("//") ? encodeURIComponent(encodeURIComponent(u)) : encodeURIComponent(u));
+const ATTENDANCE_BATCH = 60; // new sessions per run, to stay inside the function time limit
+
+async function syncAttendance(actor: string) {
+  const { data: me } = await db.from("admin_emails").select("is_super").eq("email", actor).maybeSingle();
+  if (!me?.is_super) throw new Error("Attendance is for super admins only");
+
+  const { data: circles } = await db.from("circles").select("id, name, zoom_meeting_id, status")
+    .not("zoom_meeting_id", "is", null).in("status", ["live", "paused", "ended"]);
+  const { data: known } = await db.from("attendance_sessions").select("zoom_uuid");
+  const seen = new Set((known ?? []).map((k) => k.zoom_uuid));
+  let added = 0, people = 0, more = false;
+  const problems: string[] = [];
+
+  for (const c of circles ?? []) {
+    if (String(c.zoom_meeting_id).startsWith("MOCK")) continue;
+    let instances: any[] = [];
+    try {
+      instances = (await zoom(`/past_meetings/${c.zoom_meeting_id}/instances`))?.meetings ?? [];
+    } catch (e) {
+      const msg = String(e);
+      if (/4711|scope/i.test(msg)) throw new Error("The Zoom app needs the meeting:read:list_past_instances:admin and meeting:read:list_past_participants:admin scopes");
+      if (!/404|3001/.test(msg)) problems.push(`${c.name}: ${msg.slice(0, 120)}`); // 404: nothing held yet, or meeting deleted
+      continue;
+    }
+    for (const inst of instances.sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))) {
+      if (!inst.uuid || seen.has(inst.uuid)) continue;
+      if (added >= ATTENDANCE_BATCH) { more = true; break; }
+      const parts: any[] = [];
+      try {
+        let token = "";
+        do {
+          const page = await zoom(`/past_meetings/${encUuid(inst.uuid)}/participants?page_size=300${token ? `&next_page_token=${encodeURIComponent(token)}` : ""}`);
+          parts.push(...(page?.participants ?? []));
+          token = page?.next_page_token ?? "";
+        } while (token);
+      } catch (e) {
+        const msg = String(e);
+        if (/4711|scope/i.test(msg)) throw new Error("The Zoom app needs the meeting:read:list_past_participants:admin scope");
+        if (/paid|200/i.test(msg) && /only/i.test(msg)) throw new Error("Zoom only shares past participants on paid (Pro or higher) accounts");
+        problems.push(`${c.name} ${inst.start_time}: ${msg.slice(0, 120)}`);
+        continue;
+      }
+      // Merge rejoins: one row per person (email if Zoom has it, otherwise the display name).
+      const byPerson = new Map<string, any>();
+      for (const p of parts) {
+        const email = String(p.user_email ?? "").trim().toLowerCase();
+        const name = String(p.name ?? "").trim();
+        const key = email || name.toLowerCase().replace(/\s+/g, " ");
+        if (!key) continue;
+        const cur = byPerson.get(key) ?? { person_key: key, name, email: email || null, first_join: p.join_time, last_leave: p.leave_time, seconds: 0 };
+        cur.seconds += Number(p.duration ?? 0);
+        if (p.join_time && (!cur.first_join || p.join_time < cur.first_join)) cur.first_join = p.join_time;
+        if (p.leave_time && (!cur.last_leave || p.leave_time > cur.last_leave)) cur.last_leave = p.leave_time;
+        if (!cur.name && name) cur.name = name;
+        byPerson.set(key, cur);
+      }
+      const rows = [...byPerson.values()];
+      const endedAt = rows.map((r) => r.last_leave).filter(Boolean).sort().pop() ?? null;
+      const { data: session, error } = await db.from("attendance_sessions").insert({
+        circle_id: c.id, circle_name: c.name, zoom_meeting_id: String(c.zoom_meeting_id), zoom_uuid: inst.uuid,
+        started_at: inst.start_time, ended_at: endedAt, participant_count: rows.length,
+      }).select("id").single();
+      if (error) { problems.push(`${c.name}: ${error.message}`); continue; }
+      if (rows.length) {
+        const { error: e2 } = await db.from("attendance").insert(rows.map((r) => ({
+          session_id: session.id, person_key: r.person_key, name: r.name || null, email: r.email,
+          first_join: r.first_join ?? null, last_leave: r.last_leave ?? null, minutes: Math.round(r.seconds / 60),
+        })));
+        if (e2) problems.push(`${c.name}: ${e2.message}`);
+      }
+      seen.add(inst.uuid);
+      added++;
+      people += rows.length;
+    }
+    if (more) break;
+  }
+  const summary = { sessions_added: added, attendances_added: people, more, problems: problems.slice(0, 10) };
+  await audit(actor, "sync_attendance", null, summary);
+  return summary;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -590,6 +674,7 @@ Deno.serve(async (req) => {
       case "handover": return json(await handover(circle_id, email, facilitator));
       case "end_on": return json(await endOn(circle_id, email, date));
       case "move_licence": return json(await moveLicence(circle_id, email, licence_id));
+      case "sync_attendance": return json(await syncAttendance(email));
       case "list_zoom_meetings": return json(await listZoomMeetings(email));
       case "rename": return json(await renameMeeting(circle_id));
       case "set_host_key": return json(await setHostKey(email, licence_id));
