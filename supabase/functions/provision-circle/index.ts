@@ -1,5 +1,6 @@
 // Admin-only actions that touch Zoom and email.
-// POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences" | "test_email",
+// POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences"
+//          | "set_host_key" | "rename" | "list_zoom_meetings" | "test_email",
 //        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template? }
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildVars, render, DEFAULT_TEMPLATES } from "./template.ts";
@@ -263,8 +264,11 @@ const RESCHEDULE_FIELDS = ["weekday", "start_time", "duration_min", "timezone", 
 async function reschedule(circleId: string, actor: string, patch: Record<string, unknown>) {
   const c = await loadCircle(circleId);
   if (c.status !== "live") throw new Error("Only live circles are rescheduled here; edit other circles directly");
-  const clean = Object.fromEntries(Object.entries(patch ?? {}).filter(([k]) => RESCHEDULE_FIELDS.includes(k)));
-  if (!Object.keys(clean).length) throw new Error("Nothing to change");
+  // Only fields that actually differ (a repeated save must not move the meeting or email again).
+  const norm = (k: string, v: unknown) => (v == null ? "" : k === "start_time" ? String(v).slice(0, 5) : String(v));
+  const clean = Object.fromEntries(Object.entries(patch ?? {})
+    .filter(([k, v]) => RESCHEDULE_FIELDS.includes(k) && norm(k, v) !== norm(k, c[k])));
+  if (!Object.keys(clean).length) return { status: "live", unchanged: true, email: "not needed (nothing changed)" };
   const old = Object.fromEntries(RESCHEDULE_FIELDS.map((k) => [k, c[k]]));
 
   const { data: updated, error } = await db.from("circles").update(clean).eq("id", c.id).select("*").single();
@@ -287,6 +291,7 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
       await zoom(`/meetings/${c.zoom_meeting_id}`, {
         method: "PATCH",
         body: JSON.stringify({
+          topic: updated.name,
           start_time: `${startsOn}T${String(updated.start_time).slice(0, 5)}:00`,
           timezone: updated.timezone,
           duration: updated.duration_min,
@@ -303,6 +308,14 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
   const email = await sendDetailsEmail("updated", final, c.facilitator, c.licence, actor);
   await audit(actor, "reschedule", c.id, { from: old, to: clean, email });
   return { status: "live", starts_on: startsOn, email };
+}
+
+// Keep the Zoom meeting title in line with the circle name (names follow host, day and time).
+async function renameMeeting(circleId: string) {
+  const c = await loadCircle(circleId);
+  if (c.status !== "live" || !c.zoom_meeting_id || String(c.zoom_meeting_id).startsWith("MOCK")) return { renamed: false };
+  await zoom(`/meetings/${c.zoom_meeting_id}`, { method: "PATCH", body: JSON.stringify({ topic: c.name }) });
+  return { renamed: true, name: c.name };
 }
 
 // Give a circle to a different facilitator, and invite them if the circle is live.
@@ -322,8 +335,10 @@ async function handover(circleId: string, actor: string, person: { name?: string
   let invite = "not needed yet (circle not live)";
   let sent = "";
   if (c.status === "live") {
+    await renameMeeting(c.id).catch(() => {});
     invite = await inviteFacilitator(email);
-    sent = await sendDetailsEmail("approved", c, fac, c.licence, actor);
+    const fresh = await loadCircle(c.id); // name may now follow the new host
+    sent = await sendDetailsEmail("approved", fresh, fac, fresh.licence, actor);
   }
   await audit(actor, "handover", c.id, { from: c.facilitator?.email, to: email, invite, email: sent });
   return { invite, email: sent };
@@ -436,7 +451,14 @@ async function syncLicences(actor: string) {
     const email = String(u.email).toLowerCase();
     const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.display_name || "";
     let hostKey: string | null = null;
-    try { hostKey = (await zoom(`/users/${encodeURIComponent(u.id)}`))?.host_key ?? null; } catch { /* reported below */ }
+    let hostKeyNote = "";
+    try {
+      const detail = await zoom(`/users/${encodeURIComponent(u.id)}`);
+      hostKey = detail?.host_key ?? null;
+      if (!hostKey) hostKeyNote = "Zoom didn't include a host key";
+    } catch (e) {
+      hostKeyNote = /4711|scope/i.test(String(e)) ? "missing scope user:read:user:admin" : String(e).slice(0, 160);
+    }
     const patch: Record<string, unknown> = { zoom_user_id: u.id, zoom_user_email: email };
     if (hostKey) patch.host_key = hostKey;
 
@@ -450,14 +472,14 @@ async function syncLicences(actor: string) {
       const { error } = await db.from("licences").update(patch).eq("id", match.id);
       if (error) { results.push({ label: match.label, email, name, ok: false, error: error.message }); continue; }
       used.add(match.id);
-      results.push({ label: match.label, email, name, ok: true, action, host_key: Boolean(hostKey) });
+      results.push({ label: match.label, email, name, ok: true, action, host_key: Boolean(hostKey), host_key_note: hostKeyNote });
     } else {
       const label = newLabel();
       const { data: created, error } = await db.from("licences")
         .insert({ ...patch, label, sort_order: nextSort++, active: true }).select("id").single();
       if (error) { results.push({ label, email, name, ok: false, error: error.message }); continue; }
       used.add(created.id);
-      results.push({ label, email, name, ok: true, action: "added", host_key: Boolean(hostKey) });
+      results.push({ label, email, name, ok: true, action: "added", host_key: Boolean(hostKey), host_key_note: hostKeyNote });
     }
   }
 
@@ -470,6 +492,78 @@ async function syncLicences(actor: string) {
   }
   const summary = { zoom_users: users.length, licensed: licensed.length, results };
   await audit(actor, "sync_licences", null, summary);
+  return summary;
+}
+
+// Zoom's API no longer returns existing host keys, but it can set one. For one licence:
+// make a random 6-digit key, set it on the Zoom user, then save it here. The user's old key stops working.
+async function setHostKey(actor: string, licenceId: string) {
+  const { data: l } = await db.from("licences").select("*").eq("id", licenceId).maybeSingle();
+  if (!l) throw new Error("Licence not found");
+  if (!l.zoom_user_id && !l.zoom_user_email) throw new Error(`${l.label} has no Zoom user yet. Run Sync from Zoom first.`);
+  const key = String((crypto.getRandomValues(new Uint32Array(1))[0] % 900000) + 100000);
+  try {
+    await zoom(`/users/${encodeURIComponent(l.zoom_user_id ?? l.zoom_user_email)}`, { method: "PATCH", body: JSON.stringify({ host_key: key }) });
+  } catch (e) {
+    throw new Error(/4711|scope/i.test(String(e)) ? "The Zoom app needs the user:update:user:admin scope to set host keys." : String(e));
+  }
+  const { error } = await db.from("licences").update({ host_key: key }).eq("id", l.id);
+  if (error) throw new Error(`Set in Zoom (${key}) but not saved here: ${error.message}. Type it into the licence manually.`);
+  await audit(actor, "set_host_key", null, { licence: l.label, replaced: Boolean(l.host_key) });
+  return { label: l.label, host_key: key };
+}
+
+// Every scheduled meeting on every licence's Zoom account (active or not), with weekly series expanded
+// to their day, time and next date. Flags which meetings this system created. Snapshot kept in the audit log.
+const ZOOM_DAYS = ["", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+async function listZoomMeetings(actor: string) {
+  const { data: licences } = await db.from("licences").select("id, label, zoom_user_id, zoom_user_email, active")
+    .not("zoom_user_email", "is", null).order("sort_order");
+  const { data: ours } = await db.from("circles").select("id, name, status, zoom_meeting_id").not("zoom_meeting_id", "is", null);
+  const byMeeting = new Map((ours ?? []).map((c) => [String(c.zoom_meeting_id), c]));
+  const accounts = [];
+  for (const l of licences ?? []) {
+    const meetings: any[] = [];
+    try {
+      let token = "";
+      do {
+        const page = await zoom(`/users/${encodeURIComponent(l.zoom_user_id ?? l.zoom_user_email)}/meetings?type=scheduled&page_size=300${token ? `&next_page_token=${encodeURIComponent(token)}` : ""}`);
+        meetings.push(...(page?.meetings ?? []));
+        token = page?.next_page_token ?? "";
+      } while (token);
+    } catch (e) {
+      const msg = /4711|scope/i.test(String(e)) ? "The Zoom app needs the meeting:read:list_meetings:admin scope" : String(e).slice(0, 200);
+      accounts.push({ label: l.label, email: l.zoom_user_email, active: l.active, error: msg, meetings: [] });
+      continue;
+    }
+    const rows = [];
+    for (const m of meetings) {
+      const row: Record<string, unknown> = {
+        id: String(m.id), topic: m.topic, type: m.type === 8 ? "weekly/recurring" : m.type === 3 ? "recurring, no fixed time" : "one-off",
+        start_time: m.start_time ?? null, duration: m.duration ?? null, timezone: m.timezone ?? null,
+      };
+      if (m.type === 8) {
+        try {
+          const d = await zoom(`/meetings/${m.id}`);
+          const r = d?.recurrence ?? {};
+          const days = String(r.weekly_days ?? "").split(",").filter(Boolean).map((n: string) => ZOOM_DAYS[Number(n)]).join(", ");
+          const next = (d?.occurrences ?? []).find((o: any) => o.status !== "deleted" && Date.parse(o.start_time) > Date.now());
+          Object.assign(row, {
+            repeats: r.type === 2 ? `weekly${days ? ` on ${days}` : ""}${r.repeat_interval > 1 ? ` (every ${r.repeat_interval} weeks)` : ""}` : r.type === 1 ? "daily" : r.type === 3 ? "monthly" : "recurring",
+            next: next?.start_time ?? null,
+            ends: r.end_date_time ?? (r.end_times ? `after ${r.end_times} sessions` : null),
+            sessions_left: (d?.occurrences ?? []).filter((o: any) => Date.parse(o.start_time) > Date.now()).length,
+          });
+        } catch { /* keep the summary row */ }
+      }
+      const circle = byMeeting.get(String(m.id));
+      if (circle) Object.assign(row, { circle: circle.name, circle_status: circle.status });
+      rows.push(row);
+    }
+    accounts.push({ label: l.label, email: l.zoom_user_email, active: l.active, meetings: rows });
+  }
+  const summary = { taken_at: new Date().toISOString(), accounts };
+  await audit(actor, "zoom_meetings_snapshot", null, summary);
   return summary;
 }
 
@@ -496,6 +590,9 @@ Deno.serve(async (req) => {
       case "handover": return json(await handover(circle_id, email, facilitator));
       case "end_on": return json(await endOn(circle_id, email, date));
       case "move_licence": return json(await moveLicence(circle_id, email, licence_id));
+      case "list_zoom_meetings": return json(await listZoomMeetings(email));
+      case "rename": return json(await renameMeeting(circle_id));
+      case "set_host_key": return json(await setHostKey(email, licence_id));
       case "test_email": return json(await testEmail(circle_id, email, template_key === "updated" ? "updated" : "approved", template));
       default: return json({ error: `Unknown action ${action}` }, 400);
     }

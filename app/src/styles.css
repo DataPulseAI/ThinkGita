@@ -361,3 +361,13 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .sync-row { display: grid; grid-template-columns: 110px minmax(0, 1.4fr) minmax(0, 1fr); gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 .sync-row:last-of-type { border-bottom: 0; }
 @media (max-width: 700px) { .sync-row { grid-template-columns: 1fr; gap: 2px; } }
+.hostkey-cell { display: flex; gap: 6px; align-items: center; }
+.hostkey-cell input { min-width: 90px; }
+.hostkey-cell button { padding: 5px 9px; font-size: 12px; }
+.zoom-meetings { margin-bottom: 12px; }
+.zm-account { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.zm-account:last-of-type { border-bottom: 0; }
+.zm-head { margin-bottom: 4px; }
+.zm-row { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1.4fr) minmax(0, .8fr); gap: 10px; padding: 3px 0 3px 12px; font-size: 14px; }
+.zm-topic { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+@media (max-width: 760px) { .zm-row { grid-template-columns: 1fr; gap: 1px; } }

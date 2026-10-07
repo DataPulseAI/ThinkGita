@@ -16,6 +16,8 @@ function emailGaps(c, data) {
   const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: data.licences.find((l) => l.id === c.licence_id), settings: data.settings, appUrl: APP_URL, sender: data.me?.name });
   return missingValues(template, vars, { beforeApproval: true });
 }
+// Schedule blocks are small and already placed by time: show just the host part of an automatic name.
+const blockName = (name) => String(name ?? "").replace(/^Gita Circles \| /, "").replace(/ \| [A-Z][a-z]+day \d{2}:\d{2} \([^)]*\)$/, "");
 const placeholderLabel = (k) => PLACEHOLDERS.find((p) => p.key === k)?.label ?? k;
 // Ask before approving when the email would say "to follow" for something.
 function confirmGaps(circles, data) {
@@ -234,7 +236,7 @@ function SetupChecklist({ data, onTab }) {
     {
       done: real.length > 0 && connected === real.length,
       what: `Connect Zoom licences (${connected} of ${real.length} have a Zoom user and host key)`,
-      how: "Licences tab: click Sync from Zoom to bring in every licensed Zoom user with their host key.",
+      how: "Licences tab: Sync from Zoom, then Set key on each licence that will host circles.",
       tab: "Licences",
     },
     {
@@ -345,7 +347,7 @@ function Schedule({ data, day, setDay, onSelect }) {
                       onClick={() => onSelect(c)}
                       aria-label={`${c.name}, ${ukWhen(c)} UK, ${STATUS_LABEL[c.status]}`}
                     >
-                      <span className="b-name">{c.name}</span>
+                      <span className="b-name">{blockName(c.name)}</span>
                       <span className="b-time">{hhmm(ukStart(c))}–{endTime(ukStart(c), c.duration_min)}</span>
                       {!lane.warn && (
                         <em className="buffer" style={{ width: `${(settings.buffer_minutes / c.duration_min) * 100}%`, right: `-${(settings.buffer_minutes / c.duration_min) * 100}%` }} />
@@ -576,6 +578,16 @@ function Circles({ data, onSelect, onNew, onDelete }) {
 }
 
 /* ---------------- Circle drawer ---------------- */
+// Facilitator details saved from the circle panel. A hand-edited name replaces the form's name parts,
+// so the automatic circle name uses exactly what the admin typed.
+function facilitatorPatch(fac, form, email) {
+  const patch = { phone: form.phone || null };
+  const typed = (form.facilitator_name || "").trim();
+  if (typed && typed !== (fac?.name ?? "")) Object.assign(patch, { name: typed, first_name: null, last_name: null, initiated_name: null });
+  else if (!fac?.name) patch.name = typed || email;
+  return patch;
+}
+
 function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
@@ -587,6 +599,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
   const editable = isNew || circle.status !== "ended";
   const [f, setF] = useState(() => ({
     name: circle?.name ?? "",
+    name_auto: circle?.name_auto ?? true,
     facilitator_name: circle?.facilitator?.name ?? "",
     facilitator_email: circle?.facilitator?.email ?? "",
     phone: circle?.facilitator?.phone ?? "",
@@ -621,7 +634,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
     const email = form.facilitator_email.trim().toLowerCase();
     if (!email) return c?.facilitator_id ?? null;
     if (c?.facilitator && c.facilitator.email === email) {
-      const { error } = await supabase.from("facilitators").update({ name: form.facilitator_name || email, phone: form.phone || null }).eq("id", c.facilitator_id);
+      const { error } = await supabase.from("facilitators").update(facilitatorPatch(c.facilitator, form, email)).eq("id", c.facilitator_id);
       if (error) throw error;
       return c.facilitator_id;
     }
@@ -656,29 +669,42 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
         done.push("handed over");
       } else if (circle.facilitator_id) {
         const { error: e2 } = await supabase.from("facilitators")
-          .update({ name: f.facilitator_name || newEmail, phone: f.phone || null }).eq("id", circle.facilitator_id);
+          .update(facilitatorPatch(circle.facilitator, f, newEmail)).eq("id", circle.facilitator_id);
         if (e2) throw e2;
       }
 
       const hasAlt = f.alt_weekday && f.alt_start_time;
-      const { error } = await supabase.from("circles").update({
-        name: f.name, circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
+      const { data: saved, error } = await supabase.from("circles").update({
+        name: f.name_auto ? circle.name : f.name, name_auto: f.name_auto,
+        circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
         alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
         ...linkFields(),
-      }).eq("id", id);
+      }).eq("id", id).select("name").single();
       if (error) throw error;
+      // The Zoom meeting title follows the circle name.
+      if (saved.name !== circle.name) {
+        await adminAction("rename", id);
+        done.push("Zoom title updated");
+      }
       return done;
     }, (done) => `Saved${done?.length ? `: ${done.join(", ")}` : ""}`);
     if (ok) onClose();
   }
 
+  // One save at a time: a double click must not move the Zoom meeting (and email the facilitator) twice.
+  const [saving, setSaving] = useState(false);
   async function save() {
-    if (live) return saveLive();
+    if (saving) return;
+    setSaving(true);
+    try { await (live ? saveLive() : saveDraft()); } finally { setSaving(false); }
+  }
+  async function saveDraft() {
     const ok = await run(async () => {
       const facilitator_id = await linkFacilitator(circle, f);
       const hasAlt = f.alt_weekday && f.alt_start_time;
       const row = {
-        name: f.name, facilitator_id, weekday: Number(f.weekday), start_time: f.start_time,
+        name: f.name_auto ? (circle?.name || "Gita Circles") : f.name, name_auto: f.name_auto,
+        facilitator_id, weekday: Number(f.weekday), start_time: f.start_time,
         alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
         duration_min: Number(f.duration_min), timezone: f.timezone, preferred_start: f.preferred_start || null,
         circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
@@ -891,7 +917,15 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
         )}
 
         <div className="form">
-          <label>Circle name<input value={f.name} onChange={set("name")} disabled={!editable} /></label>
+          <label>Circle name
+            <input value={f.name_auto && isNew ? "" : f.name} placeholder="Set automatically when saved" disabled={!editable}
+              onChange={(e) => setF({ ...f, name: e.target.value, name_auto: false })} />
+          </label>
+          <p className="muted small name-hint">
+            {f.name_auto
+              ? "Automatic: Gita Circles | Initiated Name (Host Name) | Day Time. Updates when the host, day or time changes. Type to set your own."
+              : <>Custom name. <button type="button" className="link small" disabled={!editable} onClick={() => setF({ ...f, name_auto: true, name: circle?.name ?? "" })}>Use automatic name</button></>}
+          </p>
           <div className="grid2">
             <label>Circle type<input value={f.circle_type} onChange={set("circle_type")} disabled={!editable} /></label>
             <label>Language<input value={f.language} onChange={set("language")} disabled={!editable} /></label>
@@ -951,8 +985,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
           <label>Notes<textarea rows="3" value={f.notes} onChange={set("notes")} disabled={!editable} /></label>
           {live && <p className="hint">Changing the day, time or length moves the existing Zoom meeting. The join link stays the same, and the facilitator is emailed the update.</p>}
           {editable && (
-            <button className="primary wide" disabled={!f.name} onClick={save}>
-              {isNew ? "Add circle" : circle.status === "rejected" ? "Save and put back in queue" : "Save changes"}
+            <button className="primary wide" disabled={(!f.name_auto && !f.name.trim()) || saving} onClick={save}>
+              {saving ? "Saving…" : isNew ? "Add circle" : circle.status === "rejected" ? "Save and put back in queue" : "Save changes"}
             </button>
           )}
         </div>
@@ -995,6 +1029,30 @@ function Licences({ data, run, notify }) {
   };
   const dirty = rows.some((r) => r._dirty);
   const [syncing, setSyncing] = useState(false);
+  const [keyBusy, setKeyBusy] = useState(null);
+  const [listing, setListing] = useState(false);
+  const [meetings, setMeetings] = useState(null);
+  async function listMeetings() {
+    setListing(true);
+    const out = await run(() => adminAction("list_zoom_meetings"), (o) => {
+      const n = o.accounts.reduce((t, a) => t + a.meetings.length, 0);
+      return `${n} meeting${n === 1 ? "" : "s"} across ${o.accounts.length} Zoom accounts`;
+    });
+    setListing(false);
+    if (out && out !== true) setMeetings(out);
+  }
+
+  // Zoom no longer reveals existing host keys, so the system sets a new random one on the Zoom user.
+  async function setHostKey(r) {
+    const live = data.circles.filter((c) => c.licence_id === r.id && c.status === "live").length;
+    const msg = r.host_key
+      ? `Give ${r.label} a new host key?\n\nThe current key (${r.host_key}) stops working straight away.${live ? ` ${live} live circle${live > 1 ? "s use" : " uses"} this licence: use Resend details email on ${live > 1 ? "each" : "it"} so the facilitator gets the new key.` : ""}`
+      : `Set a new host key on ${r.label} (${r.zoom_user_email})?\n\nAny host key already on that Zoom account stops working. Skip shared accounts (like Office or Info) if staff rely on their key.`;
+    if (!confirm(msg)) return;
+    setKeyBusy(r.id);
+    await run(() => adminAction("set_host_key", null, { licence_id: r.id }), (o) => `${o.label}: new host key ${o.host_key} set in Zoom`);
+    setKeyBusy(null);
+  }
   const [syncResult, setSyncResult] = useState(null);
 
   async function syncFromZoom() {
@@ -1038,15 +1096,40 @@ function Licences({ data, run, notify }) {
             if (error) throw error;
           }, "Licence added")}>Add licence</button>
           <button disabled={syncing} onClick={syncFromZoom}>{syncing ? "Syncing…" : "Sync from Zoom"}</button>
+          <button disabled={listing} onClick={listMeetings}>{listing ? "Loading…" : "Zoom meetings"}</button>
           <button className="primary" disabled={!dirty} onClick={saveAll}>{dirty ? "Save changes" : "Saved"}</button>
         </div>
       </div>
       <p className="muted small">
-        Each licence is one licensed Zoom user. <b>Sync from Zoom</b> brings in every licensed user in your Zoom account with their email and host key, keeping your labels.
+        Each licence is one licensed Zoom user. <b>Sync from Zoom</b> brings in every licensed user in your Zoom account, keeping your labels.
+        Zoom doesn't reveal existing host keys, so use <b>Set key</b> to give a licence a new one (its old key stops working; skip shared accounts staff rely on).
         Meetings are created under that user, and facilitators get its host key so they can claim host without a password.
         <b> Mock</b> is for testing only: approving a circle on a mock licence creates fake Zoom details.
       </p>
 
+      {meetings && (
+        <div className="details zoom-meetings">
+          <div className="details-head">
+            <span className="section-title">Meetings in Zoom ({new Date(meetings.taken_at).toLocaleString()})</span>
+            <button className="link small" onClick={() => setMeetings(null)}>Hide</button>
+          </div>
+          {meetings.accounts.map((a) => (
+            <div key={a.email} className="zm-account">
+              <div className="zm-head"><b>{a.label}</b> <span className="muted small">{a.email}{a.active ? "" : " · inactive here"}</span></div>
+              {a.error && <p className="error small">{a.error}</p>}
+              {!a.error && !a.meetings.length && <p className="muted small">No scheduled meetings.</p>}
+              {a.meetings.map((m) => (
+                <div key={m.id} className="zm-row">
+                  <span className="zm-topic">{m.topic}{m.circle ? <span className="pill small st-live">this system</span> : null}</span>
+                  <span className="small">{m.repeats ?? m.type}{m.next ? ` · next ${new Date(m.next).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : m.start_time ? ` · ${new Date(m.start_time).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : ""}{m.duration ? ` · ${m.duration} min` : ""}</span>
+                  <span className="muted small">{m.ends ? `ends ${String(m.ends).startsWith("after") ? m.ends : fmtDate(String(m.ends).slice(0, 10))}` : ""}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          <p className="muted small">Times are shown in your browser's timezone. Meetings marked "this system" were created by the dashboard; the rest were set up directly in Zoom and aren't known to the clash checks.</p>
+        </div>
+      )}
       {syncResult && (
         <div className="details sync-result">
           <div className="details-head">
@@ -1057,7 +1140,7 @@ function Licences({ data, run, notify }) {
             <div key={i} className={`sync-row ${r.ok ? "" : "warn-text"}`}>
               <b>{r.label}</b>
               <span>{r.email ?? "–"}{r.name ? ` (${r.name})` : ""}</span>
-              <span className="small">{r.ok ? `${r.action}${r.host_key ? "" : ", no host key returned"}` : (r.error ?? r.action)}</span>
+              <span className="small">{r.ok ? `${r.action}${r.host_key ? ", host key saved" : `, no host key (${r.host_key_note || "not returned"})`}` : (r.error ?? r.action)}</span>
             </div>
           ))}
           <p className="muted small">Every licensed Zoom user becomes a licence. If one of them shouldn't host circles (for example the account owner), untick Active. Empty slots with no Zoom user can be deleted once their circles are moved or cleared.</p>
@@ -1071,7 +1154,16 @@ function Licences({ data, run, notify }) {
               <tr key={r.id} className={r._dirty ? "dirty" : ""}>
                 <td><input value={r.label} onChange={(e) => edit(r.id, "label", e.target.value)} /></td>
                 <td><input value={r.zoom_user_email ?? ""} placeholder={r.is_mock ? "not needed for mock" : "zoom-user@…"} onChange={(e) => edit(r.id, "zoom_user_email", e.target.value)} /></td>
-                <td><input value={r.host_key ?? ""} placeholder="6 digits" onChange={(e) => edit(r.id, "host_key", e.target.value)} /></td>
+                <td>
+                  <span className="hostkey-cell">
+                    <input value={r.host_key ?? ""} placeholder="not set" onChange={(e) => edit(r.id, "host_key", e.target.value)} />
+                    {(r.zoom_user_id || r.zoom_user_email) && !r.is_mock && (
+                      <button className="small" disabled={keyBusy === r.id} onClick={() => setHostKey(r)}>
+                        {keyBusy === r.id ? "Setting…" : r.host_key ? "Change" : "Set key"}
+                      </button>
+                    )}
+                  </span>
+                </td>
                 <td><input type="checkbox" checked={r.active} onChange={(e) => edit(r.id, "active", e.target.checked)} /></td>
                 <td><input type="checkbox" checked={r.is_mock} onChange={(e) => edit(r.id, "is_mock", e.target.checked)} /></td>
                 <td>{booked(r.id)}</td>

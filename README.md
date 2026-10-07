@@ -54,8 +54,8 @@ Supabase project: `rxvehsmunykipwevtpmb`.
 3. **Zoom** (signed in to ThinkGita's Zoom account as the owner or an admin)
    - [marketplace.zoom.us](https://marketplace.zoom.us) → Develop → Build App → **Server-to-Server OAuth App**. Name it "ThinkGita Circles".
    - Scopes (Add Scopes):
-     - Meeting: `meeting:write:meeting:admin` (create), `meeting:update:meeting:admin` (change time or end date), `meeting:delete:meeting:admin` (cancel), `meeting:read:meeting:admin`.
-     - User: `user:read:list_users:admin` (Sync from Zoom lists the account's users) and `user:read:user:admin` (reads each user's host key).
+     - Meeting: `meeting:write:meeting:admin` (create), `meeting:update:meeting:admin` (change time, title or end date), `meeting:delete:meeting:admin` (cancel), `meeting:read:meeting:admin`, `meeting:read:list_meetings:admin` (the Zoom meetings list on Licences).
+     - User: `user:read:list_users:admin` (Sync from Zoom lists the account's users), `user:read:user:admin` and `user:update:user:admin` (Set key gives a licence a new host key; Zoom no longer reveals existing ones).
      - Older Zoom accounts show classic scopes instead: `meeting:write:admin`, `meeting:read:admin`, `user:read:admin`.
    - Fill in the required Information page (name, contact email), then **Activate**. The app only works once activated.
    - Copy Account ID, Client ID and Client Secret straight into Supabase secrets (step 4). Don't paste them in chat or email.
@@ -80,7 +80,7 @@ Supabase project: `rxvehsmunykipwevtpmb`.
    - Submissions that can't be read (no email, unreadable day or time) show up in Settings → Activity as `intake_failed`. Tally's webhook page also shows each delivery and its response.
    - Rotate the Tally API key that was shared in chat. The webhook doesn't need it.
 6. **Dashboard**
-   - Licences: click **Sync from Zoom**. Every licensed user in the Zoom account becomes a licence with its email and host key (labels are kept). Untick Active on any user who shouldn't host circles, such as the account owner.
+   - Licences: click **Sync from Zoom**. Every licensed user in the Zoom account becomes a licence (labels are kept). Then click **Set key** on each licence that will host circles: it sets a new random host key in Zoom and saves it. Untick Active on any user who shouldn't host circles, such as shared staff accounts.
    - Settings: set term start and end dates (meetings repeat weekly between them, max 50 weeks), confirm buffer and default length, add Niraj and team as admins (then invite them in Supabase Auth).
 7. **Test end to end, then clear demo data**
    - Submit the Tally form with your own details, approve it in Queue, check the Zoom meeting and email arrive, sign in as that email to see the facilitator view.
