@@ -55,6 +55,7 @@ Supabase project: `rxvehsmunykipwevtpmb`.
    - [marketplace.zoom.us](https://marketplace.zoom.us) → Develop → Build App → **Server-to-Server OAuth App**. Name it "ThinkGita Circles".
    - Scopes (Add Scopes):
      - Meeting: `meeting:write:meeting:admin` (create), `meeting:update:meeting:admin` (change time, title or end date), `meeting:delete:meeting:admin` (cancel), `meeting:read:meeting:admin`, `meeting:read:list_meetings:admin` (the Zoom meetings list on Licences).
+     - Report (Attendance tab, paid plan): `report:read:user:admin` (past meetings per account) and `report:read:list_meeting_participants:admin` (who joined). The first sync back-fills the last six months, which is as far back as Zoom keeps reports.
      - User: `user:read:list_users:admin` (Sync from Zoom lists the account's users), `user:read:user:admin` and `user:update:user:admin` (Set key gives a licence a new host key; Zoom no longer reveals existing ones).
      - Older Zoom accounts show classic scopes instead: `meeting:write:admin`, `meeting:read:admin`, `user:read:admin`.
    - Fill in the required Information page (name, contact email), then **Activate**. The app only works once activated.
@@ -115,4 +116,4 @@ The app uses the project's publishable key (`app/src/config.js`), which is safe 
 
 ## Not built yet (deliberately)
 
-Attendance from Zoom reports, "not attended recently" alerts, email nudges, 6 and 9 week feedback forms, CRM sync. The schema leaves room for these after January.
+"Not attended recently" alerts, email nudges, 6 and 9 week feedback forms, CRM sync. The schema leaves room for these after January.

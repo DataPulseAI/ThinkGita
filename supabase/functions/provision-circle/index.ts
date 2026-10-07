@@ -572,81 +572,153 @@ async function listZoomMeetings(actor: string) {
 const encUuid = (u: string) => (u.startsWith("/") || u.includes("//") ? encodeURIComponent(encodeURIComponent(u)) : encodeURIComponent(u));
 const ATTENDANCE_BATCH = 60; // new sessions per run, to stay inside the function time limit
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const REPORT_DAYS = 180; // Zoom reports reach back about six months
+const SCOPE_HELP = "The Zoom app needs the report:read:user:admin and report:read:list_meeting_participants:admin scopes";
+
+// Merge rejoins: one row per person (email if Zoom has it, otherwise the display name). Waiting room entries are ignored.
+function mergePeople(parts: any[]) {
+  const byPerson = new Map<string, any>();
+  for (const p of parts) {
+    if (p.status === "in_waiting_room") continue;
+    const email = String(p.user_email ?? "").trim().toLowerCase();
+    const name = String(p.name ?? "").trim();
+    const key = email || name.toLowerCase().replace(/\s+/g, " ");
+    if (!key) continue;
+    const cur = byPerson.get(key) ?? { person_key: key, name, email: email || null, first_join: p.join_time, last_leave: p.leave_time, seconds: 0 };
+    cur.seconds += Number(p.duration ?? 0);
+    if (p.join_time && (!cur.first_join || p.join_time < cur.first_join)) cur.first_join = p.join_time;
+    if (p.leave_time && (!cur.last_leave || p.leave_time > cur.last_leave)) cur.last_leave = p.leave_time;
+    if (!cur.name && name) cur.name = name;
+    byPerson.set(key, cur);
+  }
+  return [...byPerson.values()];
+}
+
+async function allPages(path: string, key: string) {
+  const out: any[] = [];
+  let token = "";
+  do {
+    const page = await zoom(`${path}${path.includes("?") ? "&" : "?"}page_size=300${token ? `&next_page_token=${encodeURIComponent(token)}` : ""}`);
+    out.push(...(page?.[key] ?? []));
+    token = page?.next_page_token ?? "";
+  } while (token);
+  return out;
+}
+
+// Every past meeting held on every licence account (Zoom usage reports, last six months), with who joined.
+// Meetings made by this system are linked to their circle; anything else is kept under its Zoom topic.
+// Stored in Supabase for good: Zoom drops reports after about six months, this copy stays.
+// Incremental: each account keeps a cursor (attendance_scanned_to). A sync starts a few days before it,
+// skips sessions already stored, and moves the cursor forward one 30-day window at a time as each window
+// completes. A run stops after ATTENDANCE_BATCH sessions or ~100 seconds and the next run carries on.
+const RUN_BUDGET_MS = 100_000;
 async function syncAttendance(actor: string) {
   const { data: me } = await db.from("admin_emails").select("is_super").eq("email", actor).maybeSingle();
   if (!me?.is_super) throw new Error("Attendance is for super admins only");
 
-  const { data: circles } = await db.from("circles").select("id, name, zoom_meeting_id, status")
-    .not("zoom_meeting_id", "is", null).in("status", ["live", "paused", "ended"]);
-  const { data: known } = await db.from("attendance_sessions").select("zoom_uuid");
-  const seen = new Set((known ?? []).map((k) => k.zoom_uuid));
-  let added = 0, people = 0, more = false;
-  const problems: string[] = [];
+  // One sync at a time (several open tabs would otherwise race each other). The lock expires after 3 minutes.
+  const { data: lock } = await db.from("settings").update({ attendance_sync_lock: new Date().toISOString() })
+    .eq("id", 1).or(`attendance_sync_lock.is.null,attendance_sync_lock.lt.${new Date(Date.now() - 180_000).toISOString()}`).select("id");
+  if (!lock?.length) return { busy: true, sessions_added: 0, more: false, problems: [] };
+  try {
+    return await syncAttendanceRun(actor);
+  } finally {
+    await db.from("settings").update({ attendance_sync_lock: null }).eq("id", 1);
+  }
+}
 
-  for (const c of circles ?? []) {
-    if (String(c.zoom_meeting_id).startsWith("MOCK")) continue;
-    let instances: any[] = [];
+// Which of these Zoom session UUIDs are already stored (looked up per batch: no 1,000-row cap).
+async function storedUuids(uuids: string[]) {
+  const have = new Set<string>();
+  for (let i = 0; i < uuids.length; i += 100) {
+    const { data } = await db.from("attendance_sessions").select("zoom_uuid").in("zoom_uuid", uuids.slice(i, i + 100));
+    for (const r of data ?? []) have.add(r.zoom_uuid);
+  }
+  return have;
+}
+
+async function syncAttendanceRun(actor: string) {
+  const startedRun = Date.now();
+  const { data: licences } = await db.from("licences").select("id, label, zoom_user_id, zoom_user_email, attendance_scanned_to")
+    .not("zoom_user_email", "is", null).order("sort_order");
+  const { data: circles } = await db.from("circles").select("id, name, zoom_meeting_id").not("zoom_meeting_id", "is", null);
+  const circleByMeeting = new Map((circles ?? []).map((c) => [String(c.zoom_meeting_id), c]));
+  const seen = new Set<string>();
+  const problems: string[] = [];
+  const today = new Date();
+  const earliest = new Date(today.getTime() - REPORT_DAYS * 86400e3);
+  let added = 0, people = 0, more = false, windows = 0;
+
+  // Record one past meeting and who joined it. Returns false if it should be retried on a later sync.
+  async function record(m: any, l: any) {
+    let parts: any[] = [];
     try {
-      instances = (await zoom(`/past_meetings/${c.zoom_meeting_id}/instances`))?.meetings ?? [];
+      parts = await allPages(`/report/meetings/${encUuid(m.uuid)}/participants`, "participants");
     } catch (e) {
       const msg = String(e);
-      if (/4711|scope/i.test(msg)) throw new Error("The Zoom app needs the meeting:read:list_past_instances:admin and meeting:read:list_past_participants:admin scopes");
-      if (!/404|3001/.test(msg)) problems.push(`${c.name}: ${msg.slice(0, 120)}`); // 404: nothing held yet, or meeting deleted
-      continue;
+      if (/4711|scope/i.test(msg)) throw new Error(SCOPE_HELP);
+      // 404: Zoom kept no participant report (for example nobody joined). Recorded as an empty session.
+      if (!/404|3001/.test(msg)) { problems.push(`${m.topic} ${m.start_time}: ${msg.slice(0, 120)}`); return false; }
     }
-    for (const inst of instances.sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)))) {
-      if (!inst.uuid || seen.has(inst.uuid)) continue;
-      if (added >= ATTENDANCE_BATCH) { more = true; break; }
-      const parts: any[] = [];
+    const rows = mergePeople(parts);
+    const circle = circleByMeeting.get(String(m.id));
+    const endedAt = m.end_time ?? rows.map((r) => r.last_leave).filter(Boolean).sort().pop() ?? null;
+    const { data: session, error } = await db.from("attendance_sessions").insert({
+      circle_id: circle?.id ?? null, circle_name: circle?.name ?? m.topic ?? null, topic: m.topic ?? null,
+      licence_label: l.label, host_email: l.zoom_user_email,
+      zoom_meeting_id: String(m.id), zoom_uuid: m.uuid,
+      started_at: m.start_time, ended_at: endedAt, participant_count: rows.length,
+    }).select("id").single();
+    if (error) {
+      if (error.code === "23505") { seen.add(m.uuid); return true; } // already stored
+      problems.push(`${m.topic}: ${error.message}`); return false;
+    }
+    if (rows.length) {
+      const { error: e2 } = await db.from("attendance").insert(rows.map((r) => ({
+        session_id: session.id, person_key: r.person_key, name: r.name || null, email: r.email,
+        first_join: r.first_join ?? null, last_leave: r.last_leave ?? null, minutes: Math.round(r.seconds / 60),
+      })));
+      if (e2) problems.push(`${m.topic}: ${e2.message}`);
+    }
+    seen.add(m.uuid);
+    added++;
+    people += rows.length;
+    return true;
+  }
+
+  accounts: for (const l of licences ?? []) {
+    let from = l.attendance_scanned_to ? new Date(Date.parse(l.attendance_scanned_to) - 3 * 86400e3) : earliest;
+    if (from < earliest) from = earliest;
+    let clean = true; // the cursor only moves past windows with nothing left to retry
+    while (from <= today) {
+      const to = new Date(Math.min(from.getTime() + 29 * 86400e3, today.getTime()));
+      let meetings: any[];
       try {
-        let token = "";
-        do {
-          const page = await zoom(`/past_meetings/${encUuid(inst.uuid)}/participants?page_size=300${token ? `&next_page_token=${encodeURIComponent(token)}` : ""}`);
-          parts.push(...(page?.participants ?? []));
-          token = page?.next_page_token ?? "";
-        } while (token);
+        meetings = await allPages(`/report/users/${encodeURIComponent(l.zoom_user_id ?? l.zoom_user_email)}/meetings?type=past&from=${isoDate(from)}&to=${isoDate(to)}`, "meetings");
       } catch (e) {
         const msg = String(e);
-        if (/4711|scope/i.test(msg)) throw new Error("The Zoom app needs the meeting:read:list_past_participants:admin scope");
-        if (/paid|200/i.test(msg) && /only/i.test(msg)) throw new Error("Zoom only shares past participants on paid (Pro or higher) accounts");
-        problems.push(`${c.name} ${inst.start_time}: ${msg.slice(0, 120)}`);
-        continue;
+        if (/4711|scope/i.test(msg)) throw new Error(SCOPE_HELP);
+        if (/paid|pro/i.test(msg) && /only|require/i.test(msg)) throw new Error("Zoom only provides meeting reports on paid (Pro or higher) accounts");
+        if (!/404|1001/.test(msg)) problems.push(`${l.label}: ${msg.slice(0, 120)}`); // 1001: user no longer exists
+        continue accounts;
       }
-      // Merge rejoins: one row per person (email if Zoom has it, otherwise the display name).
-      const byPerson = new Map<string, any>();
-      for (const p of parts) {
-        const email = String(p.user_email ?? "").trim().toLowerCase();
-        const name = String(p.name ?? "").trim();
-        const key = email || name.toLowerCase().replace(/\s+/g, " ");
-        if (!key) continue;
-        const cur = byPerson.get(key) ?? { person_key: key, name, email: email || null, first_join: p.join_time, last_leave: p.leave_time, seconds: 0 };
-        cur.seconds += Number(p.duration ?? 0);
-        if (p.join_time && (!cur.first_join || p.join_time < cur.first_join)) cur.first_join = p.join_time;
-        if (p.leave_time && (!cur.last_leave || p.leave_time > cur.last_leave)) cur.last_leave = p.leave_time;
-        if (!cur.name && name) cur.name = name;
-        byPerson.set(key, cur);
+      windows++;
+      const stored = await storedUuids(meetings.map((m) => m.uuid).filter(Boolean));
+      const fresh = meetings.filter((m) => m.uuid && !seen.has(m.uuid) && !stored.has(m.uuid))
+        .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
+      for (const m of fresh) {
+        if (added >= ATTENDANCE_BATCH || Date.now() - startedRun > RUN_BUDGET_MS) { more = true; break accounts; }
+        if (!(await record(m, l))) clean = false;
+        await sleep(150);
       }
-      const rows = [...byPerson.values()];
-      const endedAt = rows.map((r) => r.last_leave).filter(Boolean).sort().pop() ?? null;
-      const { data: session, error } = await db.from("attendance_sessions").insert({
-        circle_id: c.id, circle_name: c.name, zoom_meeting_id: String(c.zoom_meeting_id), zoom_uuid: inst.uuid,
-        started_at: inst.start_time, ended_at: endedAt, participant_count: rows.length,
-      }).select("id").single();
-      if (error) { problems.push(`${c.name}: ${error.message}`); continue; }
-      if (rows.length) {
-        const { error: e2 } = await db.from("attendance").insert(rows.map((r) => ({
-          session_id: session.id, person_key: r.person_key, name: r.name || null, email: r.email,
-          first_join: r.first_join ?? null, last_leave: r.last_leave ?? null, minutes: Math.round(r.seconds / 60),
-        })));
-        if (e2) problems.push(`${c.name}: ${e2.message}`);
-      }
-      seen.add(inst.uuid);
-      added++;
-      people += rows.length;
+      if (clean) await db.from("licences").update({ attendance_scanned_to: isoDate(to) }).eq("id", l.id);
+      from = new Date(to.getTime() + 86400e3);
+      await sleep(150);
     }
-    if (more) break;
   }
-  const summary = { sessions_added: added, attendances_added: people, more, problems: problems.slice(0, 10) };
+
+  const summary = { sessions_added: added, attendances_added: people, windows_checked: windows, more, problems: problems.slice(0, 10) };
   await audit(actor, "sync_attendance", null, summary);
   return summary;
 }

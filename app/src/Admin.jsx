@@ -7,7 +7,56 @@ import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders } from "./emailTemplate.js";
 
 const ACTIVE = ["pending", "approved", "live"];
-const TABS = ["Overview", "Schedule", "Queue", "Circles", "Licences", "Zoom", "Attendance", "Requests", "Emails", "Settings"];
+// Top bar: a few groups, each a dropdown of pages. Page keys stay the same (onTab("Queue") etc. still work).
+const NAV = [
+  { label: "Overview", tabs: [["Overview", "Overview"]] },
+  { label: "Queue", tabs: [["Queue", "Queue"]] },
+  { label: "Circles", tabs: [["Circles", "All circles"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
+  { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance", "super"], ["Insights", "Attendance insights", "super"]] },
+  { label: "Setup", tabs: [["Emails", "Emails"], ["Settings", "Settings"]] },
+];
+
+function NavGroup({ group, tab, setTab, counts }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (e.type === "keydown" ? e.key === "Escape" : !ref.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
+  }, [open]);
+  const active = group.tabs.some(([k]) => k === tab);
+  const total = group.tabs.reduce((t, [k]) => t + (counts[k] ?? 0), 0);
+  if (group.tabs.length === 1) {
+    const [k] = group.tabs[0];
+    return (
+      <button className={active ? "tab active" : "tab"} onClick={() => setTab(k)}>
+        {group.label}{counts[k] > 0 && <span className="count">{counts[k]}</span>}
+      </button>
+    );
+  }
+  const current = group.tabs.find(([k]) => k === tab);
+  return (
+    <div className="nav-group" ref={ref}>
+      <button className={active ? "tab active" : "tab"} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        {group.label}
+        {active && current && <span className="nav-current">{current[1]}</span>}
+        {total > 0 && <span className="count">{total}</span>}
+        <span className="nav-caret" aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className="nav-menu" role="menu">
+          {group.tabs.map(([k, label]) => (
+            <button key={k} role="menuitem" className={k === tab ? "on" : ""} onClick={() => { setTab(k); setOpen(false); }}>
+              <span>{label}</span>{counts[k] > 0 && <span className="count">{counts[k]}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 const APP_URL = window.location.href.split("#")[0];
 
 // Approval email values still blank for a circle (Zoom details are filled in on approval).
@@ -47,8 +96,35 @@ function friendlyError(e) {
   return m;
 }
 
+// Pages live in the URL (#/Attendance, #/Attendance/<meeting>), so the browser's back and forward
+// buttons and the in-app Back button work. Sign-in links use the hash too; those are left alone.
+const PAGE_KEYS = NAV.flatMap((g) => g.tabs.map(([k]) => k));
+function readRoute() {
+  const m = location.hash.match(/^#\/([A-Za-z]+)(?:\/(.+))?$/);
+  return m && PAGE_KEYS.includes(m[1]) ? { tab: m[1], sub: m[2] ? decodeURIComponent(m[2]) : null } : { tab: "Overview", sub: null };
+}
+
 export default function Admin() {
-  const [tab, setTab] = useState("Overview");
+  const [route, setRoute] = useState(readRoute);
+  // How many in-app pages back we can go (kept in history.state, so forward/back keep it right).
+  const [depth, setDepth] = useState(() => history.state?.tgIdx ?? 0);
+  const { tab, sub } = route;
+  const go = useCallback((t, s = null, { replace = false } = {}) => {
+    const hash = `#/${t}${s ? `/${encodeURIComponent(s)}` : ""}`;
+    if (hash === location.hash) return;
+    const idx = history.state?.tgIdx ?? 0;
+    if (replace) history.replaceState({ tgIdx: idx }, "", hash);
+    else { history.pushState({ tgIdx: idx + 1 }, "", hash); setDepth(idx + 1); }
+    setRoute({ tab: t, sub: s });
+    window.scrollTo(0, 0);
+  }, []);
+  const setTab = useCallback((t) => go(t), [go]);
+  useEffect(() => {
+    const onPop = () => { setRoute(readRoute()); setDepth(history.state?.tgIdx ?? 0); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const [attFocus, setAttFocus] = useState(null); // Zoom meeting ID to open in Attendance
   const [day, setDay] = useState(1);
   const [data, setData] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -121,12 +197,9 @@ export default function Admin() {
   return (
     <div className="admin">
       <nav className="tabs">
-        {TABS.filter((t) => t !== "Attendance" || data.me?.is_super).map((t) => (
-          <button key={t} className={t === tab ? "tab active" : "tab"} onClick={() => setTab(t)}>
-            {t}
-            {t === "Queue" && queueCount > 0 && <span className="count">{queueCount}</span>}
-            {t === "Requests" && openRequests > 0 && <span className="count">{openRequests}</span>}
-          </button>
+        <button className="tab nav-back" disabled={!depth} onClick={() => history.back()} aria-label="Back" title="Back">←</button>
+        {NAV.map((g) => ({ ...g, tabs: g.tabs.filter(([, , who]) => who !== "super" || data.me?.is_super) })).map((g) => (
+          <NavGroup key={g.label} group={g} tab={tab} setTab={setTab} counts={{ Queue: queueCount, Requests: openRequests }} />
         ))}
       </nav>
       <main className="content">
@@ -136,8 +209,11 @@ export default function Admin() {
         {tab === "Circles" && <Circles data={data} onSelect={select} onNew={() => setSelected("new")} onDelete={deleteCircle} />}
         {tab === "Licences" && <Licences data={data} run={run} notify={notify} />}
         {tab === "Requests" && <Requests data={data} run={run} onSelect={(id) => select(data.circles.find((c) => c.id === id))} />}
-        {tab === "Zoom" && <ZoomMeetings data={data} run={run} onSelect={select} />}
-        {tab === "Attendance" && data.me?.is_super && <Attendance data={data} run={run} />}
+        {tab === "Zoom" && <ZoomMeetings data={data} run={run} onSelect={select}
+          onAttendance={data.me?.is_super ? (id) => { setAttFocus(String(id)); setTab("Attendance"); } : null} />}
+        {tab === "Attendance" && data.me?.is_super && <Attendance data={data} run={run} focus={attFocus} onFocused={() => setAttFocus(null)}
+          open={sub} setOpen={(k, opts) => go("Attendance", k, opts)} />}
+        {tab === "Insights" && data.me?.is_super && <Insights data={data} openMeeting={(k) => go("Attendance", k)} />}
         {tab === "Emails" && <Emails data={data} run={run} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
       </main>
@@ -1637,7 +1713,7 @@ const csvCell = (v) => {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
-function ZoomMeetings({ data, run, onSelect }) {
+function ZoomMeetings({ data, run, onSelect, onAttendance }) {
   const [snap, setSnap] = useState(undefined); // undefined = loading, null = never synced
   const [syncing, setSyncing] = useState(false);
   const [q, setQ] = useState("");
@@ -1771,10 +1847,12 @@ function ZoomMeetings({ data, run, onSelect }) {
 
           <div className="table-wrap">
             <table className="table zoom-table">
-              <thead><tr><th>Meeting</th><th>Account</th><th>Repeats</th><th>Next session</th><th>Length</th><th>Ends</th><th>Source</th></tr></thead>
+              <thead><tr><th>Meeting</th><th>Account</th><th>Repeats</th><th>Next session</th><th>Length</th><th>Ends</th><th>Source</th>{onAttendance && <th></th>}</tr></thead>
               <tbody>
                 {shown.map((r) => (
-                  <tr key={`${r.account}-${r.id}`} className={r.ours ? "clickable" : ""} onClick={() => r.ours && openCircle(r)}>
+                  <tr key={`${r.account}-${r.id}`} className={r.ours || onAttendance ? "clickable" : ""}
+                    title={r.ours ? "Open the circle" : onAttendance ? "See who attended" : undefined}
+                    onClick={() => (r.ours ? openCircle(r) : onAttendance?.(r.id))}>
                     <td><div className="zt-topic">{r.topic}<span className="muted small">ID {r.id}</span></div></td>
                     <td>{r.account}{!r.account_active && <span className="muted small"> (inactive)</span>}</td>
                     <td>{r.weekly ? (r.repeats ?? "Weekly").replace(/^weekly/, "Weekly") : "One-off"}</td>
@@ -1782,9 +1860,10 @@ function ZoomMeetings({ data, run, onSelect }) {
                     <td>{r.duration ? `${r.duration} min` : "–"}</td>
                     <td className="small">{r.ends ? (String(r.ends).startsWith("after") ? r.ends : fmtDate(String(r.ends).slice(0, 10))) : r.weekly ? "–" : ""}{r.sessions_left ? <span className="muted"> · {r.sessions_left} left</span> : null}</td>
                     <td>{r.ours ? <span className="pill st-live">This system</span> : <span className="pill st-pending">Outside</span>}</td>
+                    {onAttendance && <td><button className="link small nowrap" onClick={(e) => { e.stopPropagation(); onAttendance(r.id); }}>Attendance →</button></td>}
                   </tr>
                 ))}
-                {!shown.length && <tr><td colSpan="7" className="muted">{rows.length ? "No meetings match these filters." : "No scheduled meetings on any account."}</td></tr>}
+                {!shown.length && <tr><td colSpan={onAttendance ? 8 : 7} className="muted">{rows.length ? "No meetings match these filters." : "No scheduled meetings on any account."}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -1841,39 +1920,248 @@ function HeadcountBars({ sessions, max, compact }) {
   );
 }
 
-function Attendance({ data, run }) {
+// Stacked headcount per session: people returning (bottom) and people there for the first time (top).
+function NewReturningBars({ sessions, rowsBySession }) {
+  const seen = new Set();
+  const cols = sessions.map((s) => {
+    const rows = rowsBySession.get(s.id) ?? [];
+    let fresh = 0;
+    for (const r of rows) if (!seen.has(r.person_key)) { fresh++; seen.add(r.person_key); }
+    return { s, total: rows.length, fresh, back: rows.length - fresh };
+  });
+  const top = Math.max(1, ...cols.map((c) => c.total));
+  return (
+    <div>
+      <div className="viz-legend">
+        <span><i className="sw sw-back" /> Returning</span>
+        <span><i className="sw sw-new" /> First time</span>
+      </div>
+      <div className="hc-bars nr-bars" role="img"
+        aria-label={`Attendance per session: ${cols.map((c) => `${shortDate(c.s.started_at)} ${c.total} (${c.fresh} new)`).join(", ")}`}>
+        {cols.map((c, i) => (
+          <Hover key={c.s.id} content={<div><b>{fmtWhen(c.s.started_at)}</b><div>{c.total} attended</div><div>{c.back} returning · {c.fresh} first time</div></div>}>
+            <span className="hc-col" tabIndex={0}>
+              {i === cols.length - 1 && <span className="hc-val">{c.total}</span>}
+              <span className="nr-stack" style={{ height: `${Math.max(4, (c.total / top) * 100)}%` }}>
+                {c.fresh > 0 && <span className="nr-seg nr-new" style={{ flexGrow: c.fresh }} />}
+                {c.back > 0 && <span className="nr-seg nr-back" style={{ flexGrow: c.back }} />}
+                {!c.total && <span className="nr-seg nr-zero" style={{ flexGrow: 1 }} />}
+              </span>
+              <span className="hc-date">{shortDate(c.s.started_at)}</span>
+            </span>
+          </Hover>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Who came when: one row per person, one column per week, shaded by how many sessions they joined that week.
+const HEAT_WEEKS = 30;
+function weekStart(iso) {
+  const d = new Date(iso);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d;
+}
+// Month names above the week columns, at most one every 3 columns so they never overlap.
+function monthLabels(weeks) {
+  let last = -9;
+  return weeks.map((w, i) => {
+    const starts = i === 0 || w.getMonth() !== weeks[i - 1].getMonth();
+    if (!starts || i - last < 3) return "";
+    last = i;
+    return w.toLocaleDateString([], { month: "short" });
+  });
+}
+function PeopleHeatmap({ sessions, rowsBySession, nameFor }) {
+  const [q, setQ] = useState("");
+  const [limit, setLimit] = useState(60);
+  const [tip, setTip] = useState(null);
+  const model = useMemo(() => {
+    if (!sessions.length) return null;
+    const ordered = [...sessions].sort((a, b) => a.started_at.localeCompare(b.started_at));
+    const lastWeek = weekStart(ordered.at(-1).started_at);
+    let firstWeek = weekStart(ordered[0].started_at);
+    const minWeek = new Date(lastWeek); minWeek.setDate(minWeek.getDate() - 7 * (HEAT_WEEKS - 1));
+    if (firstWeek < minWeek) firstWeek = minWeek;
+    const weeks = [];
+    for (const d = new Date(firstWeek); d <= lastWeek; d.setDate(d.getDate() + 7)) weeks.push(new Date(d));
+    const idx = new Map(weeks.map((w, i) => [w.getTime(), i]));
+    const people = new Map();
+    for (const s of ordered) {
+      const wi = idx.get(weekStart(s.started_at).getTime());
+      if (wi == null) continue;
+      for (const r of rowsBySession.get(s.id) ?? []) {
+        const p = people.get(r.person_key) ?? { key: r.person_key, name: r.name, email: r.email, total: 0, last: null, cells: new Map() };
+        if (!p.cells.has(wi)) p.cells.set(wi, []);
+        p.cells.get(wi).push({ s, minutes: r.minutes });
+        p.total++;
+        p.last = s.started_at;
+        if (!p.name && r.name) p.name = r.name;
+        if (!p.email && r.email) p.email = r.email;
+        people.set(r.person_key, p);
+      }
+    }
+    const list = [...people.values()].sort((a, b) => b.total - a.total || String(a.last).localeCompare(String(b.last)) * -1);
+    return { weeks, list };
+  }, [sessions, rowsBySession]);
+
+  if (!model) return <p className="muted">No sessions in this view.</p>;
+  const term = q.trim().toLowerCase();
+  const filtered = term ? model.list.filter((p) => `${p.name ?? ""} ${p.email ?? ""} ${p.key}`.toLowerCase().includes(term)) : model.list;
+  const rows = filtered.slice(0, limit);
+  const cols = `minmax(150px, 230px) 44px repeat(${model.weeks.length}, 14px)`;
+
+  const onOver = (e) => {
+    const el = e.target.closest?.("[data-cell]");
+    if (!el) return setTip(null);
+    const [pi, wi] = el.dataset.cell.split(":").map(Number);
+    const p = rows[pi];
+    const items = p?.cells.get(wi) ?? [];
+    const r = el.getBoundingClientRect();
+    setTip({
+      top: r.bottom + 8 + 160 > window.innerHeight ? r.top - 8 : r.bottom + 8, above: r.bottom + 8 + 160 > window.innerHeight,
+      left: Math.min(r.left, window.innerWidth - 300),
+      content: (
+        <div>
+          <b>{p.name || p.key}</b>
+          <div className="muted small">Week of {shortDate(model.weeks[wi])}</div>
+          {items.length ? items.map(({ s, minutes }) => <div key={s.id}>{fmtWhen(s.started_at)} · {nameFor(s)} · {minutes} min</div>) : <div>Didn't attend</div>}
+        </div>
+      ),
+    });
+  };
+
+  return (
+    <div className="heat">
+      <div className="heat-tools">
+        <input className="heat-search" placeholder="Find a person" value={q} onChange={(e) => setQ(e.target.value)} />
+        <div className="viz-legend">
+          <span>Sessions that week:</span>
+          <span><i className="sw heat-0" /> 0</span>
+          <span><i className="sw heat-1" /> 1</span>
+          <span><i className="sw heat-2" /> 2</span>
+          <span><i className="sw heat-3" /> 3+</span>
+        </div>
+      </div>
+      <div className="heat-scroll" onMouseOver={onOver} onMouseLeave={() => setTip(null)}
+        role="img" aria-label={`Weekly attendance for ${filtered.length} people over ${model.weeks.length} weeks. Use the export for the full table.`}>
+        <div className="heat-row heat-head" style={{ gridTemplateColumns: cols }}>
+          <span className="heat-name">Person</span><span className="heat-total">Total</span>
+          {monthLabels(model.weeks).map((label, i) => <span key={i} className="heat-month">{label}</span>)}
+        </div>
+        {rows.map((p, pi) => (
+          <div key={p.key} className="heat-row" style={{ gridTemplateColumns: cols }}>
+            <span className="heat-name" title={p.email ?? ""}>{p.name || p.key}</span>
+            <span className="heat-total">{p.total}</span>
+            {model.weeks.map((_, wi) => {
+              const n = p.cells.get(wi)?.length ?? 0;
+              return <span key={wi} data-cell={`${pi}:${wi}`} className={`heat-cell heat-${Math.min(n, 3)}`} />;
+            })}
+          </div>
+        ))}
+        {!rows.length && <p className="muted small">Nobody matches.</p>}
+      </div>
+      {filtered.length > rows.length && (
+        <button className="link small" onClick={() => setLimit((l) => l + 100)}>Show more ({filtered.length - rows.length} more people)</button>
+      )}
+      <p className="muted small">Most regular first. Covers the latest {model.weeks.length} weeks in this view. Hover a square for the sessions.</p>
+      {tip && (
+        <div className="hovercard" role="tooltip" style={{ top: tip.top, left: tip.left, transform: tip.above ? "translateY(-100%)" : undefined }}>
+          {tip.content}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Supabase returns at most 1,000 rows per request, so page through.
+async function fetchAll(query) {
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await query().range(from, from + 999);
+    if (error) return { data: out, error };
+    out.push(...(data ?? []));
+    if (!data || data.length < 1000) return { data: out, error: null };
+  }
+}
+
+// Who is who. Zoom only gives an email for people signed in to Zoom, so most people are matched by
+// display name. Names are tidied so small differences still match: case, spacing, "(she/her)",
+// "(Host)", emoji, and device names like "Priya's iPhone". Licence host accounts are left out.
+const DEVICE = /\b(?:iphone|ipad|android|galaxy|samsung|pixel|oneplus|huawei|xiaomi|redmi|oppo|vivo|phone|mobile|tablet|laptop|macbook(?: pro| air)?|imac|desktop|pc|zoom user)\b(?:\s*(?:[a-z]{0,2}\d+\w*|pro|max|plus|ultra|mini|lite))*/g;
+function personName(raw) {
+  const tidy = String(raw ?? "").toLowerCase()
+    .replace(/[([{][^)\]}]*[)\]}]/g, " ")      // (she/her), [Host], {guest}
+    .replace(/[’`]/g, "'")
+    .replace(/'s\s+(?=\S)/g, " ")               // "priya's iphone" -> "priya iphone"
+    .replace(DEVICE, " ")
+    .replace(/[^\p{L}\p{N}' -]/gu, " ")          // emoji and symbols
+    .replace(/\s+/g, " ").trim();
+  return tidy || String(raw ?? "").toLowerCase().trim();
+}
+function cleanAttendance(sessions = [], rows = [], licences = []) {
+  const hostEmails = new Set(licences.map((l) => String(l.zoom_user_email ?? "").toLowerCase()).filter(Boolean));
+  const hostNames = new Set(licences.map((l) => personName(l.label)));
+  const merged = new Map(); // session|person -> row
+  for (const r of rows) {
+    const email = String(r.email ?? "").toLowerCase();
+    if (email && hostEmails.has(email)) continue;
+    const name = personName(r.name ?? r.person_key);
+    if (!email && hostNames.has(name)) continue;
+    const key = email || name;
+    const id = `${r.session_id}|${key}`;
+    const cur = merged.get(id);
+    if (cur) { cur.minutes += r.minutes ?? 0; if (!cur.email && email) cur.email = email; }
+    else merged.set(id, { ...r, person_key: key, email: email || null, minutes: r.minutes ?? 0 });
+  }
+  const clean = [...merged.values()];
+  const counts = new Map();
+  for (const r of clean) counts.set(r.session_id, (counts.get(r.session_id) ?? 0) + 1);
+  return { sessions: sessions.map((x) => ({ ...x, participant_count: counts.get(x.id) ?? 0 })), rows: clean };
+}
+
+function Attendance({ data, run, focus, onFocused, open, setOpen }) {
   const [state, setState] = useState(null); // { sessions, rows, last }
   const [syncing, setSyncing] = useState(false);
-  const [open, setOpen] = useState(null); // circle key being viewed
+  const [progress, setProgress] = useState(null); // { done, left } during a long back-fill
   const [onlyDrift, setOnlyDrift] = useState(false);
+  const [kind, setKind] = useState("all"); // all | circles | other
+  const [view, setView] = useState("meetings"); // meetings | people
+  const [notice, setNotice] = useState(null);
 
   const load = useCallback(async () => {
     const [s, a, l] = await Promise.all([
-      supabase.from("attendance_sessions").select("*").order("started_at"),
-      supabase.from("attendance").select("session_id, person_key, name, email, minutes").range(0, 49999),
+      fetchAll(() => supabase.from("attendance_sessions").select("*").order("started_at").order("id")),
+      fetchAll(() => supabase.from("attendance").select("session_id, person_key, name, email, minutes").order("id")),
       supabase.from("audit_log").select("at, actor, detail").eq("action", "sync_attendance").order("at", { ascending: false }).limit(1),
     ]);
-    setState({ sessions: s.data ?? [], rows: a.data ?? [], last: l.data?.[0] ?? null, error: s.error?.message ?? a.error?.message });
+    const clean = cleanAttendance(s.data, a.data, data.licences);
+    setState({ ...clean, last: l.data?.[0] ?? null, error: s.error?.message ?? a.error?.message });
     return l.data?.[0] ?? null;
-  }, []);
+  }, [data.licences]);
 
   async function sync() {
     setSyncing(true);
     let more = true, total = 0, guard = 0;
-    while (more && guard++ < 10) {
+    while (more && guard++ < 40) { // first sync back-fills up to six months, 60 sessions per call
       const out = await run(() => adminAction("sync_attendance"), null);
       if (!out || out === true) break;
+      if (out.busy) { setNotice("A sync is already running (maybe in another tab). It carries on there; refresh in a minute to see the new data."); break; }
       total += out.sessions_added;
-      more = out.more;
+      more = out.more && out.sessions_added > 0;
+      setProgress(more ? { done: total } : null);
     }
+    setProgress(null);
     await load();
     setSyncing(false);
     return total;
   }
 
-  // Load, then refresh automatically if the last sync is over 12 hours old.
+  // Load, then sync automatically if the last sync is over 12 hours old or a back-fill was left unfinished.
   useEffect(() => {
-    load().then((last) => { if (!last || Date.now() - Date.parse(last.at) > 12 * 3600e3) sync(); });
+    load().then((last) => { if (!last || last.detail?.more || Date.now() - Date.parse(last.at) > 12 * 3600e3) sync(); });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const model = useMemo(() => {
@@ -1893,9 +2181,10 @@ function Attendance({ data, run }) {
       const live = data.circles.find((c) => c.id === key);
       const built = buildCircle(sessions, rowsBySession);
       const recent = built.sessions.slice(-4);
+      const lastS = sessions[sessions.length - 1];
       return {
-        key, name: live?.name ?? sessions[sessions.length - 1].circle_name ?? `Zoom meeting ${sessions[0].zoom_meeting_id}`,
-        status: live?.status, ...built,
+        key, name: live?.name ?? lastS.circle_name ?? lastS.topic ?? `Zoom meeting ${sessions[0].zoom_meeting_id}`,
+        status: live?.status, ours: !!lastS.circle_id, account: lastS.licence_label ?? "", ...built,
         avg: recent.length ? recent.reduce((t, s) => t + s.participant_count, 0) / recent.length : 0,
         drifting: built.people.filter((p) => p.drifting).length,
       };
@@ -1910,6 +2199,15 @@ function Attendance({ data, run }) {
       drifting: circles.reduce((t, c) => t + c.drifting, 0),
     };
   }, [state, data.circles]);
+
+  // Opened from "Meetings on Zoom": jump straight to that meeting's attendance.
+  useEffect(() => {
+    if (!focus || !model) return;
+    const hit = model.circles.find((c) => c.sessions.some((x) => String(x.zoom_meeting_id) === focus));
+    if (hit) { setOpen(hit.key, { replace: true }); setNotice(null); }
+    else setNotice(`No attendance recorded yet for Zoom meeting ${focus}. It appears here after a session has finished and been synced.`);
+    onFocused?.();
+  }, [focus, model]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function exportCsv(circles) {
     const head = ["Circle", "Session date", "Session start (UTC)", "Person", "Email", "Minutes"];
@@ -1927,19 +2225,25 @@ function Attendance({ data, run }) {
   }
 
   if (!state || !model) return <section className="card"><p className="muted">Loading attendance…</p></section>;
+  // Accounts whose history isn't fully loaded yet (cursor more than 2 days behind).
+  const lagging = data.licences.filter((l) => l.zoom_user_email && !l.is_mock && (!l.attendance_scanned_to || Date.parse(l.attendance_scanned_to) < Date.now() - 2 * 86400e3))
+    .sort((a, b) => String(a.attendance_scanned_to ?? "").localeCompare(String(b.attendance_scanned_to ?? "")));
+  const behind = lagging.length ? { label: lagging[0].label, upTo: lagging[0].attendance_scanned_to, count: lagging.length } : null;
   const circle = open ? model.circles.find((c) => c.key === open) : null;
+  const shown = model.circles.filter((c) => kind === "all" || (kind === "circles" ? c.ours : !c.ours));
+  const counts = { all: model.circles.length, circles: model.circles.filter((c) => c.ours).length, other: model.circles.filter((c) => !c.ours).length };
 
   const header = (
     <div className="card-head">
       <div>
         <h2>{circle ? <><button className="link" onClick={() => setOpen(null)}>Attendance</button> <span className="muted">/</span> {circle.name}</> : "Attendance"}</h2>
         <p className="muted small zoom-synced">
-          {syncing ? "Syncing with Zoom…" : state.last ? <>Last synced <b>{ago(state.last.at)}</b> · {new Date(state.last.at).toLocaleString()}</> : "Not synced yet."}
+          {syncing ? (progress ? `Syncing with Zoom… ${progress.done} sessions added so far` : "Syncing with Zoom…") : state.last ? <>Last synced <b>{ago(state.last.at)}</b> · {new Date(state.last.at).toLocaleString()}</> : "Not synced yet."}
           {" "}· Super admins only
         </p>
       </div>
       <div className="filters">
-        <button disabled={!state.rows.length} onClick={() => exportCsv(circle ? [circle] : model.circles)}>{circle ? "Export this circle (CSV)" : "Export all (CSV)"}</button>
+        <button disabled={!state.rows.length} onClick={() => exportCsv(circle ? [circle] : shown)}>{circle ? "Export this meeting (CSV)" : kind === "all" ? "Export all (CSV)" : `Export ${kind === "circles" ? "circles" : "other meetings"} (CSV)`}</button>
         <button className="primary" disabled={syncing} onClick={sync}>{syncing ? "Syncing…" : "Sync now"}</button>
       </div>
     </div>
@@ -1951,8 +2255,8 @@ function Attendance({ data, run }) {
       <section className="card attendance">
         {header}
         <div className="att-chart">
-          <span className="section-title">Headcount per session</span>
-          <HeadcountBars sessions={circle.sessions} />
+          <span className="section-title">Attendance per session</span>
+          <NewReturningBars sessions={circle.sessions} rowsBySession={model.rowsBySession} />
         </div>
         <div className="att-people-head">
           <span className="section-title">People ({circle.people.length})</span>
@@ -1986,7 +2290,7 @@ function Attendance({ data, run }) {
             </tbody>
           </table>
         </div>
-        <p className="muted small">● attended · absent. Names are as shown in Zoom, so the same person under two names appears twice. Emails appear only for people signed in to Zoom.</p>
+        <p className="muted small">● attended · absent. Most people are matched by their Zoom name (emails only come through for people signed in to Zoom). Small differences are ignored, like capitals, "(she/her)" or "Priya's iPhone", but a different name such as "Priya" and "Priya Shah" still shows as two people. Host accounts aren't counted.</p>
       </section>
     );
   }
@@ -1995,6 +2299,13 @@ function Attendance({ data, run }) {
     <section className="card attendance">
       {header}
       {state.error && <p className="error small">{state.error}</p>}
+      {notice && <p className="banner small">{notice} <button className="link small" onClick={() => setNotice(null)}>Dismiss</button></p>}
+      {behind && (
+        <p className="banner small">
+          Still catching up on history: loaded up to <b>{behind.upTo ? shortDate(behind.upTo) : "the start"}</b> on {behind.label}
+          {behind.count > 1 ? ` and ${behind.count - 1} other account${behind.count > 2 ? "s" : ""}` : ""}. {syncing ? "Keep this tab open while it runs." : "Click Sync now to carry on."}
+        </p>
+      )}
       <div className="stats zoom-stats">
         <Stat label="Sessions in the last 7 days" value={model.thisWeek} />
         <Stat label="Average per session (4 weeks)" value={model.avg ? model.avg.toFixed(1) : "–"} />
@@ -2003,19 +2314,37 @@ function Attendance({ data, run }) {
       </div>
       {!model.circles.length ? (
         <div className="empty">
-          <p>No sessions recorded yet. Attendance appears here after a circle's first Zoom session has finished and been synced.</p>
-          <p className="muted small">Needs a paid Zoom plan and the scopes <code>meeting:read:list_past_instances:admin</code> and <code>meeting:read:list_past_participants:admin</code>.</p>
+          <p>No sessions recorded yet. Attendance appears here once a meeting on one of the licence accounts has finished and been synced.</p>
+          <p className="muted small">Needs a paid Zoom plan and the scopes <code>report:read:user:admin</code> and <code>report:read:list_meeting_participants:admin</code>.</p>
         </div>
       ) : (
+        <>
+        <div className="att-bar">
+          <div className="seg">
+            {[["all", "All meetings"], ["circles", "Circles"], ["other", "Other Zoom meetings"]].map(([k, label]) => (
+              <button key={k} className={kind === k ? "active" : ""} onClick={() => setKind(k)}>{label} ({counts[k]})</button>
+            ))}
+          </div>
+          <div className="seg">
+            {[["meetings", "By meeting"], ["people", "By person"]].map(([k, label]) => (
+              <button key={k} className={view === k ? "active" : ""} onClick={() => setView(k)}>{label}</button>
+            ))}
+          </div>
+        </div>
+        {view === "people" ? (
+          <PeopleHeatmap sessions={shown.flatMap((c) => c.sessions)} rowsBySession={model.rowsBySession}
+            nameFor={(sess) => { const c = shown.find((x) => x.sessions.includes(sess)); return c ? (c.ours ? blockName(c.name) : c.name) : ""; }} />
+        ) : (
         <div className="table-wrap">
           <table className="table att-circles">
-            <thead><tr><th>Circle</th><th>Sessions</th><th>Avg (last 4)</th><th>Last session</th><th>Recent headcount</th><th>Not seen lately</th></tr></thead>
+            <thead><tr><th>Meeting</th><th>Account</th><th>Sessions</th><th>Avg (last 4)</th><th>Last session</th><th>Recent headcount</th><th>Not seen lately</th></tr></thead>
             <tbody>
-              {model.circles.map((c) => {
+              {shown.map((c) => {
                 const last = c.sessions.at(-1);
                 return (
                   <tr key={c.key} className="clickable" onClick={() => { setOnlyDrift(false); setOpen(c.key); }}>
-                    <td>{blockName(c.name)}{c.status && c.status !== "live" && <span className="muted small"> ({STATUS_LABEL[c.status]})</span>}</td>
+                    <td>{c.ours ? blockName(c.name) : c.name}{c.status && c.status !== "live" && <span className="muted small"> ({STATUS_LABEL[c.status]})</span>}{!c.ours && <span className="pill small att-outside">Not made here</span>}</td>
+                    <td className="muted small">{c.account}</td>
                     <td>{c.sessions.length}</td>
                     <td>{c.avg.toFixed(1)}</td>
                     <td>{shortDate(last.started_at)} · {last.participant_count}</td>
@@ -2024,11 +2353,308 @@ function Attendance({ data, run }) {
                   </tr>
                 );
               })}
+              {!shown.length && <tr><td colSpan={8} className="muted">Nothing in this view.</td></tr>}
             </tbody>
           </table>
         </div>
+        )}
+        </>
       )}
-      <p className="muted small">Synced from Zoom's participant lists; refreshes automatically when you open this tab if the last sync is over 12 hours old. Rejoins are merged into one attendance. Click a circle for its sessions and people.</p>
+      <p className="muted small">Covers every meeting held on the licence accounts in the last six months (Zoom keeps reports that long), synced from Zoom's usage reports; refreshes automatically when you open this tab if the last sync is over 12 hours old. Rejoins are merged into one attendance. Click a meeting for its sessions and people.</p>
+    </section>
+  );
+}
+
+// ---------- Attendance insights (super admins only) ----------
+// Weekly trends across meetings: growth, new people, how consistently people come back, and who has stopped.
+const DROP_WEEKS = 3;      // gone this many weeks after their last visit = dropped off
+const REGULAR_WEEKS = 4;   // came in at least this many different weeks = regular
+const weekKey = (iso) => weekStart(iso).getTime();
+const pct = (n, d) => (d ? Math.round((n / d) * 100) : null);
+
+function WeekBars({ weeks, series, height = 140, fmtTip }) {
+  const totals = weeks.map((_, i) => series.reduce((t, s) => t + (s.values[i] ?? 0), 0));
+  const top = Math.max(1, ...totals);
+  const lastIdx = totals.reduce((li, t, i) => (t ? i : li), -1); // label the latest week that has data
+  return (
+    <div>
+      {series.length > 1 && (
+        <div className="viz-legend">{series.map((s) => <span key={s.key}><i className={`sw ${s.cls}`} /> {s.label}</span>)}</div>
+      )}
+      <div className="wk-bars" style={{ height }} role="img"
+        aria-label={weeks.map((w, i) => `${shortDate(w)}: ${series.map((s) => `${s.label} ${s.values[i] ?? 0}`).join(", ")}`).join("; ")}>
+        {weeks.map((w, i) => (
+          <Hover key={i} content={<div><b>Week of {shortDate(w)}</b>{series.map((s) => <div key={s.key}>{s.label}: {s.values[i] ?? 0}</div>)}{fmtTip?.(i)}</div>}>
+            <span className="wk-col" tabIndex={0}>
+              {i === lastIdx && <span className="hc-val">{totals[i]}</span>}
+              <span className="nr-stack wk-stack" style={{ height: `${totals[i] ? Math.max(3, (totals[i] / top) * 100) : 0}%` }}>
+                {[...series].reverse().map((s) => (s.values[i] ? <span key={s.key} className={`nr-seg ${s.cls}`} style={{ flexGrow: s.values[i] }} /> : null))}
+              </span>
+            </span>
+          </Hover>
+        ))}
+      </div>
+      <div className="wk-axis">{monthLabels(weeks).map((l, i) => <span key={i}>{l}</span>)}</div>
+    </div>
+  );
+}
+
+function RateLine({ weeks, values, height = 140 }) {
+  const W = 600, H = height, pad = 6;
+  const pts = values.map((v, i) => (v == null ? null : [pad + (i * (W - 2 * pad)) / Math.max(1, weeks.length - 1), H - pad - (v / 100) * (H - 2 * pad)]));
+  let path = "", pen = false; // gaps (weeks too recent or with no newcomers) break the line
+  for (const p of pts) {
+    if (!p) { pen = false; continue; }
+    path += `${pen ? " L" : " M"}${p[0].toFixed(1)} ${p[1].toFixed(1)}`;
+    pen = true;
+  }
+  const last = [...values].reverse().find((v) => v != null);
+  return (
+    <div className="rate">
+      <div className="rate-plot" style={{ height }}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`Return rate by week: ${values.map((v, i) => `${shortDate(weeks[i])} ${v ?? "n/a"}%`).join(", ")}`}>
+          {[25, 50, 75].map((g) => <line key={g} x1="0" x2={W} y1={H - pad - (g / 100) * (H - 2 * pad)} y2={H - pad - (g / 100) * (H - 2 * pad)} className="rate-grid" />)}
+          <path d={path} className="rate-line" vectorEffect="non-scaling-stroke" />
+        </svg>
+        <div className="rate-hits">
+          {weeks.map((w, i) => (
+            <Hover key={i} content={<div><b>New in week of {shortDate(w)}</b><div>{values[i] == null ? "Too recent to tell" : `${values[i]}% came back within 4 weeks`}</div></div>}>
+              <span className="rate-hit" tabIndex={0}>{pts[i] && <i style={{ top: `${(pts[i][1] / H) * 100}%` }} />}</span>
+            </Hover>
+          ))}
+        </div>
+        <span className="rate-y">100%</span><span className="rate-y0">0%</span>
+      </div>
+      <div className="wk-axis">{monthLabels(weeks).map((l, i) => <span key={i}>{l}</span>)}</div>
+      {last != null && <p className="muted small">Latest full cohort: <b>{last}%</b> of first-timers came back within 4 weeks.</p>}
+    </div>
+  );
+}
+
+function Insights({ data, openMeeting }) {
+  const [raw, setRaw] = useState(null);
+  const [kind, setKind] = useState("all");
+  const [span, setSpan] = useState(26);
+  const [meeting, setMeeting] = useState("all");
+  const [sort, setSort] = useState("recent");
+
+  useEffect(() => {
+    (async () => {
+      const [s, a] = await Promise.all([
+        fetchAll(() => supabase.from("attendance_sessions").select("*").order("started_at").order("id")),
+        fetchAll(() => supabase.from("attendance").select("session_id, person_key, name, email, minutes").order("id")),
+      ]);
+      setRaw({ ...cleanAttendance(s.data, a.data, data.licences), error: s.error?.message ?? a.error?.message });
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const groups = useMemo(() => {
+    if (!raw) return [];
+    const m = new Map();
+    for (const x of raw.sessions) {
+      const key = x.circle_id ?? `meeting:${x.zoom_meeting_id}`;
+      if (!m.has(key)) m.set(key, []);
+      m.get(key).push(x);
+    }
+    return [...m.entries()].map(([key, sessions]) => {
+      const live = data.circles.find((c) => c.id === key);
+      const lastS = sessions[sessions.length - 1];
+      const name = live?.name ?? lastS.circle_name ?? lastS.topic ?? `Zoom meeting ${lastS.zoom_meeting_id}`;
+      return { key, sessions, ours: !!lastS.circle_id, name: lastS.circle_id ? blockName(name) : name, account: lastS.licence_label ?? "" };
+    });
+  }, [raw, data.circles]);
+
+  const model = useMemo(() => {
+    if (!raw) return null;
+    const rowsBy = new Map();
+    for (const r of raw.rows) { if (!rowsBy.has(r.session_id)) rowsBy.set(r.session_id, []); rowsBy.get(r.session_id).push(r); }
+    const inKind = groups.filter((g) => kind === "all" || (kind === "circles" ? g.ours : !g.ours));
+    const scoped = meeting === "all" ? inKind : inKind.filter((g) => g.key === meeting);
+    const thisWeek = weekStart(new Date().toISOString());
+    const weeks = [];
+    for (let i = span - 1; i >= 0; i--) { const d = new Date(thisWeek); d.setDate(d.getDate() - 7 * i); weeks.push(d); }
+    const idx = new Map(weeks.map((w, i) => [w.getTime(), i]));
+
+    // Per person: which weeks they came (all history in scope, so "first time" is truly first).
+    const people = new Map();
+    const sessionsPerWeek = weeks.map(() => 0);
+    for (const g of scoped) for (const x of g.sessions) {
+      const wk = weekKey(x.started_at);
+      const wi = idx.get(wk);
+      if (wi != null) sessionsPerWeek[wi]++;
+      for (const r of rowsBy.get(x.id) ?? []) {
+        const p = people.get(r.person_key) ?? { weeks: new Set() };
+        p.weeks.add(wk);
+        people.set(r.person_key, p);
+      }
+    }
+    const newPer = weeks.map(() => 0), backPer = weeks.map(() => 0), dropPer = weeks.map(() => 0);
+    const returned = weeks.map(() => [0, 0]); // [came back within 4 weeks, newcomers]
+    const buckets = { "1 week": 0, "2 to 3 weeks": 0, "4 to 7 weeks": 0, "8+ weeks": 0 };
+    const nowKey = thisWeek.getTime();
+    for (const p of people.values()) {
+      const ws = [...p.weeks].sort((a, b) => a - b);
+      const first = ws[0], last = ws[ws.length - 1];
+      const inRange = ws.filter((w) => idx.has(w));
+      for (const w of inRange) (w === first ? newPer : backPer)[idx.get(w)]++;
+      if (inRange.length) {
+        const n = inRange.length;
+        buckets[n === 1 ? "1 week" : n <= 3 ? "2 to 3 weeks" : n <= 7 ? "4 to 7 weeks" : "8+ weeks"]++;
+      }
+      if (idx.has(first)) {
+        const back = ws.some((w) => w > first && w <= first + 4 * 7 * 86400e3);
+        returned[idx.get(first)][1]++;
+        if (back) returned[idx.get(first)][0]++;
+      }
+      if (ws.length >= 3 && (nowKey - last) / (7 * 86400e3) >= DROP_WEEKS && idx.has(last)) dropPer[idx.get(last)]++;
+    }
+    const fourAgo = nowKey - 4 * 7 * 86400e3;
+    const returnRate = weeks.map((w, i) => (w.getTime() > fourAgo ? null : returned[i][1] ? pct(returned[i][0], returned[i][1]) : null));
+    const active = weeks.map((_, i) => newPer[i] + backPer[i]);
+
+    // Compare meetings.
+    const compare = inKind.map((g) => {
+      const ss = [...g.sessions].sort((a, b) => a.started_at.localeCompare(b.started_at));
+      const counts = ss.map((x) => (rowsBy.get(x.id) ?? []).length);
+      const avg = (arr) => (arr.length ? arr.reduce((t, n) => t + n, 0) / arr.length : null);
+      const recent = avg(counts.slice(-4)), before = avg(counts.slice(-8, -4));
+      const seen = new Map(); // person -> [first idx, last idx, count]
+      ss.forEach((x, i) => { for (const r of rowsBy.get(x.id) ?? []) { const v = seen.get(r.person_key) ?? [i, i, 0]; v[1] = i; v[2]++; seen.set(r.person_key, v); } });
+      let newRecent = 0, regulars = 0, dropped = 0;
+      for (const [f, l, c] of seen.values()) {
+        if (f >= ss.length - 4) newRecent++;
+        if (c >= REGULAR_WEEKS) regulars++;
+        if (c >= 3 && ss.length - 1 - l >= DROP_WEEKS) dropped++;
+      }
+      const lastAt = ss.at(-1)?.started_at;
+      return {
+        key: g.key, name: g.name, ours: g.ours, account: g.account, sessions: ss.length, lastAt,
+        recent, before, change: recent != null && before ? Math.round(((recent - before) / before) * 100) : null,
+        people: seen.size, newRecent, regulars, regularShare: pct(regulars, seen.size), dropped,
+        stale: lastAt && Date.now() - Date.parse(lastAt) > 21 * 86400e3,
+      };
+    });
+    const sorters = {
+      recent: (a, b) => (b.recent ?? -1) - (a.recent ?? -1),
+      change: (a, b) => (b.change ?? -999) - (a.change ?? -999),
+      new: (a, b) => b.newRecent - a.newRecent,
+      regular: (a, b) => (b.regularShare ?? -1) - (a.regularShare ?? -1),
+      dropped: (a, b) => b.dropped - a.dropped,
+    };
+    compare.sort(sorters[sort]);
+
+    const sum = (arr, from, to) => arr.slice(from, to).reduce((t, n) => t + n, 0);
+    return {
+      weeks, sessionsPerWeek, newPer, backPer, dropPer, returnRate, active, buckets, compare, inKind,
+      totalPeople: [...people.values()].filter((p) => [...p.weeks].some((w) => idx.has(w))).length,
+      new4: sum(newPer, -4), newPrev4: sum(newPer, -8, -4),
+      active4: Math.round(sum(active, -4) / 4), activePrev4: Math.round(sum(active, -8, -4) / 4),
+      drops: dropPer.reduce((t, n) => t + n, 0),
+    };
+  }, [raw, groups, kind, meeting, span, sort]);
+
+  if (!raw || !model) return <section className="card"><p className="muted">Loading insights…</p></section>;
+  const trend = (now, prev) => {
+    if (!prev) return null;
+    const d = Math.round(((now - prev) / prev) * 100);
+    return <span className={`trend ${d > 0 ? "up" : d < 0 ? "down" : ""}`}>{d > 0 ? "▲" : d < 0 ? "▼" : "■"} {Math.abs(d)}% vs previous 4 weeks</span>;
+  };
+  const bucketMax = Math.max(1, ...Object.values(model.buckets));
+  const sortBtn = (k, label) => <button className={sort === k ? "link small on" : "link small"} onClick={() => setSort(k)}>{label}</button>;
+
+  return (
+    <section className="card insights">
+      <div className="card-head">
+        <div>
+          <h2>Attendance insights</h2>
+          <p className="muted small">Week by week, from the synced Zoom attendance · Super admins only</p>
+        </div>
+        <div className="filters">
+          <select value={meeting} onChange={(e) => setMeeting(e.target.value)} aria-label="Meeting">
+            <option value="all">All meetings in view</option>
+            {model.inKind.map((g) => <option key={g.key} value={g.key}>{g.name}</option>)}
+          </select>
+          <div className="seg">
+            {[[12, "12 weeks"], [26, "26 weeks"]].map(([n, l]) => <button key={n} className={span === n ? "active" : ""} onClick={() => setSpan(n)}>{l}</button>)}
+          </div>
+        </div>
+      </div>
+      {raw.error && <p className="error small">{raw.error}</p>}
+      <div className="seg ins-kind">
+        {[["all", "All meetings"], ["circles", "Circles"], ["other", "Other Zoom meetings"]].map(([k, l]) => (
+          <button key={k} className={kind === k ? "active" : ""} onClick={() => { setKind(k); setMeeting("all"); }}>{l}</button>
+        ))}
+      </div>
+
+      <div className="stats zoom-stats">
+        <Stat label="People each week (avg, last 4)" value={model.active4} />
+        <Stat label="New people (last 4 weeks)" value={model.new4} />
+        <Stat label={`People seen (${span} weeks)`} value={model.totalPeople} />
+        <Stat label={`Dropped off (${span} weeks)`} value={model.drops} tone={model.drops ? "warn" : undefined} />
+      </div>
+      <div className="ins-trends small">
+        <span>People each week: {trend(model.active4, model.activePrev4) ?? <span className="muted">not enough history</span>}</span>
+        <span>New people: {trend(model.new4, model.newPrev4) ?? <span className="muted">not enough history</span>}</span>
+      </div>
+
+      <div className="ins-grid">
+        <div className="ins-panel">
+          <h3>Growth: people each week</h3>
+          <p className="muted small">Different people who joined at least one session that week, split into first-timers and returners. The last bar is this week so far.</p>
+          <WeekBars weeks={model.weeks} series={[
+            { key: "back", label: "Returning", cls: "nr-back", values: model.backPer },
+            { key: "new", label: "First time", cls: "nr-new", values: model.newPer },
+          ]} fmtTip={(i) => <div className="muted">{model.sessionsPerWeek[i]} session{model.sessionsPerWeek[i] === 1 ? "" : "s"} held</div>} />
+        </div>
+        <div className="ins-panel">
+          <h3>Do first-timers come back?</h3>
+          <p className="muted small">Of the people who came for the first time each week, the share who came again within 4 weeks.</p>
+          <RateLine weeks={model.weeks} values={model.returnRate} />
+        </div>
+        <div className="ins-panel">
+          <h3>Consistency</h3>
+          <p className="muted small">How many different weeks each person came in the last {span} weeks.</p>
+          <div className="hbars">
+            {Object.entries(model.buckets).map(([label, n]) => (
+              <div key={label} className="hbar-row">
+                <span className="hbar-label">{label}</span>
+                <span className="hbar-track">{n > 0 && <span className="hbar" style={{ width: `${(n / bucketMax) * 100}%` }} />}</span>
+                <span className="hbar-val">{n} <span className="muted">({pct(n, model.totalPeople) ?? 0}%)</span></span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="ins-panel">
+          <h3>Drop-offs</h3>
+          <p className="muted small">People who came 3+ times, then haven't been back for {DROP_WEEKS}+ weeks, shown in the week they were last seen.</p>
+          <WeekBars weeks={model.weeks} series={[{ key: "drop", label: "Last seen this week", cls: "nr-drop", values: model.dropPer }]} height={110} />
+        </div>
+      </div>
+
+      <div className="att-people-head">
+        <span className="section-title">Compare meetings ({model.compare.length})</span>
+        <span className="small muted">Sort: {sortBtn("recent", "Attendance")} · {sortBtn("change", "Growth")} · {sortBtn("new", "New people")} · {sortBtn("regular", "Regulars")} · {sortBtn("dropped", "Drop-offs")}</span>
+      </div>
+      <div className="table-wrap">
+        <table className="table att-circles ins-compare">
+          <thead><tr><th>Meeting</th><th>Avg (last 4)</th><th>vs previous 4</th><th>New (last 4)</th><th>Regulars</th><th>Dropped off</th><th>Last session</th></tr></thead>
+          <tbody>
+            {model.compare.map((c) => (
+              <tr key={c.key} className="clickable" onClick={() => openMeeting(c.key)} title="Open in Attendance">
+                <td>{c.name}<div className="muted small">{c.account}{c.stale ? " · no sessions for 3+ weeks" : ""}</div></td>
+                <td>{c.recent != null ? c.recent.toFixed(1) : "–"}</td>
+                <td>{c.change == null ? <span className="muted">–</span> : <span className={`trend ${c.change > 0 ? "up" : c.change < 0 ? "down" : ""}`}>{c.change > 0 ? "▲" : c.change < 0 ? "▼" : "■"} {Math.abs(c.change)}%</span>}</td>
+                <td>{c.newRecent}</td>
+                <td>{c.regulars} <span className="muted small">({c.regularShare ?? 0}%)</span></td>
+                <td>{c.dropped ? <span className="pill small st-conflict">{c.dropped}</span> : <span className="muted">0</span>}</td>
+                <td>{c.lastAt ? shortDate(c.lastAt) : "–"}</td>
+              </tr>
+            ))}
+            {!model.compare.length && <tr><td colSpan={7} className="muted">No meetings in this view.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <p className="muted small">Regulars came to {REGULAR_WEEKS}+ sessions. People are matched by Zoom name (or email when signed in), so the same person under a very different name counts twice. Click a meeting to open its attendance.</p>
     </section>
   );
 }
