@@ -2,10 +2,15 @@ import { useEffect, useState } from "react";
 import { supabase } from "./lib.js";
 import Admin from "./Admin.jsx";
 import Facilitator from "./Facilitator.jsx";
+import { ThemeToggle, getTheme } from "./ui.jsx";
+
+const LOGO_WHITE = `${import.meta.env.BASE_URL}logo-white.png`;
+const LOGO_TEAL = `${import.meta.env.BASE_URL}logo-teal.png`;
 
 export default function App() {
   const [session, setSession] = useState(undefined);
   const [isAdmin, setIsAdmin] = useState(null);
+  const [pwOpen, setPwOpen] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -23,14 +28,6 @@ export default function App() {
       .then(({ data }) => setIsAdmin(Boolean(data)));
   }, [session]);
 
-  async function setPassword() {
-    const pw = window.prompt("New password (at least 8 characters)");
-    if (!pw) return;
-    if (pw.length < 8) return window.alert("Password must be at least 8 characters.");
-    const { error } = await supabase.auth.updateUser({ password: pw });
-    window.alert(error ? error.message : "Password saved. You can now sign in with email and password.");
-  }
-
   if (session === undefined || (session && isAdmin === null)) return <div className="center muted">Loading…</div>;
   if (!session) return <Login />;
 
@@ -38,16 +35,19 @@ export default function App() {
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <span className="logo">◎</span> ThinkGita Circles
-          {isAdmin && <span className="tag">Admin</span>}
+          <img src={LOGO_WHITE} alt="ThinkGita" />
+          <span className="product">Circles</span>
+          <span className="role">{isAdmin ? "Admin" : "Facilitator"}</span>
         </div>
         <div className="who">
-          <span className="muted">{session.user.email}</span>
-          <button className="ghost" onClick={setPassword}>Set password</button>
+          <span className="email">{session.user.email}</span>
+          <ThemeToggle />
+          <button className="ghost subtle" onClick={() => setPwOpen(true)}>Change password</button>
           <button className="ghost" onClick={() => supabase.auth.signOut()}>Sign out</button>
         </div>
       </header>
       {isAdmin ? <Admin /> : <Facilitator email={session.user.email} />}
+      {pwOpen && <PasswordModal onClose={() => setPwOpen(false)} />}
     </div>
   );
 }
@@ -68,7 +68,7 @@ function Login() {
         setState({
           status: "error",
           message: /invalid/i.test(error.message)
-            ? "Email or password is wrong. If you haven't set a password yet, use an email link once, then choose Set password."
+            ? "Email or password is wrong. If you haven't set a password yet, use an email link once, then choose Change password."
             : error.message,
         });
       }
@@ -95,7 +95,8 @@ function Login() {
   return (
     <div className="login">
       <div className="card login-card">
-        <div className="brand big"><span className="logo">◎</span> ThinkGita Circles</div>
+        <img className="login-logo" src={getTheme() === "dark" ? LOGO_WHITE : LOGO_TEAL} alt="ThinkGita" />
+        <p className="login-sub">Circles: sign in to manage or view your circle.</p>
         {state.status === "sent" ? (
           <p>Check <b>{email}</b> for a sign-in link. You can close this tab.</p>
         ) : (
@@ -115,6 +116,74 @@ function Login() {
               {mode === "password" ? "No password yet? Email me a sign-in link" : "Sign in with a password instead"}
             </button>
             {state.status === "error" && <p className="error">{state.message}</p>}
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const PASSWORD_RULES = [
+  { label: "At least 8 characters", test: (p) => p.length >= 8 },
+  { label: "An uppercase letter", test: (p) => /[A-Z]/.test(p) },
+  { label: "A lowercase letter", test: (p) => /[a-z]/.test(p) },
+  { label: "A number", test: (p) => /[0-9]/.test(p) },
+];
+
+function PasswordModal({ onClose }) {
+  const [pw, setPw] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [show, setShow] = useState(false);
+  const [state, setState] = useState({ status: "idle" });
+  const allMet = PASSWORD_RULES.every((r) => r.test(pw));
+  const matches = pw.length > 0 && pw === confirm;
+
+  async function save(e) {
+    e.preventDefault();
+    if (!allMet || !matches) return;
+    setState({ status: "saving" });
+    const { error } = await supabase.auth.updateUser({ password: pw });
+    if (!error) return setState({ status: "done" });
+    const msg = /reauth|recent/i.test(error.message)
+      ? "For security, sign out and sign back in, then set your password again."
+      : /same|different from the old/i.test(error.message)
+        ? "That's your current password. Choose a new one."
+        : error.message;
+    setState({ status: "error", message: msg });
+  }
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="card modal" onClick={(e) => e.stopPropagation()}>
+        {state.status === "done" ? (
+          <>
+            <h2>Password saved</h2>
+            <p className="muted">Next time, sign in with your email and this password.</p>
+            <button className="primary wide" onClick={onClose}>Done</button>
+          </>
+        ) : (
+          <form onSubmit={save} className="form">
+            <h2>Change password</h2>
+            <label>New password
+              <input type={show ? "text" : "password"} autoFocus autoComplete="new-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+            </label>
+            <ul className="rules">
+              {PASSWORD_RULES.map((r) => (
+                <li key={r.label} className={r.test(pw) ? "met" : ""}>{r.test(pw) ? "✓" : "○"} {r.label}</li>
+              ))}
+            </ul>
+            <label>Confirm password
+              <input type={show ? "text" : "password"} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            </label>
+            {confirm && !matches && <p className="error small">Passwords don't match.</p>}
+            <label className="check"><input type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} /> Show password</label>
+            {state.status === "error" && <p className="error small">{state.message}</p>}
+            <div className="actions">
+              <button type="button" className="ghost" onClick={onClose}>Cancel</button>
+              <button className="primary" disabled={!allMet || !matches || state.status === "saving"}>
+                {state.status === "saving" ? "Saving…" : "Save password"}
+              </button>
+            </div>
           </form>
         )}
       </div>

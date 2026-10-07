@@ -73,6 +73,14 @@ Supabase project: `rxvehsmunykipwevtpmb`.
    - Submit the Tally form with your own details, approve it in Queue, check the Zoom meeting and email arrive, sign in as that email to see the facilitator view.
    - Settings → Clear demo data.
 
+## Form, timezones and testing
+
+- **Tally form fields** used: first/last/initiated name, email, phone, "Do you wish to facilitate a" (circle type), first and second preference day and time, time zone, language, preferred start date. The two "Day"/"Time" pairs are told apart by "first"/"second" in the label if present, otherwise by their order in the form.
+- **Second preference**: if the first choice has no free licence, the second is tried automatically. The circle shows a "2nd preference" tag.
+- **Timezones**: Tally's "(GMT +x) City" options are mapped to real timezones (e.g. London to Europe/London) so clock changes are handled. Circles store the facilitator's own time (used for Zoom) and a UK reference time (used for clash checks and admin views).
+- **Mock licences** (testing only): tick Mock on a licence and approving a circle on it creates fake Zoom details instead of calling Zoom. The Overview "Before going live" checklist reminds you to turn this off.
+- **Theme**: light by default, with a dark mode toggle in the header (remembered per browser).
+
 ## Local development
 
 ```

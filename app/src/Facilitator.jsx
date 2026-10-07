@@ -1,14 +1,20 @@
 import { useEffect, useState } from "react";
-import { supabase, DAY_NAMES, hhmm, endTime, STATUS_LABEL } from "./lib.js";
+import { supabase, DAY_NAMES, hhmm, endTime, STATUS_LABEL, tzName, fmtDate, circleMessage, REQUEST_TYPES, requestSummary } from "./lib.js";
+import { CopyButton } from "./ui.jsx";
 
 export default function Facilitator({ email }) {
   const [circles, setCircles] = useState(null);
+  const [requests, setRequests] = useState([]);
   const [error, setError] = useState(null);
 
   const load = async () => {
-    const { data, error: e } = await supabase.rpc("my_circles");
-    if (e) setError(e.message);
-    setCircles(data ?? []);
+    const [c, r] = await Promise.all([
+      supabase.rpc("my_circles"),
+      supabase.from("change_requests").select("*").order("created_at", { ascending: false }),
+    ]);
+    if (c.error) setError(c.error.message);
+    setCircles(c.data ?? []);
+    setRequests(r.data ?? []);
   };
   useEffect(() => { load(); }, []);
 
@@ -21,78 +27,196 @@ export default function Facilitator({ email }) {
       {!circles.length && (
         <div className="card">
           <p>There are no circles linked to <b>{email}</b> yet.</p>
-          <p className="muted">If you've just submitted the form, the team still needs to approve it. You'll get an email once your Zoom link is ready.</p>
+          <p className="muted">If you've just submitted the form, the team still needs to approve it. You'll get an email once your Zoom link is ready. If you used a different email on the form, sign in with that one instead.</p>
         </div>
       )}
-      {circles.map((c) => <CircleCard key={c.id} c={c} />)}
+      {circles.map((c) => (
+        <CircleCard key={c.id} c={c} requests={requests.filter((r) => r.circle_id === c.id)} onSent={load} />
+      ))}
     </main>
   );
 }
 
-function CircleCard({ c }) {
-  const [msg, setMsg] = useState("");
-  const [sent, setSent] = useState(false);
-  const [copied, setCopied] = useState(null);
-  const copy = (k, v) => {
-    navigator.clipboard?.writeText(v);
-    setCopied(k);
-    setTimeout(() => setCopied(null), 1500);
-  };
+const REQUEST_STATUS = { open: "Waiting for the team", done: "Done", dismissed: "Closed" };
 
-  async function request(e) {
-    e.preventDefault();
-    const { error } = await supabase.from("change_requests").insert({ circle_id: c.id, message: msg });
-    if (!error) { setSent(true); setMsg(""); }
-    else alert(error.message);
-  }
-
+function CircleCard({ c, requests, onSent }) {
   const live = c.status === "live";
+  const mock = live && /mock=1/.test(c.join_url ?? "");
   return (
     <section className="card">
       <div className="card-head">
         <h2>{c.name}</h2>
         <span className={`pill st-${c.status}`}>{live ? "Ready" : STATUS_LABEL[c.status]}</span>
       </div>
-      <p className="lead">Every {DAY_NAMES[c.weekday]}, {hhmm(c.start_time)}–{endTime(c.start_time, c.duration_min)} <span className="muted">({c.timezone})</span></p>
+      <p className="lead">
+        Every {DAY_NAMES[c.weekday]}, {hhmm(c.start_time)}–{endTime(c.start_time, c.duration_min)}{" "}
+        <span className="muted">({tzName(c.timezone)} time)</span>
+      </p>
 
       {live ? (
         <>
+          {mock && <p className="banner small">Test circle: these Zoom details are placeholders, not a real meeting.</p>}
           <div className="details">
             {[
-              ["link", "Join link", c.join_url],
-              ["id", "Meeting ID", c.zoom_meeting_id],
-              ["pass", "Passcode", c.passcode],
-              ["host", "Host key", c.host_key],
-            ].map(([k, label, v]) => (
-              <div key={k} className="detail">
+              ["Join link", c.join_url],
+              ["Meeting ID", c.zoom_meeting_id],
+              ["Passcode", c.passcode],
+            ].map(([label, v]) => (
+              <div key={label} className="detail">
                 <span className="muted small">{label}</span>
                 <span className="detail-value">{v ?? "–"}</span>
-                {v && <button className="ghost small" onClick={() => copy(k, v)}>{copied === k ? "Copied" : "Copy"}</button>}
+                {v ? <CopyButton text={v} /> : <span />}
               </div>
             ))}
+            <HostKey value={c.host_key} />
+            <div className="copy-all">
+              <CopyButton primary label="Copy all my details" text={circleMessage(c, c.host_key)} />
+              <CopyButton label="Copy for my group" text={circleMessage(c, null, { forFacilitator: false })} />
+            </div>
+            <p className="muted small"><b>Copy for my group</b> leaves out the host key, so it's safe to post in WhatsApp. <b>Copy all my details</b> is for you only.</p>
           </div>
           <ol className="steps">
             <li>Open the join link a few minutes before your circle.</li>
             <li>In Zoom, open <b>Participants</b> and choose <b>Claim host</b>.</li>
             <li>Enter the host key above. You now have host controls.</li>
           </ol>
-          <p className="muted small">The link is the same every week, from {c.starts_on} until {c.ends_on}. Pin it in your WhatsApp group.</p>
+          <p className="muted small">The link is the same every week, from {fmtDate(c.starts_on)} until {fmtDate(c.ends_on)}. Pin it in your WhatsApp group.</p>
         </>
       ) : (
         <p className="muted">Your Zoom link will appear here once the team approves your circle.</p>
       )}
 
-      <details className="request">
-        <summary>Need to change something?</summary>
-        {sent ? (
-          <p>Thanks, the team has your request.</p>
-        ) : (
-          <form onSubmit={request}>
-            <textarea rows="3" required value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="e.g. Can we move to Thursdays at 8pm from February?" />
-            <button className="primary">Send request</button>
-          </form>
-        )}
-      </details>
+      {requests.length > 0 && (
+        <div className="history">
+          <span className="muted small">Your requests</span>
+          {requests.map((r) => (
+            <div key={r.id} className="history-row">
+              <span>
+                <b>{REQUEST_TYPES[r.request_type]?.label ?? "Request"}</b>
+                <span className="muted"> · {r.message}</span>
+              </span>
+              <span className={`pill small ${r.status === "open" ? "st-pending" : r.status === "done" ? "st-live" : "st-ended"}`}>{REQUEST_STATUS[r.status]}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <ChangeRequest circle={c} onSent={onSent} />
     </section>
+  );
+}
+
+// The host key gives full host control of every meeting on this Zoom licence,
+// so it's hidden until asked for and clearly marked as private.
+function HostKey({ value }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div className="detail host-key">
+      <span className="muted small">Host key</span>
+      <span className="detail-value">
+        {value ? (shown ? value : "••••••") : "–"}
+        <span className="detail-note">Private: for you only. Never share it or post it in the group.</span>
+      </span>
+      {value ? (
+        <span className="hk-actions">
+          <button type="button" className="copy-btn" onClick={() => setShown(!shown)}>{shown ? "Hide" : "Show"}</button>
+          <CopyButton text={value} />
+        </span>
+      ) : <span />}
+    </div>
+  );
+}
+
+// Structured change request: pick what's needed, fill only the fields that matter.
+function ChangeRequest({ circle, onSent }) {
+  const [open, setOpen] = useState(false);
+  const [type, setType] = useState("");
+  const [d, setD] = useState({});
+  const [note, setNote] = useState("");
+  const [state, setState] = useState({ status: "idle" });
+  const fields = type ? REQUEST_TYPES[type].fields : [];
+  const set = (k) => (e) => setD({ ...d, [k]: e.target.value });
+  const complete = type && fields.every((f) => d[f]) && (type !== "other" || note.trim());
+
+  async function send(e) {
+    e.preventDefault();
+    if (!complete) return;
+    setState({ status: "sending" });
+    const details = { ...d, ...(d.weekday ? { weekday: Number(d.weekday) } : {}) };
+    const summary = type === "other" ? note.trim() : `${requestSummary(type, details)}${note.trim() ? `. ${note.trim()}` : ""}`;
+    const { error } = await supabase.from("change_requests").insert({
+      circle_id: circle.id, request_type: type, details, message: summary,
+    });
+    if (error) return setState({ status: "error", message: "Couldn't send your request. Please try again, or contact the team." });
+    setType(""); setD({}); setNote(""); setOpen(false);
+    setState({ status: "sent" });
+    onSent();
+  }
+
+  if (!open) {
+    return (
+      <div className="request">
+        <button type="button" className="link" onClick={() => { setOpen(true); setState({ status: "idle" }); }}>Need to change something?</button>
+        {state.status === "sent" && <p className="ok-text small">Thanks, the team has your request. You'll see its status above.</p>}
+      </div>
+    );
+  }
+
+  return (
+    <form className="request request-form" onSubmit={send}>
+      <label>What do you need?
+        <select value={type} onChange={(e) => { setType(e.target.value); setD({}); }} autoFocus>
+          <option value="">Choose…</option>
+          {Object.entries(REQUEST_TYPES).map(([k, t]) => <option key={k} value={k}>{t.label}</option>)}
+        </select>
+      </label>
+
+      {fields.includes("weekday") && (
+        <div className="grid2">
+          <label>New day
+            <select value={d.weekday ?? ""} onChange={set("weekday")}>
+              <option value="">Choose…</option>
+              {[1, 2, 3, 4, 5, 6, 7].map((n) => <option key={n} value={n}>{DAY_NAMES[n]}</option>)}
+            </select>
+          </label>
+          <label>New start time ({tzName(circle.timezone)} time)
+            <input type="time" value={d.start_time ?? ""} onChange={set("start_time")} />
+          </label>
+        </div>
+      )}
+      {fields.includes("from") && (
+        <div className="grid2">
+          <label>{type === "change_start" ? "New start date" : type === "stop" ? "Last session on or after" : type === "pause" ? "Pause from" : "From"}
+            <input type="date" value={d.from ?? ""} onChange={set("from")} />
+          </label>
+          {fields.includes("until") && (
+            <label>Restart on
+              <input type="date" value={d.until ?? ""} min={d.from} onChange={set("until")} />
+            </label>
+          )}
+        </div>
+      )}
+      {fields.includes("name") && (
+        <div className="grid2">
+          <label>New facilitator's name<input value={d.name ?? ""} onChange={set("name")} /></label>
+          <label>Their email<input type="email" value={d.email ?? ""} onChange={set("email")} /></label>
+        </div>
+      )}
+
+      {type && (
+        <label>{type === "other" ? "Tell us what you need" : "Anything else? (optional)"}
+          <textarea rows="2" value={note} onChange={(e) => setNote(e.target.value)}
+            placeholder={type === "other" ? "e.g. Can we make the sessions 90 minutes?" : ""} />
+        </label>
+      )}
+      {type && type !== "other" && complete && <p className="muted small">We'll send: <b>{requestSummary(type, { ...d, weekday: Number(d.weekday) })}</b></p>}
+      {state.status === "error" && <p className="error small">{state.message}</p>}
+      <div className="actions">
+        <button type="button" className="ghost" onClick={() => setOpen(false)}>Cancel</button>
+        <button className="primary" disabled={!complete || state.status === "sending"}>
+          {state.status === "sending" ? "Sending…" : "Send request"}
+        </button>
+      </div>
+    </form>
   );
 }
