@@ -286,6 +286,7 @@ fieldset.group legend { font-size: 12px; color: var(--muted); font-weight: 600; 
 
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); max-width: min(720px, calc(100% - 32px)); padding: 12px 16px; border-radius: 10px; background: var(--ink); color: var(--bg); z-index: 70; cursor: pointer; box-shadow: var(--pop-shadow); }
 .toast.error { background: var(--warn); color: #fff; }
+.toast.warn { background: #8a5a00; color: #fff; }
 
 @media (max-width: 640px) {
   .content { padding: 12px; }
@@ -508,3 +509,18 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .email-mini .warn-text { flex-basis: 100%; }
 .email-log tr.email-problem td { background: var(--warn-soft); }
 .email-log td { vertical-align: top; }
+
+.email-mini.clickable { cursor: pointer; border-radius: 6px; padding: 4px 6px; margin: 0 -6px; }
+.email-mini.clickable:hover { background: var(--surface-2); }
+.email-log tr.clickable { cursor: pointer; }
+.email-log tr.clickable:hover td { background: var(--surface-2); }
+.email-log tr.email-open td { border-bottom-color: transparent; }
+.email-caret { margin-left: 8px; color: var(--muted); font-size: 11px; }
+.email-detail-row > td { background: var(--surface-2); padding: 14px 16px 18px; }
+.email-detail { display: grid; gap: 10px; max-width: 760px; }
+.email-head { display: grid; grid-template-columns: 90px 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.email-head dt { color: var(--muted); }
+.email-head dd { margin: 0; word-break: break-word; }
+.email-view { width: max-content; }
+.email-frame { width: 100%; height: 200px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.email-plain { white-space: pre-wrap; font: 13px/1.5 ui-monospace, Menlo, monospace; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin: 0; max-height: 520px; overflow: auto; }

@@ -88,10 +88,13 @@ async function loadTemplate(key: TemplateKey) {
 let mailer: ReturnType<typeof nodemailer.createTransport> | null = null;
 type EmailMeta = { kind: string; circle?: { id?: string; name?: string } | null; actor: string };
 // Every attempt is written to email_log (Setup, Sent emails), including skipped and failed ones.
-async function logEmail(meta: EmailMeta, to: string | null, subject: string | null, status: "sent" | "failed" | "skipped", error?: string, messageId?: string) {
+type EmailBody = { html?: string; text?: string; replyTo?: string };
+async function logEmail(meta: EmailMeta, to: string | null, subject: string | null, status: "sent" | "failed" | "skipped", error?: string, messageId?: string, body: EmailBody = {}) {
   await db.from("email_log").insert({
     kind: meta.kind, to_email: to, subject, circle_id: meta.circle?.id ?? null, circle_name: meta.circle?.name ?? null,
     sent_by: meta.actor, status, error: error ?? null, message_id: messageId ?? null,
+    from_address: GMAIL_USER ? `${EMAIL_FROM_NAME} <${GMAIL_USER}>` : null, reply_to: body.replyTo ?? null,
+    body_html: body.html ?? null, body_text: body.text ?? null,
   }).then(({ error: e }) => e && console.error("email_log insert failed", e.message));
 }
 async function sendEmail(to: string, subject: string, html: string, text: string, meta: EmailMeta, replyTo?: string) {
@@ -101,11 +104,11 @@ async function sendEmail(to: string, subject: string, html: string, text: string
   });
   try {
     const info = await mailer.sendMail({ from: { name: EMAIL_FROM_NAME, address: GMAIL_USER }, to, subject, html, text, ...(replyTo ? { replyTo } : {}) });
-    await logEmail(meta, to, subject, "sent", undefined, info?.messageId);
+    await logEmail(meta, to, subject, "sent", undefined, info?.messageId, { html, text, replyTo });
     return "sent";
   } catch (e) {
     const msg = String((e as Error).message ?? e).slice(0, 200);
-    await logEmail(meta, to, subject, "failed", msg);
+    await logEmail(meta, to, subject, "failed", msg, undefined, { html, text, replyTo });
     return `failed: ${msg}`;
   }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   supabase, adminAction, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
@@ -104,6 +104,18 @@ function readRoute() {
   return m && PAGE_KEYS.includes(m[1]) ? { tab: m[1], sub: m[2] ? decodeURIComponent(m[2]) : null } : { tab: "Overview", sub: null };
 }
 
+// One line about the facilitator email for the message after an action ("Email sent to ...").
+function emailNote(result, to) {
+  if (!result || /^not needed/.test(result)) return "";
+  if (result === "sent") return ` Email sent${to ? ` to ${to}` : ""}.`;
+  if (/^skipped/.test(result)) return ` Email not sent: ${result.replace(/^skipped \(|\)$/g, "")}.`;
+  return ` Email failed: ${result.replace(/^failed: /, "")}. See Setup, Sent emails.`;
+}
+const emailFailed = (result) => Boolean(result) && result !== "sent" && !/^not needed/.test(result);
+// Build a toast from an action result that may include an email outcome.
+const withEmail = (text, result, to) => ({ text: `${text}${emailNote(result, to)}`, warn: emailFailed(result) });
+const INVITE_NOTE = { invited: " Sign-in invite sent.", "already has an account": " They already have a sign-in." };
+
 // Today's date in the UK (not UTC), as YYYY-MM-DD.
 function ukToday() { return new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" }); }
 // Date and time in UK time, e.g. "Wed 7 Oct 2026, 21:44".
@@ -174,14 +186,19 @@ export default function Admin() {
 
   const notify = (kind, text) => {
     setToast({ kind, text });
-    setTimeout(() => setToast(null), 6000);
+    setTimeout(() => setToast(null), kind === "ok" ? 6000 : 12000);
   };
 
   // Wraps an async action with refresh + toast.
   const run = async (fn, okText) => {
     try {
       const out = await fn();
-      if (okText) notify("ok", typeof okText === "function" ? okText(out) : okText);
+      if (okText) {
+        const msg = typeof okText === "function" ? okText(out) : okText;
+        // A message can flag an email problem: { text, warn: true } shows as a warning that stays longer.
+        if (msg && typeof msg === "object") notify(msg.warn ? "warn" : "ok", msg.text);
+        else notify("ok", msg);
+      }
       await load();
       return out ?? true;
     } catch (e) {
@@ -534,17 +551,19 @@ function Queue({ data, run, onSelect }) {
     for (let i = 0; i < ready.length; i++) {
       setBulk({ done: i, total: ready.length });
       try {
-        await adminAction("provision", ready[i].id);
-        results.push({ ok: true });
+        const o = await adminAction("provision", ready[i].id);
+        results.push({ ok: true, name: ready[i].name, email: o?.email });
       } catch (e) {
         results.push({ ok: false, name: ready[i].name, error: e.message });
       }
     }
     setBulk(null);
     const failed = results.filter((r) => !r.ok);
+    const ok = results.filter((r) => r.ok);
+    const sent = ok.filter((r) => r.email === "sent").length;
     await run(async () => {
       if (failed.length) throw new Error(`${failed.length} failed. First error (${failed[0].name}): ${failed[0].error}`);
-    }, `${results.length} circles provisioned`);
+    }, { text: `${ok.length} circles approved. Emails sent: ${sent} of ${ok.length}.${sent < ok.length ? " See Setup, Sent emails for the others." : ""}`, warn: sent < ok.length });
   }
 
   return (
@@ -765,15 +784,18 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
       if (Number(f.duration_min) !== circle.duration_min) patch.duration_min = Number(f.duration_min);
       if (f.timezone !== circle.timezone) patch.timezone = f.timezone;
       if ((f.preferred_start || null) !== (circle.preferred_start || null)) patch.preferred_start = f.preferred_start || null;
+      const emails = [];
       if (Object.keys(patch).length) {
-        await adminAction("reschedule", id, { patch });
+        const r = await adminAction("reschedule", id, { patch });
         done.push("Zoom meeting moved, same link");
+        if (r?.email) emails.push(r.email);
       }
 
       const newEmail = f.facilitator_email.trim().toLowerCase();
       if (newEmail && newEmail !== circle.facilitator?.email) {
-        await adminAction("handover", id, { facilitator: { name: f.facilitator_name, email: newEmail } });
-        done.push("handed over");
+        const r = await adminAction("handover", id, { facilitator: { name: f.facilitator_name, email: newEmail } });
+        done.push(`handed over to ${newEmail}`);
+        if (r?.email) emails.push(r.email);
       } else if (circle.facilitator_id) {
         const { error: e2 } = await supabase.from("facilitators")
           .update(facilitatorPatch(circle.facilitator, f, newEmail)).eq("id", circle.facilitator_id);
@@ -793,8 +815,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
         await adminAction("rename", id);
         done.push("Zoom title updated");
       }
-      return done;
-    }, (done) => `Saved${done?.length ? `: ${done.join(", ")}` : ""}`);
+      return { done, email: emails.find(emailFailed) ?? emails[0] };
+    }, (o) => withEmail(`Saved${o?.done?.length ? `: ${o.done.join(", ")}` : ""}.`, o?.email, f.facilitator_email.trim().toLowerCase() || circle.facilitator?.email));
     if (ok) onClose();
   }
 
@@ -868,7 +890,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
     if (!target) return;
     if (!confirm(`Move "${circle.name}" to ${target.label}?\n\nThis creates a new Zoom meeting on ${target.label}, so the join link changes. The facilitator is emailed the new link, and the old meeting is deleted. Remember to update the WhatsApp group.`)) return;
     setBusy(true);
-    await run(() => adminAction("move_licence", circle.id, { licence_id: moveTo }), (o) => `Moved to ${o.licence}. New link sent to the facilitator.`);
+    await run(() => adminAction("move_licence", circle.id, { licence_id: moveTo }), (o) => withEmail(`Moved to ${o.licence}, new Zoom link created.`, o.email, circle.facilitator?.email));
     setBusy(false);
     setMoveTo("");
   }
@@ -981,7 +1003,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
             </div>
             <p className="muted small">Facilitator version includes the host key. Participants version is safe to post in the WhatsApp group.</p>
             <div className="actions">
-              <button onClick={() => run(() => adminAction("resend", circle.id), (o) => `Email ${o.email}`)}>Resend details email</button>
+              <button onClick={() => run(() => adminAction("resend", circle.id), (o) => withEmail("Details email:", o.email, circle.facilitator?.email))}>Resend details email</button>
               {onAttendance && <button onClick={() => onAttendance(circle.id)}>See attendance</button>}
               <button className="danger" onClick={() => confirm("Delete the Zoom meeting and end this circle?") && run(() => adminAction("cancel", circle.id), "Circle ended").then((ok) => ok && onClose())}>End circle</button>
             </div>
@@ -1148,7 +1170,8 @@ function CircleEmails({ circle, onAll }) {
         {onAll && <button className="link small" onClick={() => onAll(circle.name)}>All emails for this circle</button>}
       </div>
       {rows.map((r) => (
-        <div key={r.id} className="small email-mini">
+        <div key={r.id} className="small email-mini clickable" role="button" tabIndex={0} title="Open this email"
+          onClick={() => onAll?.(`id:${r.id}`)} onKeyDown={(e) => e.key === "Enter" && onAll?.(`id:${r.id}`)}>
           <span className={`pill small ${EMAIL_STATUS[r.status]?.[1] ?? ""}`}>{EMAIL_STATUS[r.status]?.[0] ?? r.status}</span>
           <span>{EMAIL_KIND[r.kind] ?? r.kind} to {r.to_email ?? "nobody"}</span>
           <span className="muted">{fmtStamp(r.sent_at)}</span>
@@ -1159,15 +1182,60 @@ function CircleEmails({ circle, onAll }) {
   );
 }
 
+// The whole email as it was sent, loaded when a row is opened.
+function EmailDetail({ id, row }) {
+  const [mail, setMail] = useState(null);
+  const [plain, setPlain] = useState(false);
+  useEffect(() => {
+    supabase.from("email_log").select("from_address, reply_to, message_id, body_html, body_text").eq("id", id).single()
+      .then(({ data, error }) => setMail(error ? { error: error.message } : data));
+  }, [id]);
+  if (!mail) return <p className="muted small">Loading email…</p>;
+  if (mail.error) return <p className="error small">{mail.error}</p>;
+  const has = mail.body_html || mail.body_text;
+  return (
+    <div className="email-detail">
+      <dl className="email-head">
+        <dt>From</dt><dd>{mail.from_address ?? "–"}</dd>
+        <dt>To</dt><dd>{row.to_email ?? "–"}</dd>
+        {mail.reply_to && <><dt>Replies to</dt><dd>{mail.reply_to}</dd></>}
+        <dt>Subject</dt><dd>{row.subject ?? "–"}</dd>
+        <dt>Sent</dt><dd>{fmtStamp(row.sent_at)} by {row.sent_by}</dd>
+        {row.error && <><dt>Problem</dt><dd className="warn-text">{row.error}</dd></>}
+      </dl>
+      {!has ? (
+        <p className="muted small">{row.status === "skipped" ? "This email wasn't written, so there's nothing to show." : "The full text wasn't kept for emails sent before 8 Oct 2026. The Gmail Sent folder has a copy."}</p>
+      ) : (
+        <>
+          <div className="seg email-view">
+            <button className={!plain ? "active" : ""} onClick={() => setPlain(false)}>As sent</button>
+            <button className={plain ? "active" : ""} onClick={() => setPlain(true)}>Plain text</button>
+          </div>
+          {plain || !mail.body_html
+            ? <pre className="email-plain">{mail.body_text}</pre>
+            : <iframe className="email-frame" title="Email as sent" sandbox="allow-same-origin"
+                onLoad={(e) => { const d = e.currentTarget.contentDocument; if (d) e.currentTarget.style.height = `${Math.min(900, d.documentElement.scrollHeight + 4)}px`; }}
+                srcDoc={`<!doctype html><meta charset="utf-8"><body style="margin:16px;background:#fff">${mail.body_html}</body>`} />}
+        </>
+      )}
+    </div>
+  );
+}
+
 function EmailLog({ data, run, onSelect, initial }) {
   const [rows, setRows] = useState(null);
   const [limit, setLimit] = useState(200);
+  // Opened from elsewhere: "failed" filters, "id:<uuid>" opens one email, anything else is a search.
+  const openId = initial?.startsWith("id:") ? initial.slice(3) : null;
   const [status, setStatus] = useState(initial === "failed" ? "problems" : "all");
-  const [q, setQ] = useState(initial && initial !== "failed" ? initial : "");
+  const [q, setQ] = useState(initial && initial !== "failed" && !openId ? initial : "");
   const [busy, setBusy] = useState(null);
+  const [open, setOpen] = useState(openId);
 
   const load = useCallback(async () => {
-    const { data: r, error } = await supabase.from("email_log").select("*").order("sent_at", { ascending: false }).range(0, limit - 1);
+    const { data: r, error } = await supabase.from("email_log")
+      .select("id, sent_at, kind, to_email, subject, circle_id, circle_name, sent_by, status, error")
+      .order("sent_at", { ascending: false }).range(0, limit - 1);
     setRows(error ? { error: error.message } : r ?? []);
   }, [limit]);
   useEffect(() => { load(); }, [load]);
@@ -1184,7 +1252,7 @@ function EmailLog({ data, run, onSelect, initial }) {
     if (!c || c.status !== "live") return;
     if (!confirm(`Send the current details email for "${c.name}" to ${c.facilitator?.email ?? "the facilitator"} again?`)) return;
     setBusy(r.id);
-    await run(() => adminAction("resend", c.id), (o) => `Email ${o.email}`);
+    await run(() => adminAction("resend", c.id), (o) => withEmail("Details email:", o.email, c.facilitator?.email));
     setBusy(null);
     load();
   }
@@ -1214,17 +1282,21 @@ function EmailLog({ data, run, onSelect, initial }) {
               const c = data.circles.find((x) => x.id === r.circle_id);
               const [label, cls] = EMAIL_STATUS[r.status] ?? [r.status, ""];
               return (
-                <tr key={r.id} className={r.status === "sent" ? "" : "email-problem"}>
+                <Fragment key={r.id}>
+                <tr className={`clickable ${r.status === "sent" ? "" : "email-problem"} ${open === r.id ? "email-open" : ""}`}
+                  onClick={() => setOpen(open === r.id ? null : r.id)} title={open === r.id ? "Close" : "Show the whole email"}>
                   <td className="nowrap">{fmtStamp(r.sent_at)}</td>
                   <td>{r.to_email ?? <span className="muted">none</span>}</td>
                   <td><div>{r.subject ?? <span className="muted">(not written)</span>}</div><div className="muted small">{EMAIL_KIND[r.kind] ?? r.kind}</div></td>
-                  <td>{c ? <button className="link" onClick={() => onSelect(c)}>{blockName(c.name)}</button> : <span className="muted">{r.circle_name ? blockName(r.circle_name) : "–"}</span>}</td>
+                  <td>{c ? <button className="link" onClick={(e) => { e.stopPropagation(); onSelect(c); }}>{blockName(c.name)}</button> : <span className="muted">{r.circle_name ? blockName(r.circle_name) : "–"}</span>}</td>
                   <td className="small">{r.sent_by}</td>
                   <td><span className={`pill small ${cls}`}>{label}</span>{r.error && <div className="small warn-text">{r.error}</div>}</td>
                   <td>{r.status !== "sent" && r.kind !== "test" && c?.status === "live" && (
-                    <button className="small" disabled={busy === r.id} onClick={() => resend(r)}>{busy === r.id ? "Sending…" : "Resend"}</button>
-                  )}</td>
+                    <button className="small" disabled={busy === r.id} onClick={(e) => { e.stopPropagation(); resend(r); }}>{busy === r.id ? "Sending…" : "Resend"}</button>
+                  )}<span className="email-caret" aria-hidden="true">{open === r.id ? "▴" : "▾"}</span></td>
                 </tr>
+                {open === r.id && <tr className="email-detail-row"><td colSpan={7}><EmailDetail id={r.id} row={r} /></td></tr>}
+                </Fragment>
               );
             })}
             {!shown.length && <tr><td colSpan={7} className="muted">{rows.length ? "Nothing matches." : "No emails sent yet. Approving a circle, changing a live circle or sending a test from Email templates will show up here."}</td></tr>}
@@ -1452,9 +1524,10 @@ function Requests({ data, run, onSelect }) {
       if (out?.conflict) return out; // leave the request open: the circle is now a clash
       const { error } = await supabase.from("change_requests").update({ status: "done" }).eq("id", r.id);
       if (error) throw error;
+      return out;
     }, (o) => o?.conflict
-      ? "No licence is free at the new time. The circle is now a clash in the Queue; the request stays open."
-      : "Change applied and request marked done");
+      ? { text: "No licence is free at the new time. The circle is now a clash in the Queue; the request stays open.", warn: true }
+      : withEmail("Change applied and request marked done.", o?.email, r.request_type === "handover" ? r.details?.email : c.facilitator?.email));
   }
 
   return (
@@ -1804,7 +1877,7 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
         .update({ whatsapp_group_link: wa.trim() || null, youtube_playlist_link: yt.trim() || null }).eq("id", circle.id);
       if (error) throw error;
       return adminAction("provision", circle.id);
-    }, (o) => `${o.mock ? "Mock meeting" : "Zoom meeting"} created. Invite: ${o.invite}. Email: ${o.email}`);
+    }, (o) => withEmail(`${o.mock ? "Mock meeting" : "Zoom meeting"} created.${INVITE_NOTE[o.invite] ?? (o.invite ? ` Invite: ${o.invite}.` : "")}`, o.email, circle.facilitator?.email));
     setBusy(false);
     onBusy?.(false);
     if (ok) onClose();
