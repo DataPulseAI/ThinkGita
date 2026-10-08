@@ -2,7 +2,8 @@
 
 -- Super admins: can see attendance. Normal admins and facilitators cannot.
 alter table public.admin_emails add column if not exists is_super boolean not null default false;
-update public.admin_emails set is_super = true where email = 'virenpsamani@gmail.com';
+-- Mark super admins by hand (not committed, to keep emails out of the repo):
+--   update public.admin_emails set is_super = true where email = '<super-admin-email>';
 
 create or replace function public.is_super_admin()
 returns boolean language sql stable security definer set search_path = '' as $$

@@ -4,7 +4,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const SIGNING_SECRET = Deno.env.get("TALLY_SIGNING_SECRET") ?? "";
-// Optional: only accept submissions from this Tally form (the id in the form's link, e.g. w5lkx6).
+// Optional: only accept submissions from this Tally form (the id at the end of the form link).
 const FORM_ID = (Deno.env.get("TALLY_FORM_ID") ?? "").trim();
 const db = createClient(
   Deno.env.get("SUPABASE_URL")!,

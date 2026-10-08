@@ -4,6 +4,7 @@
 //        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template? }
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildVars, render, DEFAULT_TEMPLATES } from "./template.ts";
+import nodemailer from "npm:nodemailer@6.9.16";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const db = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
@@ -13,8 +14,12 @@ const db = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
 const ZOOM_ACCOUNT_ID = Deno.env.get("ZOOM_ACCOUNT_ID") ?? "";
 const ZOOM_CLIENT_ID = Deno.env.get("ZOOM_CLIENT_ID") ?? "";
 const ZOOM_CLIENT_SECRET = Deno.env.get("ZOOM_CLIENT_SECRET") ?? "";
-const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY") ?? "";
-const EMAIL_FROM = Deno.env.get("EMAIL_FROM") ?? "";
+// Email goes out through the team's Gmail account (an app password, not the account password).
+const GMAIL_USER = Deno.env.get("GMAIL_USER") ?? "";
+const GMAIL_APP_PASSWORD = (Deno.env.get("GMAIL_APP_PASSWORD") ?? "").replace(/\s+/g, "");
+const EMAIL_FROM_NAME = Deno.env.get("EMAIL_FROM_NAME") ?? "Think Gita Circles";
+const EMAIL_READY = Boolean(GMAIL_USER && GMAIL_APP_PASSWORD);
+const EMAIL_MISSING = "Email isn't set up yet (GMAIL_USER / GMAIL_APP_PASSWORD)";
 const APP_URL = Deno.env.get("APP_URL") ?? "";
 const MAX_OCCURRENCES = 50;
 
@@ -58,6 +63,10 @@ async function zoom(path: string, init: RequestInit = {}) {
 function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
 }
+// Today's date in the UK (not UTC), so late-evening actions use the right day.
+function ukToday() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+}
 // First date on/after `from` that falls on ISO weekday (1 = Mon .. 7 = Sun).
 function firstOccurrence(from: string, weekday: number) {
   const d = new Date(`${from}T12:00:00Z`);
@@ -76,13 +85,29 @@ async function loadTemplate(key: TemplateKey) {
   const { data } = await db.from("email_templates").select("subject, body").eq("key", key).maybeSingle();
   return data ?? DEFAULT_TEMPLATES[key];
 }
-async function sendEmail(to: string, subject: string, html: string, text: string) {
-  const r = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from: EMAIL_FROM, to, subject, html, text }),
+let mailer: ReturnType<typeof nodemailer.createTransport> | null = null;
+type EmailMeta = { kind: string; circle?: { id?: string; name?: string } | null; actor: string };
+// Every attempt is written to email_log (Setup, Sent emails), including skipped and failed ones.
+async function logEmail(meta: EmailMeta, to: string | null, subject: string | null, status: "sent" | "failed" | "skipped", error?: string, messageId?: string) {
+  await db.from("email_log").insert({
+    kind: meta.kind, to_email: to, subject, circle_id: meta.circle?.id ?? null, circle_name: meta.circle?.name ?? null,
+    sent_by: meta.actor, status, error: error ?? null, message_id: messageId ?? null,
+  }).then(({ error: e }) => e && console.error("email_log insert failed", e.message));
+}
+async function sendEmail(to: string, subject: string, html: string, text: string, meta: EmailMeta, replyTo?: string) {
+  mailer ??= nodemailer.createTransport({
+    host: "smtp.gmail.com", port: 465, secure: true,
+    auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
   });
-  return r.ok ? "sent" : `failed: ${r.status} ${await r.text()}`;
+  try {
+    const info = await mailer.sendMail({ from: { name: EMAIL_FROM_NAME, address: GMAIL_USER }, to, subject, html, text, ...(replyTo ? { replyTo } : {}) });
+    await logEmail(meta, to, subject, "sent", undefined, info?.messageId);
+    return "sent";
+  } catch (e) {
+    const msg = String((e as Error).message ?? e).slice(0, 200);
+    await logEmail(meta, to, subject, "failed", msg);
+    return `failed: ${msg}`;
+  }
 }
 // The admin who triggers an email signs it (their name under Settings > Admins).
 async function adminName(email: string) {
@@ -90,24 +115,25 @@ async function adminName(email: string) {
   return data?.name ?? "";
 }
 async function sendDetailsEmail(key: TemplateKey, circle: any, facilitator: any, licence: any, actor: string) {
-  if (!RESEND_API_KEY || !EMAIL_FROM) return "skipped (RESEND_API_KEY / EMAIL_FROM not set)";
-  if (!facilitator?.email) return "skipped (no facilitator)";
+  const meta: EmailMeta = { kind: key, circle, actor };
+  if (!EMAIL_READY) { await logEmail(meta, facilitator?.email ?? null, null, "skipped", "Email isn't set up (GMAIL_USER / GMAIL_APP_PASSWORD)"); return "skipped (GMAIL_USER / GMAIL_APP_PASSWORD not set)"; }
+  if (!facilitator?.email) { await logEmail(meta, null, null, "skipped", "Circle has no facilitator email"); return "skipped (no facilitator)"; }
   const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
   const template = await loadTemplate(key);
   const vars = buildVars({ circle, facilitator, licence, settings, appUrl: APP_URL, sender: await adminName(actor) });
   const { subject, html, text } = render(template, vars);
-  return await sendEmail(facilitator.email, subject, html, text);
+  return await sendEmail(facilitator.email, subject, html, text, meta, settings?.support_contact || undefined);
 }
 
 // Send a rendered template (saved or unsaved draft) for one circle to the admin's own inbox.
 async function testEmail(circleId: string, actor: string, key: TemplateKey, draft?: { subject?: string; body?: string }) {
-  if (!RESEND_API_KEY || !EMAIL_FROM) throw new Error("Email isn't set up yet (RESEND_API_KEY / EMAIL_FROM)");
+  if (!EMAIL_READY) throw new Error(EMAIL_MISSING);
   const c = await loadCircle(circleId);
   const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
   const template = draft?.subject != null && draft?.body != null ? draft : await loadTemplate(key);
   const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: c.licence, settings, appUrl: APP_URL, sender: await adminName(actor) });
   const { subject, html, text } = render(template as { subject: string; body: string }, vars);
-  const result = await sendEmail(actor, `[TEST] ${subject}`, html, text);
+  const result = await sendEmail(actor, `[TEST] ${subject}`, html, text, { kind: "test", circle: c, actor });
   if (result !== "sent") throw new Error(`Test email ${result}`);
   await audit(actor, "test_email", c.id, { template: key });
   return { email: result, to: actor };
@@ -118,6 +144,16 @@ async function inviteFacilitator(email: string) {
   if (!error) return "invited";
   if (/already/i.test(error.message)) return "already has an account";
   return `invite failed: ${error.message}`;
+}
+
+// Invite a newly added admin so they can set a password and sign in.
+async function inviteAdmin(actor: string, email: string) {
+  const e = String(email ?? "").trim().toLowerCase();
+  const { data: row } = await db.from("admin_emails").select("email").eq("email", e).maybeSingle();
+  if (!row) throw new Error("Add them as an admin first");
+  const result = await inviteFacilitator(e);
+  await audit(actor, "invite_admin", null, { email: e, result });
+  return { invite: result };
 }
 
 async function audit(actor: string, action: string, circle_id: string | null, detail: unknown) {
@@ -161,7 +197,7 @@ async function provision(circleId: string, actor: string) {
   try {
 
   const { data: s } = await db.from("settings").select("*").eq("id", 1).single();
-  const today = isoDate(new Date());
+  const today = ukToday();
   // Start from the latest of: today, term start, facilitator's preferred start date.
   const from = [today, s.term_start, c.preferred_start].filter(Boolean).sort().pop() as string;
   const startsOn = firstOccurrence(from, c.weekday);
@@ -278,7 +314,7 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
       : error.message);
   }
 
-  const today = isoDate(new Date());
+  const today = ukToday();
   // Never pull a not-yet-started circle earlier than planned.
   const from = [today, updated.preferred_start, c.starts_on].filter(Boolean).sort().pop() as string;
   const startsOn = firstOccurrence(from, updated.weekday);
@@ -348,7 +384,7 @@ async function handover(circleId: string, actor: string, person: { name?: string
 // A date today or earlier ends it now.
 async function endOn(circleId: string, actor: string, date: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date ?? ""))) throw new Error("A valid end date is needed");
-  const today = isoDate(new Date());
+  const today = ukToday();
   if (date <= today) return cancel(circleId, actor);
   const c = await loadCircle(circleId);
   if (c.status !== "live") {
@@ -384,7 +420,7 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
     throw new Error(/no_licence_clash/.test(moveErr.message) ? `${target.label} is already booked at this circle's time` : moveErr.message);
   }
 
-  const today = isoDate(new Date());
+  const today = ukToday();
   const from = [today, c.starts_on].filter(Boolean).sort().pop() as string;
   const startsOn = firstOccurrence(from, c.weekday);
   const recurrence: Record<string, unknown> = { type: 2, repeat_interval: 1, weekly_days: String((c.weekday % 7) + 1) };
@@ -750,6 +786,7 @@ Deno.serve(async (req) => {
       case "list_zoom_meetings": return json(await listZoomMeetings(email));
       case "rename": return json(await renameMeeting(circle_id));
       case "set_host_key": return json(await setHostKey(email, licence_id));
+      case "invite_admin": return json(await inviteAdmin(email, facilitator?.email));
       case "test_email": return json(await testEmail(circle_id, email, template_key === "updated" ? "updated" : "approved", template));
       default: return json({ error: `Unknown action ${action}` }, 400);
     }

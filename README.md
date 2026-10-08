@@ -47,7 +47,7 @@ Supabase project: `rxvehsmunykipwevtpmb`.
 2. **Supabase Auth** (Dashboard → Authentication)
    - URL Configuration: set Site URL and add a Redirect URL for the Pages address above.
    - Sign In / Providers: turn **off** "Allow new users to sign up".
-   - Emails → SMTP: add a custom SMTP sender. With Resend: host `smtp.resend.com`, port `465`, user `resend`, password = a Resend API key, sender = the same address as `EMAIL_FROM`. The built-in sender only emails project team members and is heavily rate-limited, so facilitator invites won't arrive without this.
+   - Emails → SMTP: add a custom SMTP sender using the team Gmail account: host `smtp.gmail.com`, port `465`, username = the Gmail address, password = the same Gmail app password as `GMAIL_APP_PASSWORD`, sender email = the Gmail address, sender name `Think Gita Circles`. The built-in sender only emails project team members and is heavily rate-limited, so facilitator and admin invites won't arrive without this.
    - How facilitators sign in: approving a circle emails them an invite. The invite link signs them in and asks them to choose a password. Later they sign in with email and password, or use "Forgot or never set a password?" on the sign-in page.
    - Users → Invite user: invite yourself (the admin email already in the `admin_emails` table) so you can sign in.
    - New project only: add the first admin in the SQL editor with `insert into public.admin_emails (email) values ('<your-admin-email>');`
@@ -69,7 +69,7 @@ Supabase project: `rxvehsmunykipwevtpmb`.
    | `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET` | From the Zoom app |
    | `TALLY_SIGNING_SECRET` | A long random string, e.g. from `openssl rand -base64 32`. The same value goes into Tally |
    | `TALLY_FORM_ID` | `w5lkx6` (the id at the end of the form link). Submissions from any other form are ignored |
-   | `RESEND_API_KEY`, `EMAIL_FROM` | For the facilitator details email, e.g. `ThinkGita Circles <circles@thinkgita.org>`. The domain must be verified in Resend |
+   | `GMAIL_USER`, `GMAIL_APP_PASSWORD` | Facilitator details emails are sent from this Gmail account (Google Account → Security → 2-Step Verification → App passwords). Optional `EMAIL_FROM_NAME` (default `Think Gita Circles`). Replies go to the support contact set under Setup, Emails |
    | `APP_URL` | `https://datapulseai.github.io/ThinkGita/` |
 
 5. **Tally** (in the Tally account that owns the form, form `w5lkx6` only)

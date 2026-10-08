@@ -501,3 +501,10 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .hbar-val { font-variant-numeric: tabular-nums; }
 .link.on { font-weight: 700; text-decoration: underline; }
 .ins-compare td { vertical-align: top; }
+.licence-meetings { margin-left: 10px; }
+.admin-super { margin-left: 8px; }
+
+.email-mini { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 4px 0; }
+.email-mini .warn-text { flex-basis: 100%; }
+.email-log tr.email-problem td { background: var(--warn-soft); }
+.email-log td { vertical-align: top; }

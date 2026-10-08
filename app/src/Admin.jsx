@@ -13,7 +13,7 @@ const NAV = [
   { label: "Queue", tabs: [["Queue", "Queue"]] },
   { label: "Circles", tabs: [["Circles", "All circles"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
   { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance", "super"], ["Insights", "Attendance insights", "super"]] },
-  { label: "Setup", tabs: [["Emails", "Emails"], ["Settings", "Settings"]] },
+  { label: "Setup", tabs: [["Emails", "Email templates"], ["EmailLog", "Sent emails"], ["Settings", "Settings"]] },
 ];
 
 function NavGroup({ group, tab, setTab, counts }) {
@@ -104,6 +104,14 @@ function readRoute() {
   return m && PAGE_KEYS.includes(m[1]) ? { tab: m[1], sub: m[2] ? decodeURIComponent(m[2]) : null } : { tab: "Overview", sub: null };
 }
 
+// Today's date in the UK (not UTC), as YYYY-MM-DD.
+function ukToday() { return new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" }); }
+// Date and time in UK time, e.g. "Wed 7 Oct 2026, 21:44".
+const fmtStamp = (iso) => (iso ? new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
+const ukDate = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+const SUPER_ONLY = new Set(["Attendance", "Insights"]);
+const REQUEST_STATUS = { open: "Open", done: "Done", dismissed: "Closed", closed: "Closed" };
+
 export default function Admin() {
   const [route, setRoute] = useState(readRoute);
   // How many in-app pages back we can go (kept in history.state, so forward/back keep it right).
@@ -125,7 +133,7 @@ export default function Admin() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
   const [attFocus, setAttFocus] = useState(null); // Zoom meeting ID to open in Attendance
-  const [day, setDay] = useState(1);
+  const [day, setDay] = useState(() => { const d = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/London" })).getDay(); return d === 0 ? 7 : d; });
   const [data, setData] = useState(null);
   const [selected, setSelected] = useState(null);
   const [toast, setToast] = useState(null);
@@ -133,14 +141,16 @@ export default function Admin() {
   const load = useCallback(async () => {
     const { data: { session } } = await supabase.auth.getSession();
     const user = session?.user;
-    const [circles, licences, settings, requests, log, templates, admins] = await Promise.all([
-      supabase.from("circles").select("*, facilitator:facilitators(*), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time"),
+    const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString();
+    const [circles, licences, settings, requests, log, templates, admins, failed] = await Promise.all([
+      fetchAll(() => supabase.from("circles").select("*, facilitator:facilitators(*), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time").order("id")),
       supabase.from("licences").select("*").order("sort_order").order("label"),
       supabase.from("settings").select("*").eq("id", 1).single(),
-      supabase.from("change_requests").select("*, circle:circles(name)").order("created_at", { ascending: false }),
-      supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(60),
+      fetchAll(() => supabase.from("change_requests").select("*, circle:circles(name)").order("created_at", { ascending: false }).order("id")),
+      supabase.from("audit_log").select("*").not("action", "in", "(zoom_meetings_snapshot,sync_attendance)").order("at", { ascending: false }).limit(60),
       supabase.from("email_templates").select("*"),
       supabase.from("admin_emails").select("*").order("email"),
+      supabase.from("email_log").select("id", { count: "exact", head: true }).eq("status", "failed").gte("sent_at", weekAgo),
     ]);
     const err = [circles, licences, settings, requests, log, templates, admins].find((r) => r.error);
     if (err) setToast({ kind: "error", text: err.error.message });
@@ -150,6 +160,7 @@ export default function Admin() {
       settings: settings.data,
       requests: requests.data ?? [],
       log: log.data ?? [],
+      emailFailures: failed.count ?? 0,
       admins: admins.data ?? [],
       me: (admins.data ?? []).find((a) => a.email === user?.email?.toLowerCase()) ?? { email: user?.email },
       templates: {
@@ -189,7 +200,12 @@ export default function Admin() {
     }, "Circle deleted").then(() => after?.());
   };
 
+  // Super-admin pages opened by someone else (old link, back button): send them to Overview.
+  useEffect(() => {
+    if (data && SUPER_ONLY.has(tab) && !data.me?.is_super) go("Overview", null, { replace: true });
+  }, [data, tab, go]);
   if (!data) return <div className="center muted">Loading data…</div>;
+  if (SUPER_ONLY.has(tab) && !data.me?.is_super) return null; // redirected by the effect above
   const openRequests = data.requests.filter((r) => r.status === "open").length;
   const queueCount = data.circles.filter((c) => c.status === "pending" || c.status === "conflict").length;
   const select = (c) => setSelected(c);
@@ -203,22 +219,27 @@ export default function Admin() {
         ))}
       </nav>
       <main className="content">
-        {tab === "Overview" && <Overview data={data} onDay={(d) => { setDay(d); setTab("Schedule"); }} onTab={setTab} />}
+        {tab === "Overview" && <Overview data={data} onDay={(d) => { setDay(d); setTab("Schedule"); }} onTab={setTab} go={go} />}
         {tab === "Schedule" && <Schedule data={data} day={day} setDay={setDay} onSelect={select} />}
         {tab === "Queue" && <Queue data={data} run={run} onSelect={select} />}
-        {tab === "Circles" && <Circles data={data} onSelect={select} onNew={() => setSelected("new")} onDelete={deleteCircle} />}
-        {tab === "Licences" && <Licences data={data} run={run} notify={notify} />}
+        {tab === "Circles" && <Circles key={sub ?? ""} initial={sub} data={data} onSelect={select} onNew={() => setSelected("new")} onDelete={deleteCircle} />}
+        {tab === "Licences" && <Licences data={data} run={run} notify={notify} go={go} />}
         {tab === "Requests" && <Requests data={data} run={run} onSelect={(id) => select(data.circles.find((c) => c.id === id))} />}
-        {tab === "Zoom" && <ZoomMeetings data={data} run={run} onSelect={select}
+        {tab === "Zoom" && <ZoomMeetings key={sub ?? ""} initialAccount={sub} data={data} run={run} onSelect={select}
           onAttendance={data.me?.is_super ? (id) => { setAttFocus(String(id)); setTab("Attendance"); } : null} />}
-        {tab === "Attendance" && data.me?.is_super && <Attendance data={data} run={run} focus={attFocus} onFocused={() => setAttFocus(null)}
+        {tab === "Attendance" && data.me?.is_super && <Attendance data={data} run={run} focus={attFocus} onFocused={() => setAttFocus(null)} onSelect={select}
           open={sub} setOpen={(k, opts) => go("Attendance", k, opts)} />}
-        {tab === "Insights" && data.me?.is_super && <Insights data={data} openMeeting={(k) => go("Attendance", k)} />}
+        {tab === "Insights" && data.me?.is_super && <Insights data={data} openMeeting={(k) => go("Attendance", k)} onSelect={select} />}
         {tab === "Emails" && <Emails data={data} run={run} />}
+        {tab === "EmailLog" && <EmailLog key={sub ?? ""} data={data} run={run} onSelect={select} initial={sub} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
       </main>
       {selected && (
         <CircleDrawer
+          key={selected === "new" ? "new" : selected.id}
+          onAttendance={data.me?.is_super ? (id) => { setSelected(null); go("Attendance", id); } : null}
+          onRequests={() => { setSelected(null); go("Requests"); }}
+          onEmails={(name) => { setSelected(null); go("EmailLog", name); }}
           circle={selected === "new" ? null : data.circles.find((c) => c.id === selected.id) ?? selected}
           data={data}
           run={run}
@@ -235,7 +256,7 @@ export default function Admin() {
 }
 
 /* ---------------- Overview ---------------- */
-function Overview({ data, onDay, onTab }) {
+function Overview({ data, onDay, onTab, go }) {
   const { circles, licences, requests } = data;
   const count = (s) => circles.filter((c) => c.status === s).length;
   const active = licences.filter((l) => l.active);
@@ -257,13 +278,19 @@ function Overview({ data, onDay, onTab }) {
         </div>
       )}
       <div className="stats">
-        <Stat label="Live circles" value={count("live")} onClick={() => onTab("Circles")} />
+        <Stat label="Live circles" value={count("live")} onClick={() => (go ? go("Circles", "live") : onTab("Circles"))} />
         <Stat label="Awaiting approval" value={count("pending")} onClick={() => onTab("Queue")} />
         <Stat label="Clashes to resolve" value={count("conflict")} tone={count("conflict") ? "warn" : ""} onClick={() => onTab("Queue")} />
         <Stat label="Open change requests" value={requests.filter((r) => r.status === "open").length} onClick={() => onTab("Requests")} />
         <Stat label="Licences without Zoom user" value={missingZoom} tone={missingZoom ? "warn" : ""} onClick={() => onTab("Licences")} />
       </div>
 
+      {data.emailFailures > 0 && (
+        <div className="banner">
+          {data.emailFailures} email{data.emailFailures > 1 ? "s" : ""} failed to send in the last 7 days.{" "}
+          <button className="link" onClick={() => (go ? go("EmailLog", "failed") : onTab("EmailLog"))}>See which</button>
+        </div>
+      )}
       <SetupChecklist data={data} onTab={onTab} />
 
       <section className="card">
@@ -315,25 +342,25 @@ function SetupChecklist({ data, onTab }) {
     {
       done: real.length > 0 && connected === real.length,
       what: `Connect Zoom licences (${connected} of ${real.length} have a Zoom user and host key)`,
-      how: "Licences tab: Sync from Zoom, then Set key on each licence that will host circles.",
+      how: "Zoom, Licences: Sync from Zoom, then Set key on each licence that will host circles.",
       tab: "Licences",
     },
     {
       done: !active.some((l) => l.is_mock),
       what: "Turn off mock licences",
-      how: "Mock licences create fake Zoom links. Untick Mock in the Licences tab before going live.",
+      how: "Mock licences create fake Zoom links. Untick Mock under Zoom, Licences before going live.",
       tab: "Licences",
     },
     {
       done: Boolean(settings.term_start && settings.term_end),
       what: "Set the term dates",
-      how: "Settings tab: meetings repeat weekly between these dates.",
+      how: "Setup, Settings: meetings repeat weekly between these dates.",
       tab: "Settings",
     },
     {
       done: !circles.some((c) => c.is_demo),
       what: "Clear the demo data",
-      how: "Settings tab: Clear demo data.",
+      how: "Setup, Settings: Clear demo data.",
       tab: "Settings",
     },
   ];
@@ -398,7 +425,7 @@ function Schedule({ data, day, setDay, onSelect }) {
         </div>
       </div>
       <p className="muted small">Whole day, 00:00 to 24:00. Shaded tail = {settings.buffer_minutes}-minute buffer before the licence can be reused. Hover a circle for details, click to open it.</p>
-      {!todays.length && <p className="muted">No circles on {DAY_NAMES[day]}.</p>}
+      {!todays.length && <p className="muted">No circles on {DAY_NAMES[day]}. Pick another day above, or add one from Circles.</p>}
       <div className="timeline">
         <div className="lane hours-row">
           <div className="lane-label" />
@@ -607,9 +634,10 @@ const FILTERS = {
   closed: { label: "Ended or rejected", match: (s) => s === "ended" || s === "rejected" },
   all: { label: "All circles", match: () => true },
 };
-function Circles({ data, onSelect, onNew, onDelete }) {
-  const [q, setQ] = useState("");
-  const [status, setStatus] = useState("active");
+function Circles({ data, onSelect, onNew, onDelete, initial }) {
+  // Opened from another page: "#/Circles/live" picks a filter, anything else is a search ("#/Circles/Zoom 05").
+  const [q, setQ] = useState(initial && !FILTERS[initial] ? initial : "");
+  const [status, setStatus] = useState(initial && FILTERS[initial] ? initial : (initial ? "all" : "active"));
   const rows = useMemo(() => data.circles.filter((c) => {
     if (!FILTERS[status].match(c.status)) return false;
     const hay = `${c.name} ${c.facilitator?.name ?? ""} ${c.facilitator?.email ?? ""} ${c.licence?.label ?? ""} ${c.language ?? ""}`.toLowerCase();
@@ -667,7 +695,7 @@ function facilitatorPatch(fac, form, email) {
   return patch;
 }
 
-function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
+function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendance, onRequests, onEmails }) {
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -822,7 +850,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
   const [moveTo, setMoveTo] = useState("");
   const [endDate, setEndDate] = useState("");
   const [showEmail, setShowEmail] = useState(false);
-  const gaps = circle && ["pending", "conflict"].includes(circle.status) ? emailGaps(circle, data) : [];
+  const gaps = circle && ["pending", "conflict", "live"].includes(circle.status) ? emailGaps(circle, data) : [];
 
   // For clashes: who already holds this time. For live circles: which licences it could move to.
   useEffect(() => {
@@ -847,7 +875,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
 
   async function endOnDate() {
     if (!endDate) return;
-    const now = endDate <= new Date().toISOString().slice(0, 10);
+    const now = endDate <= ukToday();
     if (!confirm(now ? `End "${circle.name}" now? This deletes its Zoom meeting.` : `Make ${fmtDate(endDate)} the last date for "${circle.name}"? Sessions until then carry on with the same link.`)) return;
     setBusy(true);
     const ok = await run(() => adminAction("end_on", circle.id, { date: endDate }), now ? "Circle ended" : `Circle now ends on ${fmtDate(endDate)}`);
@@ -899,9 +927,9 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
         {circle && ["pending", "conflict", "live"].includes(circle.status) && (
           <div className="email-check">
             {gaps.length > 0 ? (
-              <span className="small warn-text">Approval email has nothing for: {gaps.map(placeholderLabel).join(", ")}. Fill these in below or under Emails.</span>
+              <span className="small warn-text">{circle.status === "live" ? "Details email" : "Approval email"} has nothing for: {gaps.map(placeholderLabel).join(", ")}. Fill these in below or under Setup, Email templates.</span>
             ) : (
-              <span className="small muted">{circle.status === "live" ? "Facilitator email" : "Approval email is complete."}</span>
+              <span className="small muted">{circle.status === "live" ? "Preview the details email the facilitator gets." : "Approval email is complete."}</span>
             )}
             <button className="link small" onClick={() => setShowEmail(!showEmail)}>{showEmail ? "Hide email" : "Preview email"}</button>
           </div>
@@ -954,7 +982,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
             <p className="muted small">Facilitator version includes the host key. Participants version is safe to post in the WhatsApp group.</p>
             <div className="actions">
               <button onClick={() => run(() => adminAction("resend", circle.id), (o) => `Email ${o.email}`)}>Resend details email</button>
-              <button className="danger" onClick={() => confirm("Delete the Zoom meeting and end this circle?") && run(() => adminAction("cancel", circle.id), "Circle ended").then(onClose)}>End circle</button>
+              {onAttendance && <button onClick={() => onAttendance(circle.id)}>See attendance</button>}
+              <button className="danger" onClick={() => confirm("Delete the Zoom meeting and end this circle?") && run(() => adminAction("cancel", circle.id), "Circle ended").then((ok) => ok && onClose())}>End circle</button>
             </div>
           </div>
         )}
@@ -986,11 +1015,16 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
           </div>
         )}
 
+        {circle && <CircleEmails circle={circle} onAll={onEmails} />}
+
         {requests.length > 0 && (
           <div className="details">
-            <span className="muted small">Change requests</span>
+            <div className="details-head">
+              <span className="section-title">Change requests</span>
+              {onRequests && <button className="link small" onClick={onRequests}>Manage in Change requests</button>}
+            </div>
             {requests.map((r) => (
-              <div key={r.id} className="small"><b>{r.status}</b> · {r.message}</div>
+              <div key={r.id} className="small"><b>{REQUEST_STATUS[r.status] ?? r.status}</b> · {r.message}</div>
             ))}
           </div>
         )}
@@ -1072,7 +1106,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen }) {
 
         {circle && (
           <div className="drawer-foot">
-            <span className="muted small">Source: {circle.source} · created {new Date(circle.created_at).toLocaleString()}</span>
+            <span className="muted small">Source: {circle.source} · created {fmtStamp(circle.created_at)}</span>
             {circle.status !== "live" && (
               <button className="ghost danger small" onClick={() => onDelete(circle, onClose)}>
                 {Icon.trash} Delete circle
@@ -1095,8 +1129,123 @@ function Detail({ label, value, copy, note }) {
   );
 }
 
+/* ---------------- Sent emails ---------------- */
+const EMAIL_KIND = { approved: "Circle details", updated: "Details changed", test: "Test" };
+const EMAIL_STATUS = { sent: ["Sent", "st-live"], failed: ["Failed", "st-conflict"], skipped: ["Not sent", "st-pending"] };
+
+// Last few emails for one circle, inside the circle panel.
+function CircleEmails({ circle, onAll }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    supabase.from("email_log").select("id, sent_at, kind, to_email, status, error").eq("circle_id", circle.id)
+      .order("sent_at", { ascending: false }).limit(5).then(({ data }) => setRows(data ?? []));
+  }, [circle.id, circle.status, circle.updated_at]);
+  if (!rows?.length) return null;
+  return (
+    <div className="details">
+      <div className="details-head">
+        <span className="section-title">Emails</span>
+        {onAll && <button className="link small" onClick={() => onAll(circle.name)}>All emails for this circle</button>}
+      </div>
+      {rows.map((r) => (
+        <div key={r.id} className="small email-mini">
+          <span className={`pill small ${EMAIL_STATUS[r.status]?.[1] ?? ""}`}>{EMAIL_STATUS[r.status]?.[0] ?? r.status}</span>
+          <span>{EMAIL_KIND[r.kind] ?? r.kind} to {r.to_email ?? "nobody"}</span>
+          <span className="muted">{fmtStamp(r.sent_at)}</span>
+          {r.error && <div className="warn-text">{r.error}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EmailLog({ data, run, onSelect, initial }) {
+  const [rows, setRows] = useState(null);
+  const [limit, setLimit] = useState(200);
+  const [status, setStatus] = useState(initial === "failed" ? "problems" : "all");
+  const [q, setQ] = useState(initial && initial !== "failed" ? initial : "");
+  const [busy, setBusy] = useState(null);
+
+  const load = useCallback(async () => {
+    const { data: r, error } = await supabase.from("email_log").select("*").order("sent_at", { ascending: false }).range(0, limit - 1);
+    setRows(error ? { error: error.message } : r ?? []);
+  }, [limit]);
+  useEffect(() => { load(); }, [load]);
+
+  if (!rows) return <section className="card"><p className="muted">Loading sent emails…</p></section>;
+  if (rows.error) return <section className="card"><p className="error">{rows.error}</p></section>;
+  const term = q.trim().toLowerCase();
+  const shown = rows.filter((r) => (status === "all" || (status === "problems" ? r.status !== "sent" : r.status === status))
+    && (!term || `${r.to_email ?? ""} ${r.subject ?? ""} ${r.circle_name ?? ""} ${r.sent_by ?? ""}`.toLowerCase().includes(term)));
+  const counts = { sent: rows.filter((r) => r.status === "sent").length, problems: rows.filter((r) => r.status !== "sent").length };
+
+  async function resend(r) {
+    const c = data.circles.find((x) => x.id === r.circle_id);
+    if (!c || c.status !== "live") return;
+    if (!confirm(`Send the current details email for "${c.name}" to ${c.facilitator?.email ?? "the facilitator"} again?`)) return;
+    setBusy(r.id);
+    await run(() => adminAction("resend", c.id), (o) => `Email ${o.email}`);
+    setBusy(null);
+    load();
+  }
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <div>
+          <h2>Sent emails</h2>
+          <p className="muted small">Every email the dashboard sends or tries to send. Copies of sent ones are also in the Gmail account's Sent folder.</p>
+        </div>
+        <div className="filters">
+          <input placeholder="Search recipient, subject, circle" value={q} onChange={(e) => setQ(e.target.value)} />
+          <div className="seg">
+            {[["all", `All (${rows.length})`], ["sent", `Sent (${counts.sent})`], ["problems", `Failed or not sent (${counts.problems})`]].map(([k, l]) => (
+              <button key={k} className={status === k ? "active" : ""} onClick={() => setStatus(k)}>{l}</button>
+            ))}
+          </div>
+          <button onClick={load}>Refresh</button>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="table email-log">
+          <thead><tr><th>When (UK)</th><th>To</th><th>Email</th><th>Circle</th><th>Sent by</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {shown.map((r) => {
+              const c = data.circles.find((x) => x.id === r.circle_id);
+              const [label, cls] = EMAIL_STATUS[r.status] ?? [r.status, ""];
+              return (
+                <tr key={r.id} className={r.status === "sent" ? "" : "email-problem"}>
+                  <td className="nowrap">{fmtStamp(r.sent_at)}</td>
+                  <td>{r.to_email ?? <span className="muted">none</span>}</td>
+                  <td><div>{r.subject ?? <span className="muted">(not written)</span>}</div><div className="muted small">{EMAIL_KIND[r.kind] ?? r.kind}</div></td>
+                  <td>{c ? <button className="link" onClick={() => onSelect(c)}>{blockName(c.name)}</button> : <span className="muted">{r.circle_name ? blockName(r.circle_name) : "–"}</span>}</td>
+                  <td className="small">{r.sent_by}</td>
+                  <td><span className={`pill small ${cls}`}>{label}</span>{r.error && <div className="small warn-text">{r.error}</div>}</td>
+                  <td>{r.status !== "sent" && r.kind !== "test" && c?.status === "live" && (
+                    <button className="small" disabled={busy === r.id} onClick={() => resend(r)}>{busy === r.id ? "Sending…" : "Resend"}</button>
+                  )}</td>
+                </tr>
+              );
+            })}
+            {!shown.length && <tr><td colSpan={7} className="muted">{rows.length ? "Nothing matches." : "No emails sent yet. Approving a circle, changing a live circle or sending a test from Email templates will show up here."}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {rows.length >= limit && <button className="link small" onClick={() => setLimit((n) => n + 200)}>Show older emails</button>}
+      <p className="muted small">"Not sent" means the email was skipped, for example because the circle had no facilitator email. Resend sends the circle's current details again. Sign-in and invite emails come from Supabase and appear only in the Gmail Sent folder.</p>
+    </section>
+  );
+}
+
+const ACTION_LABEL = {
+  provision: "Approved and created Zoom meeting", cancel: "Ended circle", resend: "Resent details email",
+  reschedule: "Changed time", handover: "Handed over", end_on: "Set last session date", move_licence: "Moved to another licence",
+  sync_licences: "Synced licences from Zoom", set_host_key: "Set host key", test_email: "Sent test email",
+  provision_failed: "Approval failed", tally_intake: "Form received", invite_admin: "Invited admin",
+};
+
 /* ---------------- Licences ---------------- */
-function Licences({ data, run, notify }) {
+function Licences({ data, run, notify, go }) {
   const [rows, setRows] = useState(data.licences);
   // Keep unsaved edits when data reloads after another action.
   useEffect(() => setRows((prev) => data.licences.map((l) => prev.find((p) => p.id === l.id && p._dirty) ?? l)), [data.licences]);
@@ -1142,6 +1291,7 @@ function Licences({ data, run, notify }) {
         }).eq("id", r.id);
         if (error) throw error;
       }
+      setRows((cur) => cur.map(({ _dirty, ...r }) => r));
     }, "Licences saved");
   }
 
@@ -1193,7 +1343,7 @@ function Licences({ data, run, notify }) {
       )}
       <div className="table-wrap">
         <table className="table edit">
-          <thead><tr><th>Label</th><th>Zoom user email</th><th>Host key</th><th>Active</th><th>Mock</th><th>Booked</th><th></th></tr></thead>
+          <thead><tr><th>Label</th><th>Zoom user email</th><th>Host key</th><th>Active</th><th>Mock</th><th>Circles</th><th></th></tr></thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.id} className={r._dirty ? "dirty" : ""}>
@@ -1211,7 +1361,10 @@ function Licences({ data, run, notify }) {
                 </td>
                 <td><input type="checkbox" checked={r.active} onChange={(e) => edit(r.id, "active", e.target.checked)} /></td>
                 <td><input type="checkbox" checked={r.is_mock} onChange={(e) => edit(r.id, "is_mock", e.target.checked)} /></td>
-                <td>{booked(r.id)}</td>
+                <td>
+                  {booked(r.id) ? <button className="link" title="Show these circles" onClick={() => go("Circles", r.label)}>{booked(r.id)}</button> : 0}
+                  {r.zoom_user_email && <button className="link small nowrap licence-meetings" onClick={() => go("Zoom", r.label)}>Meetings</button>}
+                </td>
                 <td className="cell-actions">
                   <IconButton icon="trash" label={`Delete ${r.label}`} danger onClick={() => remove(r)} />
                 </td>
@@ -1226,7 +1379,7 @@ function Licences({ data, run, notify }) {
 
 /* ---------------- Requests ---------------- */
 // What "Apply" does for each request type. Types without an entry are handled by hand.
-const today = () => new Date().toISOString().slice(0, 10);
+const today = ukToday;
 const APPLY = {
   change_time: { label: "Apply new time", confirm: (r, c) => `Move "${c.name}" to ${requestSummary(r.request_type, r.details).replace(/^Move to /, "")}?${c.status === "live" ? " The Zoom link stays the same." : ""}` },
   change_start: { label: "Apply start date", confirm: (r, c) => `Change the start date of "${c.name}" to ${fmtDate(r.details.from)}?` },
@@ -1265,8 +1418,10 @@ async function applyRequest(r, c) {
       .update({ ...patch, ...(d.from ? { preferred_start: d.from } : {}), licence_id: null, status: "pending", conflict_reason: null })
       .eq("id", c.id);
     if (error) throw error;
-    const { error: e2 } = await supabase.rpc("allocate_circle", { p_circle: c.id });
+    const { data: out, error: e2 } = await supabase.rpc("allocate_circle", { p_circle: c.id });
     if (e2) throw e2;
+    const status = Array.isArray(out) ? out[0]?.status : out?.status;
+    if (status === "conflict") return { conflict: true };
     return;
   }
   if (r.request_type === "change_start") {
@@ -1293,10 +1448,13 @@ function Requests({ data, run, onSelect }) {
     if (!c) return;
     if (!confirm(APPLY[r.request_type].confirm(r, c))) return;
     run(async () => {
-      await applyRequest(r, c);
+      const out = await applyRequest(r, c);
+      if (out?.conflict) return out; // leave the request open: the circle is now a clash
       const { error } = await supabase.from("change_requests").update({ status: "done" }).eq("id", r.id);
       if (error) throw error;
-    }, "Change applied and request marked done");
+    }, (o) => o?.conflict
+      ? "No licence is free at the new time. The circle is now a clash in the Queue; the request stays open."
+      : "Change applied and request marked done");
   }
 
   return (
@@ -1308,7 +1466,7 @@ function Requests({ data, run, onSelect }) {
           <button className={show === "all" ? "on" : ""} onClick={() => setShow("all")}>All</button>
         </div>
       </div>
-      <p className="card-sub">Most requests can be applied in one click. Pauses and other requests are handled by hand: use <b>Edit circle</b>, then mark the request done.</p>
+      <p className="card-sub">Most requests can be applied in one click. Pauses and other requests are handled by hand: for a pause, cancel those weeks in Zoom (or set a last session date and add the circle again from the restart date), then mark the request done.</p>
       {!rows.length && <p className="muted">{show === "open" ? "No open requests." : "No requests yet."}</p>}
       <div className="list">
         {rows.map((r) => {
@@ -1327,7 +1485,7 @@ function Requests({ data, run, onSelect }) {
                 {c && r.request_type === "change_time" && (
                   <div className="muted small">Currently {DAY_NAMES[c.weekday]}s {hhmm(c.start_time)} ({tzName(c.timezone)} time)</div>
                 )}
-                <div className="muted small">{r.requested_by} · {new Date(r.created_at).toLocaleString()} · <b>{r.status}</b></div>
+                <div className="muted small">{r.requested_by} · {fmtStamp(r.created_at)} · <b>{REQUEST_STATUS[r.status] ?? r.status}</b></div>
               </div>
               <div className="row-actions">
                 {canApply && <button className="primary" onClick={() => apply(r)}>{APPLY[r.request_type].label}</button>}
@@ -1396,7 +1554,7 @@ function Settings({ data, run }) {
         <div className="list">
           {admins.map((a) => (
             <div key={a.email} className="row">
-              <div className="row-main">{a.email}</div>
+              <div className="row-main">{a.email}{a.is_super && <span className="pill small info admin-super">Super admin: sees attendance</span>}</div>
               <AdminName admin={a} run={run} onSaved={loadAdmins} />
               <div className="row-actions">
                 <IconButton icon="trash" label={`Remove ${a.email}`} danger disabled={admins.length < 2}
@@ -1413,11 +1571,15 @@ function Settings({ data, run }) {
         <div className="inline">
           <input type="email" placeholder="email@…" value={newAdmin} onChange={(e) => setNewAdmin(e.target.value)} />
           <button disabled={!newAdmin} onClick={() => run(async () => {
-            const { error } = await supabase.from("admin_emails").insert({ email: newAdmin.trim().toLowerCase() });
+            const email = newAdmin.trim().toLowerCase();
+            const { error } = await supabase.from("admin_emails").insert({ email });
             if (error) throw error;
             setNewAdmin("");
             loadAdmins();
-          }, "Admin added. Invite them in Supabase Auth so they can sign in.")}>Add admin</button>
+            return adminAction("invite_admin", null, { facilitator: { email } }).catch((e) => ({ invite: `invite failed: ${e.message}` }));
+          }, (o) => o?.invite === "invited" ? "Admin added and emailed an invite to set their password."
+            : o?.invite === "already has an account" ? "Admin added. They already have an account, so they can sign in now."
+            : `Admin added, but the invite didn't send (${o?.invite ?? "unknown"}). They can use Forgot password on the sign-in page.`)}>Add admin</button>
         </div>
       </section>
 
@@ -1438,9 +1600,9 @@ function Settings({ data, run }) {
         <div className="card-head"><h2>Activity</h2></div>
         <div className="log">
           {data.log.map((l) => (
-            <div key={l.id} className={`log-row ${l.action.includes("failed") ? "warn-text" : ""}`}>
-              <span className="muted small">{new Date(l.at).toLocaleString()}</span>
-              <span><b>{l.action}</b> by {l.actor}</span>
+            <div key={l.id} className={`log-row ${String(l.action ?? "").includes("failed") ? "warn-text" : ""}`}>
+              <span className="muted small">{fmtStamp(l.at)}</span>
+              <span><b>{ACTION_LABEL[l.action] ?? l.action}</b> by {l.actor}</span>
               <code className="small">{JSON.stringify(l.detail)?.slice(0, 220)}</code>
             </div>
           ))}
@@ -1588,7 +1750,7 @@ function Emails({ data, run }) {
               <button disabled={!dirty} onClick={() => setDraft({ subject: saved.subject, body: saved.body })}>Undo changes</button>
               <button className="primary" disabled={!dirty} onClick={saveTemplate}>{dirty ? "Save email" : "Saved"}</button>
             </div>
-            {saved.updated_at && <p className="muted small">Last saved {new Date(saved.updated_at).toLocaleString()}{saved.updated_by ? ` by ${saved.updated_by}` : ""}.</p>}
+            {saved.updated_at && <p className="muted small">Last saved {fmtStamp(saved.updated_at)}{saved.updated_by ? ` by ${saved.updated_by}` : ""}.</p>}
           </div>
 
           <div className="preview-col">
@@ -1698,7 +1860,7 @@ function AdminName({ admin, run, onSaved }) {
 }
 
 /* ---------------- Zoom (what's actually booked in Zoom) ---------------- */
-const fmtWhen = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+const fmtWhen = (iso) => iso ? new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
 function ago(iso) {
   const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
   if (mins < 1) return "just now";
@@ -1713,11 +1875,11 @@ const csvCell = (v) => {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
-function ZoomMeetings({ data, run, onSelect, onAttendance }) {
+function ZoomMeetings({ data, run, onSelect, onAttendance, initialAccount }) {
   const [snap, setSnap] = useState(undefined); // undefined = loading, null = never synced
   const [syncing, setSyncing] = useState(false);
   const [q, setQ] = useState("");
-  const [account, setAccount] = useState("all");
+  const [account, setAccount] = useState(initialAccount ?? "all");
   const [kind, setKind] = useState("all");
   const [source, setSource] = useState("all");
 
@@ -1760,8 +1922,8 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
   function exportCsv() {
     const head = ["Account", "Account email", "Meeting", "Type", "Repeats", "Next or start (UTC)", "Length (min)", "Meeting timezone", "Ends", "Sessions left", "Source", "Circle", "Zoom meeting ID"];
     const lines = shown.map((r) => [r.account, r.account_email, r.topic, r.weekly ? "Weekly" : r.type, r.repeats ?? "", r.when ?? "", r.duration ?? "",
-      r.timezone ?? "", r.ends ?? "", r.sessions_left ?? "", r.ours ? "This system" : "Outside this system", r.circle ?? "", r.id].map(csvCell).join(","));
-    const blob = new Blob([[head.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
+      r.timezone ?? "", r.ends ?? "", r.sessions_left ?? "", r.ours ? "Circle" : "Other Zoom meeting", r.circle ?? "", r.id].map(csvCell).join(","));
+    const blob = new Blob(["\uFEFF" + [head.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1779,10 +1941,10 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
     <section className="card zoom-tab">
       <div className="card-head">
         <div>
-          <h2>Meetings in Zoom</h2>
+          <h2>Meetings on Zoom</h2>
           <p className="muted small zoom-synced">
             {snap === undefined ? "Loading…" : snap
-              ? <>Last synced <b>{ago(snap.at)}</b> · {new Date(snap.at).toLocaleString()} · by {snap.actor}</>
+              ? <>Last synced <b>{ago(snap.at)}</b> · {fmtStamp(snap.at)} · by {snap.actor}</>
               : "Not synced yet."}
           </p>
         </div>
@@ -1806,11 +1968,11 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
           <div className="stats zoom-stats">
             <Stat label="Weekly series" value={weekly} onClick={() => { setKind("weekly"); setSource("all"); }} />
             <Stat label="One-off meetings" value={rows.length - weekly} onClick={() => { setKind("oneoff"); setSource("all"); }} />
-            <Stat label="Created by this system" value={ours} tone="live" onClick={() => { setSource("ours"); setKind("all"); }} />
-            <Stat label="Set up outside this system" value={outside} tone={outside ? "warn" : undefined} onClick={() => { setSource("outside"); setKind("all"); }} />
+            <Stat label="Circles (made in this dashboard)" value={ours} tone="live" onClick={() => { setSource("ours"); setKind("all"); }} />
+            <Stat label="Other Zoom meetings" value={outside} tone={outside ? "warn" : undefined} onClick={() => { setSource("outside"); setKind("all"); }} />
           </div>
           {outsideActive > 0 && (
-            <p className="hint">{outsideActive} meeting{outsideActive > 1 ? "s were" : " was"} set up directly in Zoom on active licences. The clash checks don't know about {outsideActive > 1 ? "them" : "it"}, so a new circle could be booked over {outsideActive > 1 ? "them" : "it"}. Filter by "Outside" to review.</p>
+            <p className="hint">{outsideActive} meeting{outsideActive > 1 ? "s were" : " was"} set up directly in Zoom on active licences. The clash checks don't know about {outsideActive > 1 ? "them" : "it"}, so a new circle could be booked over {outsideActive > 1 ? "them" : "it"}. Filter by "Other Zoom meetings" to review.</p>
           )}
           {errors.length > 0 && (
             <p className="error small">Couldn't read {errors.map((a) => a.label).join(", ")}: {errors[0].error}</p>
@@ -1826,7 +1988,7 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
                   onClick={() => setAccount(account === a.label ? "all" : a.label)} title={a.email}>
                   <span className="za-label">{a.label}</span>
                   <span className="za-count">{a.error ? "!" : n}</span>
-                  <span className="za-sub">{a.error ? "error" : n ? `${w} weekly${out ? ` · ${out} outside` : ""}` : "free"}{a.active ? "" : " · inactive"}</span>
+                  <span className="za-sub">{a.error ? "error" : n ? `${w} weekly${out ? ` · ${out} not circles` : ""}` : "free"}{a.active ? "" : " · inactive"}</span>
                 </button>
               );
             })}
@@ -1838,7 +2000,7 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
               {[["all", "All"], ["weekly", "Weekly"], ["oneoff", "One-off"]].map(([k, l]) => <button key={k} className={kind === k ? "active" : ""} onClick={() => setKind(k)}>{l}</button>)}
             </div>
             <div className="seg">
-              {[["all", "Any source"], ["ours", "This system"], ["outside", "Outside"]].map(([k, l]) => <button key={k} className={source === k ? "active" : ""} onClick={() => setSource(k)}>{l}</button>)}
+              {[["all", "All meetings"], ["ours", "Circles"], ["outside", "Other Zoom meetings"]].map(([k, l]) => <button key={k} className={source === k ? "active" : ""} onClick={() => setSource(k)}>{l}</button>)}
             </div>
             {(account !== "all" || kind !== "all" || source !== "all" || q) && (
               <button className="link small" onClick={() => { setAccount("all"); setKind("all"); setSource("all"); setQ(""); }}>Clear filters</button>
@@ -1859,7 +2021,7 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
                     <td>{fmtWhen(r.when) || "–"}</td>
                     <td>{r.duration ? `${r.duration} min` : "–"}</td>
                     <td className="small">{r.ends ? (String(r.ends).startsWith("after") ? r.ends : fmtDate(String(r.ends).slice(0, 10))) : r.weekly ? "–" : ""}{r.sessions_left ? <span className="muted"> · {r.sessions_left} left</span> : null}</td>
-                    <td>{r.ours ? <span className="pill st-live">This system</span> : <span className="pill st-pending">Outside</span>}</td>
+                    <td>{r.ours ? <span className="pill st-live">Circle</span> : <span className="pill st-pending">Not a circle</span>}</td>
                     {onAttendance && <td><button className="link small nowrap" onClick={(e) => { e.stopPropagation(); onAttendance(r.id); }}>Attendance →</button></td>}
                   </tr>
                 ))}
@@ -1867,7 +2029,7 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
               </tbody>
             </table>
           </div>
-          <p className="muted small">Times are in your own timezone. Click a "This system" row to open its circle. Export includes every account unless you filter.</p>
+          <p className="muted small">Times are UK time. Click a circle to open it, or another meeting to see its attendance. Export includes every account unless you filter.</p>
         </>
       )}
     </section>
@@ -1875,8 +2037,11 @@ function ZoomMeetings({ data, run, onSelect, onAttendance }) {
 }
 
 /* ---------------- Attendance (super admins only) ---------------- */
-const DRIFT_SESSIONS = 3; // regulars missing this many sessions in a row are flagged
-const shortDate = (iso) => new Date(iso).toLocaleDateString([], { day: "numeric", month: "short" });
+// Shared definitions (Attendance and Insights use the same ones).
+const DRIFT_SESSIONS = 3;  // "dropped off": missed this many sessions in a row (Insights: weeks)...
+const DROP_MIN_VISITS = 3; // ...after coming at least this many times
+const REGULAR_SESSIONS = 4; // "regular": came to at least this many sessions
+const shortDate = (iso) => new Date(iso).toLocaleDateString("en-GB", { timeZone: "Europe/London", day: "numeric", month: "short" });
 
 // One circle's sessions and people, from raw rows.
 function buildCircle(sessions, rowsBySession) {
@@ -1896,7 +2061,7 @@ function buildCircle(sessions, rowsBySession) {
     ...p,
     count: p.attended.size,
     missedSince: ordered.length - 1 - p.lastIdx,
-    drifting: p.attended.size >= 2 && ordered.length - 1 - p.lastIdx >= DRIFT_SESSIONS,
+    drifting: p.attended.size >= DROP_MIN_VISITS && ordered.length - 1 - p.lastIdx >= DRIFT_SESSIONS,
     lastSeen: ordered[p.lastIdx]?.started_at,
   })).sort((a, b) => b.count - a.count || String(a.name).localeCompare(String(b.name)));
   return { sessions: ordered, people: list };
@@ -2122,7 +2287,7 @@ function cleanAttendance(sessions = [], rows = [], licences = []) {
   return { sessions: sessions.map((x) => ({ ...x, participant_count: counts.get(x.id) ?? 0 })), rows: clean };
 }
 
-function Attendance({ data, run, focus, onFocused, open, setOpen }) {
+function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
   const [state, setState] = useState(null); // { sessions, rows, last }
   const [syncing, setSyncing] = useState(false);
   const [progress, setProgress] = useState(null); // { done, left } during a long back-fill
@@ -2145,15 +2310,18 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
   async function sync() {
     setSyncing(true);
     let more = true, total = 0, guard = 0;
+    const problems = new Set();
     while (more && guard++ < 40) { // first sync back-fills up to six months, 60 sessions per call
-      const out = await run(() => adminAction("sync_attendance"), null);
-      if (!out || out === true) break;
+      let out;
+      try { out = await adminAction("sync_attendance"); } catch (e) { problems.add(e.message); break; }
       if (out.busy) { setNotice("A sync is already running (maybe in another tab). It carries on there; refresh in a minute to see the new data."); break; }
+      (out.problems ?? []).forEach((p) => problems.add(p));
       total += out.sessions_added;
       more = out.more && out.sessions_added > 0;
       setProgress(more ? { done: total } : null);
     }
     setProgress(null);
+    if (problems.size) setNotice(`Some Zoom data couldn't be read (it's retried on the next sync): ${[...problems].slice(0, 3).join("; ")}${problems.size > 3 ? ` and ${problems.size - 3} more` : ""}`);
     await load();
     setSyncing(false);
     return total;
@@ -2210,12 +2378,12 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
   }, [focus, model]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function exportCsv(circles) {
-    const head = ["Circle", "Session date", "Session start (UTC)", "Person", "Email", "Minutes"];
+    const head = ["Meeting", "Session date (UK)", "Session start (UTC)", "Person", "Email", "Minutes"];
     const lines = [];
     for (const c of circles) for (const s of c.sessions) for (const r of model.rowsBySession.get(s.id) ?? []) {
-      lines.push([c.name, s.started_at.slice(0, 10), s.started_at, r.name ?? r.person_key, r.email ?? "", r.minutes].map(csvCell).join(","));
+      lines.push([c.name, ukDate(s.started_at), s.started_at, r.name ?? r.person_key, r.email ?? "", r.minutes].map(csvCell).join(","));
     }
-    const blob = new Blob([[head.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
+    const blob = new Blob(["\uFEFF" + [head.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -2224,7 +2392,7 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
     URL.revokeObjectURL(url);
   }
 
-  if (!state || !model) return <section className="card"><p className="muted">Loading attendance…</p></section>;
+  if (!state || !model) return <section className="card"><p className="muted">Loading attendance… (the very first sync can take a few minutes; keep this tab open)</p></section>;
   // Accounts whose history isn't fully loaded yet (cursor more than 2 days behind).
   const lagging = data.licences.filter((l) => l.zoom_user_email && !l.is_mock && (!l.attendance_scanned_to || Date.parse(l.attendance_scanned_to) < Date.now() - 2 * 86400e3))
     .sort((a, b) => String(a.attendance_scanned_to ?? "").localeCompare(String(b.attendance_scanned_to ?? "")));
@@ -2237,8 +2405,11 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
     <div className="card-head">
       <div>
         <h2>{circle ? <><button className="link" onClick={() => setOpen(null)}>Attendance</button> <span className="muted">/</span> {circle.name}</> : "Attendance"}</h2>
+        {circle?.ours && data.circles.some((c) => c.id === circle.key) && (
+          <button className="link small" onClick={() => onSelect(data.circles.find((c) => c.id === circle.key))}>Open circle details</button>
+        )}
         <p className="muted small zoom-synced">
-          {syncing ? (progress ? `Syncing with Zoom… ${progress.done} sessions added so far` : "Syncing with Zoom…") : state.last ? <>Last synced <b>{ago(state.last.at)}</b> · {new Date(state.last.at).toLocaleString()}</> : "Not synced yet."}
+          {syncing ? (progress ? `Syncing with Zoom… ${progress.done} sessions added so far` : "Syncing with Zoom…") : state.last ? <>Last synced <b>{ago(state.last.at)}</b> · {fmtStamp(state.last.at)}</> : "Not synced yet."}
           {" "}· Super admins only
         </p>
       </div>
@@ -2310,7 +2481,7 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
         <Stat label="Sessions in the last 7 days" value={model.thisWeek} />
         <Stat label="Average per session (4 weeks)" value={model.avg ? model.avg.toFixed(1) : "–"} />
         <Stat label="People seen" value={model.people} />
-        <Stat label={`Regulars not seen in ${DRIFT_SESSIONS}+ sessions`} value={model.drifting} tone={model.drifting ? "warn" : undefined} />
+        <Stat label={`Dropped off (came ${DROP_MIN_VISITS}+ times, missed last ${DRIFT_SESSIONS})`} value={model.drifting} tone={model.drifting ? "warn" : undefined} />
       </div>
       {!model.circles.length ? (
         <div className="empty">
@@ -2343,7 +2514,7 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
                 const last = c.sessions.at(-1);
                 return (
                   <tr key={c.key} className="clickable" onClick={() => { setOnlyDrift(false); setOpen(c.key); }}>
-                    <td>{c.ours ? blockName(c.name) : c.name}{c.status && c.status !== "live" && <span className="muted small"> ({STATUS_LABEL[c.status]})</span>}{!c.ours && <span className="pill small att-outside">Not made here</span>}</td>
+                    <td>{c.ours ? blockName(c.name) : c.name}{c.status && c.status !== "live" && <span className="muted small"> ({STATUS_LABEL[c.status]})</span>}{!c.ours && <span className="pill small att-outside">Not a circle</span>}</td>
                     <td className="muted small">{c.account}</td>
                     <td>{c.sessions.length}</td>
                     <td>{c.avg.toFixed(1)}</td>
@@ -2353,7 +2524,7 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
                   </tr>
                 );
               })}
-              {!shown.length && <tr><td colSpan={8} className="muted">Nothing in this view.</td></tr>}
+              {!shown.length && <tr><td colSpan={7} className="muted">Nothing in this view.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2367,8 +2538,7 @@ function Attendance({ data, run, focus, onFocused, open, setOpen }) {
 
 // ---------- Attendance insights (super admins only) ----------
 // Weekly trends across meetings: growth, new people, how consistently people come back, and who has stopped.
-const DROP_WEEKS = 3;      // gone this many weeks after their last visit = dropped off
-const REGULAR_WEEKS = 4;   // came in at least this many different weeks = regular
+const DROP_WEEKS = DRIFT_SESSIONS; // weekly view of the same rule
 const weekKey = (iso) => weekStart(iso).getTime();
 const pct = (n, d) => (d ? Math.round((n / d) * 100) : null);
 
@@ -2399,7 +2569,7 @@ function WeekBars({ weeks, series, height = 140, fmtTip }) {
   );
 }
 
-function RateLine({ weeks, values, height = 140 }) {
+function RateLine({ weeks, values, sizes = [], height = 140 }) {
   const W = 600, H = height, pad = 6;
   const pts = values.map((v, i) => (v == null ? null : [pad + (i * (W - 2 * pad)) / Math.max(1, weeks.length - 1), H - pad - (v / 100) * (H - 2 * pad)]));
   let path = "", pen = false; // gaps (weeks too recent or with no newcomers) break the line
@@ -2418,7 +2588,7 @@ function RateLine({ weeks, values, height = 140 }) {
         </svg>
         <div className="rate-hits">
           {weeks.map((w, i) => (
-            <Hover key={i} content={<div><b>New in week of {shortDate(w)}</b><div>{values[i] == null ? "Too recent to tell" : `${values[i]}% came back within 4 weeks`}</div></div>}>
+            <Hover key={i} content={<div><b>New in week of {shortDate(w)}</b><div>{values[i] == null ? (sizes[i] ? "Too recent to tell" : "No first-timers") : `${values[i]}% of ${sizes[i]} came back within 4 weeks`}</div></div>}>
               <span className="rate-hit" tabIndex={0}>{pts[i] && <i style={{ top: `${(pts[i][1] / H) * 100}%` }} />}</span>
             </Hover>
           ))}
@@ -2431,7 +2601,7 @@ function RateLine({ weeks, values, height = 140 }) {
   );
 }
 
-function Insights({ data, openMeeting }) {
+function Insights({ data, openMeeting, onSelect }) {
   const [raw, setRaw] = useState(null);
   const [kind, setKind] = useState("all");
   const [span, setSpan] = useState(26);
@@ -2506,7 +2676,7 @@ function Insights({ data, openMeeting }) {
         returned[idx.get(first)][1]++;
         if (back) returned[idx.get(first)][0]++;
       }
-      if (ws.length >= 3 && (nowKey - last) / (7 * 86400e3) >= DROP_WEEKS && idx.has(last)) dropPer[idx.get(last)]++;
+      if (ws.length >= DROP_MIN_VISITS && (nowKey - last) / (7 * 86400e3) >= DROP_WEEKS && idx.has(last)) dropPer[idx.get(last)]++;
     }
     const fourAgo = nowKey - 4 * 7 * 86400e3;
     const returnRate = weeks.map((w, i) => (w.getTime() > fourAgo ? null : returned[i][1] ? pct(returned[i][0], returned[i][1]) : null));
@@ -2523,8 +2693,8 @@ function Insights({ data, openMeeting }) {
       let newRecent = 0, regulars = 0, dropped = 0;
       for (const [f, l, c] of seen.values()) {
         if (f >= ss.length - 4) newRecent++;
-        if (c >= REGULAR_WEEKS) regulars++;
-        if (c >= 3 && ss.length - 1 - l >= DROP_WEEKS) dropped++;
+        if (c >= REGULAR_SESSIONS) regulars++;
+        if (c >= DROP_MIN_VISITS && ss.length - 1 - l >= DRIFT_SESSIONS) dropped++;
       }
       const lastAt = ss.at(-1)?.started_at;
       return {
@@ -2545,10 +2715,12 @@ function Insights({ data, openMeeting }) {
 
     const sum = (arr, from, to) => arr.slice(from, to).reduce((t, n) => t + n, 0);
     return {
+      cohortSizes: returned.map((r) => r[1]),
       weeks, sessionsPerWeek, newPer, backPer, dropPer, returnRate, active, buckets, compare, inKind,
       totalPeople: [...people.values()].filter((p) => [...p.weeks].some((w) => idx.has(w))).length,
-      new4: sum(newPer, -4), newPrev4: sum(newPer, -8, -4),
-      active4: Math.round(sum(active, -4) / 4), activePrev4: Math.round(sum(active, -8, -4) / 4),
+      // Last 4 complete weeks (this week is still under way) vs the 4 before.
+      new4: sum(newPer, -5, -1), newPrev4: sum(newPer, -9, -5),
+      active4: Math.round(sum(active, -5, -1) / 4), activePrev4: Math.round(sum(active, -9, -5) / 4),
       drops: dropPer.reduce((t, n) => t + n, 0),
     };
   }, [raw, groups, kind, meeting, span, sort]);
@@ -2587,8 +2759,8 @@ function Insights({ data, openMeeting }) {
       </div>
 
       <div className="stats zoom-stats">
-        <Stat label="People each week (avg, last 4)" value={model.active4} />
-        <Stat label="New people (last 4 weeks)" value={model.new4} />
+        <Stat label="People each week (avg of last 4 full weeks)" value={model.active4} />
+        <Stat label="New people (last 4 full weeks)" value={model.new4} />
         <Stat label={`People seen (${span} weeks)`} value={model.totalPeople} />
         <Stat label={`Dropped off (${span} weeks)`} value={model.drops} tone={model.drops ? "warn" : undefined} />
       </div>
@@ -2609,7 +2781,7 @@ function Insights({ data, openMeeting }) {
         <div className="ins-panel">
           <h3>Do first-timers come back?</h3>
           <p className="muted small">Of the people who came for the first time each week, the share who came again within 4 weeks.</p>
-          <RateLine weeks={model.weeks} values={model.returnRate} />
+          <RateLine weeks={model.weeks} values={model.returnRate} sizes={model.cohortSizes} />
         </div>
         <div className="ins-panel">
           <h3>Consistency</h3>
@@ -2626,7 +2798,7 @@ function Insights({ data, openMeeting }) {
         </div>
         <div className="ins-panel">
           <h3>Drop-offs</h3>
-          <p className="muted small">People who came 3+ times, then haven't been back for {DROP_WEEKS}+ weeks, shown in the week they were last seen.</p>
+          <p className="muted small">People who came {DROP_MIN_VISITS}+ times, then haven't been back for {DROP_WEEKS}+ weeks, shown in the week they were last seen.</p>
           <WeekBars weeks={model.weeks} series={[{ key: "drop", label: "Last seen this week", cls: "nr-drop", values: model.dropPer }]} height={110} />
         </div>
       </div>
@@ -2641,7 +2813,8 @@ function Insights({ data, openMeeting }) {
           <tbody>
             {model.compare.map((c) => (
               <tr key={c.key} className="clickable" onClick={() => openMeeting(c.key)} title="Open in Attendance">
-                <td>{c.name}<div className="muted small">{c.account}{c.stale ? " · no sessions for 3+ weeks" : ""}</div></td>
+                <td>{c.name}<div className="muted small">{c.account}{c.stale ? " · no sessions for 3+ weeks" : ""}
+                  {c.ours && data.circles.some((x) => x.id === c.key) && <> · <button className="link small" onClick={(e) => { e.stopPropagation(); onSelect(data.circles.find((x) => x.id === c.key)); }}>Circle details</button></>}</div></td>
                 <td>{c.recent != null ? c.recent.toFixed(1) : "–"}</td>
                 <td>{c.change == null ? <span className="muted">–</span> : <span className={`trend ${c.change > 0 ? "up" : c.change < 0 ? "down" : ""}`}>{c.change > 0 ? "▲" : c.change < 0 ? "▼" : "■"} {Math.abs(c.change)}%</span>}</td>
                 <td>{c.newRecent}</td>
@@ -2654,7 +2827,7 @@ function Insights({ data, openMeeting }) {
           </tbody>
         </table>
       </div>
-      <p className="muted small">Regulars came to {REGULAR_WEEKS}+ sessions. People are matched by Zoom name (or email when signed in), so the same person under a very different name counts twice. Click a meeting to open its attendance.</p>
+      <p className="muted small">Regulars came to {REGULAR_SESSIONS}+ sessions. People are matched by Zoom name (or email when signed in), so the same person under a very different name counts twice. Click a meeting to open its attendance.</p>
     </section>
   );
 }
