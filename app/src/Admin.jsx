@@ -12,7 +12,7 @@ const NAV = [
   { label: "Overview", tabs: [["Overview", "Overview"]] },
   { label: "Queue", tabs: [["Queue", "Queue"]] },
   { label: "Circles", tabs: [["Circles", "All circles"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
-  { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance", "super"], ["Insights", "Attendance insights", "super"]] },
+  { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance"], ["Insights", "Attendance insights"]] },
   { label: "Setup", tabs: [["Emails", "Email templates"], ["EmailLog", "Sent emails"], ["Settings", "Settings"]] },
 ];
 
@@ -121,7 +121,6 @@ function ukToday() { return new Date().toLocaleDateString("en-CA", { timeZone: "
 // Date and time in UK time, e.g. "Wed 7 Oct 2026, 21:44".
 const fmtStamp = (iso) => (iso ? new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
 const ukDate = (iso) => new Date(iso).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
-const SUPER_ONLY = new Set(["Attendance", "Insights"]);
 const REQUEST_STATUS = { open: "Open", done: "Done", dismissed: "Closed", closed: "Closed" };
 
 export default function Admin() {
@@ -217,12 +216,7 @@ export default function Admin() {
     }, "Circle deleted").then(() => after?.());
   };
 
-  // Super-admin pages opened by someone else (old link, back button): send them to Overview.
-  useEffect(() => {
-    if (data && SUPER_ONLY.has(tab) && !data.me?.is_super) go("Overview", null, { replace: true });
-  }, [data, tab, go]);
   if (!data) return <div className="center muted">Loading data…</div>;
-  if (SUPER_ONLY.has(tab) && !data.me?.is_super) return null; // redirected by the effect above
   const openRequests = data.requests.filter((r) => r.status === "open").length;
   const queueCount = data.circles.filter((c) => c.status === "pending" || c.status === "conflict").length;
   const select = (c) => setSelected(c);
@@ -231,7 +225,7 @@ export default function Admin() {
     <div className="admin">
       <nav className="tabs">
         <button className="tab nav-back" disabled={!depth} onClick={() => history.back()} aria-label="Back" title="Back">←</button>
-        {NAV.map((g) => ({ ...g, tabs: g.tabs.filter(([, , who]) => who !== "super" || data.me?.is_super) })).map((g) => (
+        {NAV.map((g) => (
           <NavGroup key={g.label} group={g} tab={tab} setTab={setTab} counts={{ Queue: queueCount, Requests: openRequests }} />
         ))}
       </nav>
@@ -243,10 +237,10 @@ export default function Admin() {
         {tab === "Licences" && <Licences data={data} run={run} notify={notify} go={go} />}
         {tab === "Requests" && <Requests data={data} run={run} onSelect={(id) => select(data.circles.find((c) => c.id === id))} />}
         {tab === "Zoom" && <ZoomMeetings key={sub ?? ""} initialAccount={sub} data={data} run={run} onSelect={select}
-          onAttendance={data.me?.is_super ? (id) => { setAttFocus(String(id)); setTab("Attendance"); } : null} />}
-        {tab === "Attendance" && data.me?.is_super && <Attendance data={data} run={run} focus={attFocus} onFocused={() => setAttFocus(null)} onSelect={select}
+          onAttendance={(id) => { setAttFocus(String(id)); setTab("Attendance"); }} />}
+        {tab === "Attendance" && <Attendance data={data} run={run} focus={attFocus} onFocused={() => setAttFocus(null)} onSelect={select}
           open={sub} setOpen={(k, opts) => go("Attendance", k, opts)} />}
-        {tab === "Insights" && data.me?.is_super && <Insights data={data} openMeeting={(k) => go("Attendance", k)} onSelect={select} />}
+        {tab === "Insights" && <Insights data={data} openMeeting={(k) => go("Attendance", k)} onSelect={select} />}
         {tab === "Emails" && <Emails data={data} run={run} />}
         {tab === "EmailLog" && <EmailLog key={sub ?? ""} data={data} run={run} onSelect={select} initial={sub} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
@@ -254,7 +248,7 @@ export default function Admin() {
       {selected && (
         <CircleDrawer
           key={selected === "new" ? "new" : selected.id}
-          onAttendance={data.me?.is_super ? (id) => { setSelected(null); go("Attendance", id); } : null}
+          onAttendance={(id) => { setSelected(null); go("Attendance", id); }}
           onRequests={() => { setSelected(null); go("Requests"); }}
           onEmails={(name) => { setSelected(null); go("EmailLog", name); }}
           circle={selected === "new" ? null : data.circles.find((c) => c.id === selected.id) ?? selected}
@@ -1152,7 +1146,7 @@ function Detail({ label, value, copy, note }) {
 }
 
 /* ---------------- Sent emails ---------------- */
-const EMAIL_KIND = { approved: "Circle details", updated: "Details changed", test: "Test" };
+const EMAIL_KIND = { approved: "Circle details", updated: "Details changed", test: "Test", invite: "Sign-in invite (from Supabase)" };
 const EMAIL_STATUS = { sent: ["Sent", "st-live"], failed: ["Failed", "st-conflict"], skipped: ["Not sent", "st-pending"] };
 
 // Last few emails for one circle, inside the circle panel.
@@ -1304,7 +1298,7 @@ function EmailLog({ data, run, onSelect, initial }) {
         </table>
       </div>
       {rows.length >= limit && <button className="link small" onClick={() => setLimit((n) => n + 200)}>Show older emails</button>}
-      <p className="muted small">"Not sent" means the email was skipped, for example because the circle had no facilitator email. Resend sends the circle's current details again. Sign-in and invite emails come from Supabase and appear only in the Gmail Sent folder.</p>
+      <p className="muted small">"Not sent" means the email was skipped, for example because the circle had no facilitator email. Resend sends the circle's current details again. Sign-in invites are listed with whether Supabase accepted them; password resets and sign-in links aren't listed (they're in the Gmail Sent folder).</p>
     </section>
   );
 }
@@ -1588,6 +1582,8 @@ function Settings({ data, run }) {
   const set = (k) => (e) => setS({ ...s, [k]: e.target.value });
   const loadAdmins = () => supabase.from("admin_emails").select("*").order("email").then(({ data: d }) => setAdmins(d ?? []));
   useEffect(() => { loadAdmins(); }, []);
+  // Super admins manage the admin list (the database enforces this too).
+  const isSuper = Boolean((admins.find((a) => a.email === data.me?.email) ?? data.me)?.is_super);
 
   // One transaction: if the new buffer or term dates would create a clash, nothing is saved.
   const save = () => run(async () => {
@@ -1624,24 +1620,40 @@ function Settings({ data, run }) {
 
       <section className="card">
         <div className="card-head"><h2>Admins</h2></div>
+        <p className="muted small">{isSuper
+          ? "You're a super admin: you can add and remove admins, and choose who else is a super admin. Everyone listed can use the whole dashboard."
+          : "Everyone listed can use the whole dashboard. Only super admins can add or remove admins."}</p>
         <div className="list">
           {admins.map((a) => (
             <div key={a.email} className="row">
-              <div className="row-main">{a.email}{a.is_super && <span className="pill small info admin-super">Super admin: sees attendance</span>}</div>
+              <div className="row-main">{a.email}{a.is_super && <span className="pill small info admin-super">Super admin</span>}</div>
               <AdminName admin={a} run={run} onSaved={loadAdmins} />
-              <div className="row-actions">
-                <IconButton icon="trash" label={`Remove ${a.email}`} danger disabled={admins.length < 2}
-                  title={admins.length < 2 ? "There must be at least one admin" : "Remove admin"}
+              {a.email !== data.me?.email && (
+                <button className="link small nowrap" onClick={() => run(() => adminAction("invite_admin", null, { facilitator: { email: a.email } }),
+                  (o) => o?.invite === "invited" ? { text: `Invite sent to ${a.email}.` }
+                    : o?.invite === "already has an account" ? { text: `${a.email} already has a sign-in. They can use Forgot password if needed.` }
+                    : { text: `Invite to ${a.email} didn't send: ${o?.invite}. See Setup, Sent emails.`, warn: true })}>Send invite</button>
+              )}
+              {isSuper && a.email !== data.me?.email && (
+                <button className="link small nowrap" onClick={() => confirm(a.is_super ? `Stop ${a.email} being a super admin? They stay an admin.` : `Make ${a.email} a super admin? They'll be able to add and remove admins.`) && run(async () => {
+                  const { error } = await supabase.from("admin_emails").update({ is_super: !a.is_super }).eq("email", a.email);
+                  if (error) throw error;
+                  loadAdmins();
+                }, a.is_super ? "No longer a super admin" : "Now a super admin")}>{a.is_super ? "Remove super admin" : "Make super admin"}</button>
+              )}
+              {isSuper && <div className="row-actions">
+                <IconButton icon="trash" label={`Remove ${a.email}`} danger disabled={admins.length < 2 || a.email === data.me?.email}
+                  title={a.email === data.me?.email ? "You can't remove yourself" : admins.length < 2 ? "There must be at least one admin" : "Remove admin"}
                   onClick={() => confirm(`Remove ${a.email} as an admin?`) && run(async () => {
                     const { error } = await supabase.from("admin_emails").delete().eq("email", a.email);
                     if (error) throw error;
                     loadAdmins();
                   }, "Removed")} />
-              </div>
+              </div>}
             </div>
           ))}
         </div>
-        <div className="inline">
+        {isSuper && <div className="inline">
           <input type="email" placeholder="email@…" value={newAdmin} onChange={(e) => setNewAdmin(e.target.value)} />
           <button disabled={!newAdmin} onClick={() => run(async () => {
             const email = newAdmin.trim().toLowerCase();
@@ -1653,7 +1665,7 @@ function Settings({ data, run }) {
           }, (o) => o?.invite === "invited" ? "Admin added and emailed an invite to set their password."
             : o?.invite === "already has an account" ? "Admin added. They already have an account, so they can sign in now."
             : `Admin added, but the invite didn't send (${o?.invite ?? "unknown"}). They can use Forgot password on the sign-in page.`)}>Add admin</button>
-        </div>
+        </div>}
       </section>
 
       {demoCount > 0 && (
@@ -2109,7 +2121,7 @@ function ZoomMeetings({ data, run, onSelect, onAttendance, initialAccount }) {
   );
 }
 
-/* ---------------- Attendance (super admins only) ---------------- */
+/* ---------------- Attendance ---------------- */
 // Shared definitions (Attendance and Insights use the same ones).
 const DRIFT_SESSIONS = 3;  // "dropped off": missed this many sessions in a row (Insights: weeks)...
 const DROP_MIN_VISITS = 3; // ...after coming at least this many times
@@ -2483,7 +2495,6 @@ function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
         )}
         <p className="muted small zoom-synced">
           {syncing ? (progress ? `Syncing with Zoom… ${progress.done} sessions added so far` : "Syncing with Zoom…") : state.last ? <>Last synced <b>{ago(state.last.at)}</b> · {fmtStamp(state.last.at)}</> : "Not synced yet."}
-          {" "}· Super admins only
         </p>
       </div>
       <div className="filters">
@@ -2609,7 +2620,7 @@ function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
   );
 }
 
-// ---------- Attendance insights (super admins only) ----------
+// ---------- Attendance insights ----------
 // Weekly trends across meetings: growth, new people, how consistently people come back, and who has stopped.
 const DROP_WEEKS = DRIFT_SESSIONS; // weekly view of the same rule
 const weekKey = (iso) => weekStart(iso).getTime();
@@ -2812,7 +2823,7 @@ function Insights({ data, openMeeting, onSelect }) {
       <div className="card-head">
         <div>
           <h2>Attendance insights</h2>
-          <p className="muted small">Week by week, from the synced Zoom attendance · Super admins only</p>
+          <p className="muted small">Week by week, from the synced Zoom attendance</p>
         </div>
         <div className="filters">
           <select value={meeting} onChange={(e) => setMeeting(e.target.value)} aria-label="Meeting">

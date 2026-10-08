@@ -1,6 +1,6 @@
 // Admin-only actions that touch Zoom and email.
 // POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences"
-//          | "set_host_key" | "rename" | "list_zoom_meetings" | "sync_attendance" | "test_email",
+//          | "set_host_key" | "rename" | "list_zoom_meetings" | "sync_attendance" | "invite_admin" | "test_email",
 //        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template? }
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildVars, render, DEFAULT_TEMPLATES } from "./template.ts";
@@ -142,11 +142,16 @@ async function testEmail(circleId: string, actor: string, key: TemplateKey, draf
   return { email: result, to: actor };
 }
 
-async function inviteFacilitator(email: string) {
+// Sign-in invite (sent by Supabase Auth through its SMTP settings). Logged in Sent emails as "invite".
+async function inviteFacilitator(email: string, meta?: EmailMeta) {
   const { error } = await db.auth.admin.inviteUserByEmail(email, APP_URL ? { redirectTo: APP_URL } : undefined);
-  if (!error) return "invited";
-  if (/already/i.test(error.message)) return "already has an account";
-  return `invite failed: ${error.message}`;
+  const result = !error ? "invited" : /already/i.test(error.message) ? "already has an account" : `invite failed: ${error.message}`;
+  if (meta && result !== "already has an account") {
+    const hint = /timeout|deadline/i.test(error?.message ?? "")
+      ? " (Supabase couldn't reach the mail server in time: check Authentication, Emails, SMTP settings)" : "";
+    await logEmail({ ...meta, kind: "invite" }, email, "Sign-in invite", error ? "failed" : "sent", error ? `${error.message}${hint}` : undefined);
+  }
+  return result;
 }
 
 // Invite a newly added admin so they can set a password and sign in.
@@ -154,7 +159,7 @@ async function inviteAdmin(actor: string, email: string) {
   const e = String(email ?? "").trim().toLowerCase();
   const { data: row } = await db.from("admin_emails").select("email").eq("email", e).maybeSingle();
   if (!row) throw new Error("Add them as an admin first");
-  const result = await inviteFacilitator(e);
+  const result = await inviteFacilitator(e, { kind: "invite", actor });
   await audit(actor, "invite_admin", null, { email: e, result });
   return { invite: result };
 }
@@ -265,7 +270,7 @@ async function provision(circleId: string, actor: string) {
     throw new Error(`Saving failed, so the Zoom meeting was removed again: ${error.message}`);
   }
 
-  const invite = await inviteFacilitator(c.facilitator.email);
+  const invite = await inviteFacilitator(c.facilitator.email, { kind: "invite", circle: c, actor });
   const email = await sendDetailsEmail("approved", updated, c.facilitator, c.licence, actor);
   await audit(actor, "provision", c.id, { meeting_id: meeting.id, invite, email, mock: Boolean(c.licence.is_mock) });
   return { status: "live", meeting_id: meeting.id, join_url: meeting.join_url, invite, email, mock: Boolean(c.licence.is_mock) };
@@ -375,7 +380,7 @@ async function handover(circleId: string, actor: string, person: { name?: string
   let sent = "";
   if (c.status === "live") {
     await renameMeeting(c.id).catch(() => {});
-    invite = await inviteFacilitator(email);
+    invite = await inviteFacilitator(email, { kind: "invite", circle: c, actor });
     const fresh = await loadCircle(c.id); // name may now follow the new host
     sent = await sendDetailsEmail("approved", fresh, fac, fresh.licence, actor);
   }
@@ -606,7 +611,7 @@ async function listZoomMeetings(actor: string) {
   return summary;
 }
 
-// ---------- Attendance (super admins only) ----------
+// ---------- Attendance (any admin) ----------
 // Zoom past-meeting UUIDs that start with "/" or contain "//" must be encoded twice.
 const encUuid = (u: string) => (u.startsWith("/") || u.includes("//") ? encodeURIComponent(encodeURIComponent(u)) : encodeURIComponent(u));
 const ATTENDANCE_BATCH = 60; // new sessions per run, to stay inside the function time limit
@@ -653,9 +658,6 @@ async function allPages(path: string, key: string) {
 // completes. A run stops after ATTENDANCE_BATCH sessions or ~100 seconds and the next run carries on.
 const RUN_BUDGET_MS = 100_000;
 async function syncAttendance(actor: string) {
-  const { data: me } = await db.from("admin_emails").select("is_super").eq("email", actor).maybeSingle();
-  if (!me?.is_super) throw new Error("Attendance is for super admins only");
-
   // One sync at a time (several open tabs would otherwise race each other). The lock expires after 3 minutes.
   const { data: lock } = await db.from("settings").update({ attendance_sync_lock: new Date().toISOString() })
     .eq("id", 1).or(`attendance_sync_lock.is.null,attendance_sync_lock.lt.${new Date(Date.now() - 180_000).toISOString()}`).select("id");
