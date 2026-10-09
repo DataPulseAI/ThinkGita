@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  supabase, adminAction, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
+  supabase, adminAction, websiteSync, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
 } from "./lib.js";
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
@@ -197,10 +197,29 @@ export default function Admin() {
     setTimeout(() => setToast(null), kind === "ok" ? 6000 : 12000);
   };
 
+  // After any change, push circles marked as changed to the website (debounced, runs in the background).
+  const syncTimer = useRef(null);
+  const scheduleWebsiteSync = useCallback((delay = 1500) => {
+    clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(async () => {
+      try {
+        const r = await websiteSync();
+        if (r?.busy) return scheduleWebsiteSync(8000); // another sync is running: try again shortly
+        if (r?.errors?.length || typeof r?.published === "string") {
+          notify("warn", `Website update had a problem: ${r.errors?.[0] ?? r.published}. See the circle's Website section.`);
+        }
+        if (r && (r.created || r.updated || r.hidden || r.errors?.length)) load();
+      } catch (e) {
+        notify("warn", `Website update failed: ${e.message}`);
+      }
+    }, delay);
+  }, [load]);
+
   // Wraps an async action with refresh + toast.
   const run = async (fn, okText) => {
     try {
       const out = await fn();
+      scheduleWebsiteSync();
       if (okText) {
         const msg = typeof okText === "function" ? okText(out) : okText;
         // A message can flag an email problem: { text, warn: true } shows as a warning that stays longer.
@@ -242,7 +261,7 @@ export default function Admin() {
         {tab === "Overview" && <Overview data={data} onDay={(d) => { setDay(d); setTab("Schedule"); }} onTab={setTab} go={go} />}
         {tab === "Schedule" && <Schedule data={data} day={day} setDay={setDay} onSelect={select} />}
         {tab === "Queue" && <Queue data={data} run={run} onSelect={select} />}
-        {tab === "Circles" && <Circles key={sub ?? ""} initial={sub} data={data} onSelect={select} onNew={() => setSelected("new")} onDelete={deleteCircle} />}
+        {tab === "Circles" && <Circles key={sub ?? ""} initial={sub} data={data} run={run} onSelect={select} onNew={() => setSelected("new")} onDelete={deleteCircle} />}
         {tab === "Licences" && <Licences data={data} run={run} notify={notify} go={go} />}
         {tab === "Requests" && <Requests data={data} run={run} onSelect={(id) => select(data.circles.find((c) => c.id === id))} />}
         {tab === "Zoom" && <ZoomMeetings key={sub ?? ""} initialAccount={sub} data={data} run={run} onSelect={select}
@@ -653,15 +672,17 @@ const FILTERS = {
   active: { label: "Current (not ended)", match: (s) => ["pending", "conflict", "approved", "live", "paused"].includes(s) },
   action: { label: "Needs action", match: (s) => s === "pending" || s === "conflict" },
   live: { label: "Live", match: (s) => s === "live" },
+  web: { label: "Shown on website", match: (s, c) => Boolean(c?.website_visible) },
+  hidden: { label: "Live, hidden from website", match: (s, c) => s === "live" && !c?.website_visible },
   closed: { label: "Ended or rejected", match: (s) => s === "ended" || s === "rejected" },
   all: { label: "All circles", match: () => true },
 };
-function Circles({ data, onSelect, onNew, onDelete, initial }) {
+function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
   // Opened from another page: "#/Circles/live" picks a filter, anything else is a search ("#/Circles/Zoom 05").
   const [q, setQ] = useState(initial && !FILTERS[initial] ? initial : "");
   const [status, setStatus] = useState(initial && FILTERS[initial] ? initial : (initial ? "all" : "active"));
   const rows = useMemo(() => data.circles.filter((c) => {
-    if (!FILTERS[status].match(c.status)) return false;
+    if (!FILTERS[status].match(c.status, c)) return false;
     const hay = `${c.name} ${c.facilitator?.name ?? ""} ${c.facilitator?.email ?? ""} ${coFacs(c).map((f) => `${f.name} ${f.email}`).join(" ")} ${c.licence?.label ?? ""} ${c.language ?? ""}`.toLowerCase();
     return hay.includes(q.toLowerCase());
   }), [data.circles, q, status]);
@@ -680,7 +701,7 @@ function Circles({ data, onSelect, onNew, onDelete, initial }) {
       </div>
       <div className="table-wrap">
         <table className="table">
-          <thead><tr><th>Circle</th><th>Facilitator</th><th>When</th><th>Licence</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Circle</th><th>Facilitator</th><th>When</th><th>Licence</th><th>Status</th><th>Website</th><th></th></tr></thead>
           <tbody>
             {rows.map((c) => (
               <tr key={c.id} onClick={() => onSelect(c)}>
@@ -693,6 +714,7 @@ function Circles({ data, onSelect, onNew, onDelete, initial }) {
                 <td><When c={c} block /></td>
                 <td>{c.licence?.label ?? <span className="muted">none</span>}{c.licence?.is_mock && <span className="tag">mock</span>}</td>
                 <td><span className={`pill st-${c.status}`}>{STATUS_LABEL[c.status]}</span></td>
+                <td onClick={(e) => e.stopPropagation()}><WebsiteSwitch circle={c} run={run} compact /></td>
                 <td className="cell-actions">
                   <IconButton icon="edit" label="Edit circle" onClick={() => onSelect(c)} />
                   <IconButton icon="trash" label="Delete circle" danger onClick={() => onDelete(c)}
@@ -1041,6 +1063,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
           </div>
         )}
 
+        {circle && <WebsiteVisibility circle={circle} run={run} />}
         {circle && <CoFacilitators circle={circle} run={run} editable={editable} />}
         {circle && <CircleEmails circle={circle} onAll={onEmails} />}
 
@@ -1161,6 +1184,53 @@ const EMAIL_KIND = { approved: "Circle details", updated: "Details changed", tes
 const EMAIL_STATUS = { sent: ["Sent", "st-live"], failed: ["Failed", "st-conflict"], skipped: ["Not sent", "st-pending"] };
 
 // Last few emails for one circle, inside the circle panel.
+// Website visibility: whether the circle is listed on the ThinkGita website (Framer CMS "Course").
+// Off = hidden (kept as a draft in the CMS). Changes are pushed to the website automatically (framer-sync).
+function WebsiteSyncState({ circle }) {
+  if (["ended", "rejected"].includes(circle.status)) return <>Ended and rejected circles are never shown.</>;
+  if (circle.status === "conflict" && circle.website_visible) return <>It shows once the circle has a licence.</>;
+  if (!["live", "paused"].includes(circle.status) && !circle.website_visible && !circle.framer_item_id) return <>Switch it on to advertise it before it's approved.</>;
+  if (circle.framer_dirty) return <>Website update pending.</>;
+  if (circle.framer_synced_at) return <>Website copy updated {ago(circle.framer_synced_at)}.</>;
+  return null;
+}
+function WebsiteSwitch({ circle, run, compact }) {
+  const on = Boolean(circle.website_visible);
+  const [busy, setBusy] = useState(false);
+  const toggle = async () => {
+    setBusy(true);
+    await run(async () => {
+      const { error } = await supabase.from("circles").update({ website_visible: !on }).eq("id", circle.id);
+      if (error) throw error;
+    }, on ? "Hidden from the website" : "Set to show on the website");
+    setBusy(false);
+  };
+  return (
+    <button type="button" role="switch" aria-checked={on} disabled={busy} onClick={toggle}
+      className={`switch ${on ? "on" : ""} ${compact ? "compact" : ""}`}
+      title={on ? "Shown on website. Click to hide." : "Hidden from website. Click to show."}>
+      <span className="switch-track"><span className="switch-dot" /></span>
+      <span className="switch-label">{on ? "Shown" : "Hidden"}</span>
+    </button>
+  );
+}
+
+function WebsiteVisibility({ circle, run }) {
+  return (
+    <div className="details">
+      <div className="details-head">
+        <span className="section-title">Website</span>
+        <WebsiteSwitch circle={circle} run={run} />
+      </div>
+      <p className="muted small">
+        {circle.website_visible ? "Listed on the ThinkGita website." : "Not listed on the ThinkGita website (kept as a draft)."}
+        {" "}<WebsiteSyncState circle={circle} />
+      </p>
+      {circle.framer_error && <p className="warn-text small">Last website update failed: {circle.framer_error}</p>}
+    </div>
+  );
+}
+
 // People who run the circle with the main facilitator: they see it in their portal and get its emails.
 function CoFacilitators({ circle, run, editable }) {
   const list = coFacs(circle);
@@ -1691,6 +1761,28 @@ function Settings({ data, run }) {
           <label>Term ends<input type="date" value={s.term_end ?? ""} onChange={set("term_end")} /></label>
         </div>
         <p className="muted small">Zoom meetings repeat weekly from the first matching day on or after the later of the term start and the facilitator's preferred start date, until the term end (max 50 weeks).</p>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <h2>Website</h2>
+          <button onClick={() => run(() => websiteSync(true), (r) => r?.busy ? { text: "A website update is already running. Try again in a minute.", warn: true }
+            : { text: `Website updated: ${r.created ?? 0} added, ${r.updated ?? 0} updated${r.hidden ? `, ${r.hidden} hidden` : ""}.${r.published === true ? " Site published." : typeof r.published === "string" ? ` ${r.published}` : ""}`, warn: Boolean(r.errors?.length) || typeof r.published === "string" })}>
+            Update all circles now
+          </button>
+        </div>
+        <p className="muted small">
+          Circles are listed in the website's Course collection in Framer. Each circle is hidden (a draft) unless its Website switch is on,
+          and any change here updates the website automatically. Text in items that already existed in Framer (titles, names, photos) is kept.
+        </p>
+        <label className="check">
+          <input type="checkbox" checked={data.settings.framer_auto_publish !== false} onChange={(e) => run(async () => {
+            const { error } = await supabase.from("settings").update({ framer_auto_publish: e.target.checked }).eq("id", 1);
+            if (error) throw error;
+          }, e.target.checked ? "The website will publish after each update" : "Website updates will wait for someone to publish in Framer")} />
+          Publish the website after each update
+        </label>
+        <p className="muted small">Publishing also puts live any unpublished design edits in Framer. Turn this off while someone is redesigning the site.</p>
       </section>
 
       <section className="card">

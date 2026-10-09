@@ -111,3 +111,14 @@ export function requestSummary(type, d = {}) {
     default: return "Other request";
   }
 }
+
+// Pushes circles marked as changed to the website (Framer CMS) and publishes. all: re-push every circle.
+export async function websiteSync(all = false) {
+  const { data, error } = await supabase.functions.invoke("framer-sync", { body: { action: "sync", all } });
+  if (error) {
+    let msg = error.message;
+    try { msg = (await error.context.json()).error ?? msg; } catch (_) { /* keep generic message */ }
+    throw new Error(msg);
+  }
+  return data;
+}
