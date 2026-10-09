@@ -1,6 +1,11 @@
 // Sync circles to the ThinkGita website (Framer CMS "Course" collection).
 // POST { action: "sync" }            admins: push every circle marked framer_dirty, then publish (if settings.framer_auto_publish).
 // POST { action: "sync", all: true } admins: re-push every circle.
+// POST { action: "publish" }         admins: publish the site now (retries a failed publish).
+// The cron tick (public.framer_sync_tick, every 2 minutes) calls { action: "sync" } with the x-cron-secret header when
+// circles are dirty or a publish is pending, so failed publishes and changes made outside the dashboard still go live.
+// Publishing is tracked in settings.framer_publish_pending: it is set when a published (or to-be-published) item changes
+// and cleared only when Framer accepts the publish. Changes to draft-only items do not trigger a publish.
 // A circle's website item is a draft unless circles.website_visible is on and the circle is live or awaiting approval.
 // New items get every field; items that already existed (taken over) only get draft, Time and Lesson updated,
 // so hand-made titles, names and photos in Framer are kept. Images and LessonNumber are never touched.
@@ -53,7 +58,7 @@ const tzLabel = (tz: string) => TZ[tz] ?? tz.split("/").pop()!.replace(/_/g, " "
 const ukToday = () => new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
 function shortDate(iso: string) { const d = new Date(`${iso}T12:00:00Z`); return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`; }
 function utmDate(iso: string) { const d = new Date(`${iso}T12:00:00Z`); return `${d.getUTCDate()}${MONTHS[d.getUTCMonth()]}${String(d.getUTCFullYear()).slice(2)}`; }
-const slugify = (s: string) => s.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const slugify = (s: string) => s.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 // Host name as people know it: the name in the Zoom title for imported circles ("TG Circles | Mon | 7.30pm UK | Anjali"),
 // otherwise the facilitator's initiated name, otherwise their name (co-facilitators joined with "&").
@@ -123,11 +128,13 @@ async function sync(actor: string, { all = false, preview = false } = {}) {
       circle: c.name, item: c.framer_item_id, draft: draftFor(c), title: title(c), time: timeText(c), lesson: lessonText(c), author: hostName(c), link: link(c),
     }));
   }
-  if (!circles.length) return { changed: 0, published: false, note: "nothing to sync" };
+  const { data: settings } = await db.from("settings").select("framer_auto_publish, framer_publish_pending").eq("id", 1).single();
+  const autoPublish = settings?.framer_auto_publish !== false;
+  if (!circles.length && !(settings?.framer_publish_pending && autoPublish)) return { changed: 0, published: false, note: "nothing to sync" };
 
-  const { data: settings } = await db.from("settings").select("framer_auto_publish").eq("id", 1).single();
   const framer = await connect(PROJECT, Deno.env.get("FRAMER_API_KEY")!);
   const result = { created: 0, updated: 0, hidden: 0, skipped: 0, errors: [] as string[], published: false as boolean | string };
+  let needsPublish = false; // a change touches something visitors can see
   try {
     const col = (await framer.getCollections()).find((x: any) => x.id === COLLECTION);
     if (!col) throw new Error("Course collection not found in Framer");
@@ -146,12 +153,13 @@ async function sync(actor: string, { all = false, preview = false } = {}) {
         c.framer_item_id = null; c.framer_created = false;
       }
       if (!wantsItem(c)) {
-        if (existing && !(existing as any).draft) { updates.push({ c, input: { id: existing.id, draft: true } }); result.hidden++; }
+        if (existing && !(existing as any).draft) { updates.push({ c, input: { id: existing.id, draft: true } }); result.hidden++; needsPublish = true; }
         else result.skipped++;
         done.push({ c, patch: {} });
         continue;
       }
       if (existing) {
+        if (!(existing as any).draft || !draftFor(c)) needsPublish = true;
         updates.push({ c, input: { id: existing.id, draft: draftFor(c), fieldData: updateFields(c) } });
         done.push({ c, patch: {} });
       } else {
@@ -159,6 +167,7 @@ async function sync(actor: string, { all = false, preview = false } = {}) {
         let slug = base;
         for (let i = 2; slugs.has(slug); i++) slug = `${base}-${i}`;
         slugs.add(slug);
+        if (!draftFor(c)) needsPublish = true;
         creates.push({ c, slug, input: { slug, draft: draftFor(c), fieldData: fullFields(c) } });
       }
     }
@@ -192,19 +201,45 @@ async function sync(actor: string, { all = false, preview = false } = {}) {
       }).eq("id", c.id);
     }
 
-    const changed = result.created + result.updated + result.hidden;
-    if (changed && settings?.framer_auto_publish !== false) {
-      try {
-        const { deployment } = await framer.publish();
-        await framer.deploy(deployment.id);
-        result.published = true;
-      } catch (e) { result.published = `publish failed: ${String(e).slice(0, 200)}`; }
-    }
+    if (needsPublish) await db.from("settings").update({ framer_publish_pending: true }).eq("id", 1);
+    if (autoPublish && (needsPublish || settings?.framer_publish_pending)) result.published = await publishNow(framer);
   } finally {
     await framer.disconnect();
   }
   await db.from("audit_log").insert({ actor, action: "framer_sync", circle_id: null, detail: result });
   return result;
+}
+
+// Publish and deploy to production. Framer refuses while a previous publish is still processing
+// ("Publishing is currently unavailable"), so wait and try once more before leaving it to the cron tick.
+async function publishNow(framer: any): Promise<true | string> {
+  let err = "";
+  for (const wait of [0, 20_000]) {
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    try {
+      const { deployment } = await framer.publish();
+      await framer.deploy(deployment.id);
+      await db.from("settings").update({
+        framer_publish_pending: false, framer_publish_error: null, framer_publish_attempts: 0,
+        framer_published_at: new Date().toISOString(), framer_publish_tried_at: new Date().toISOString(),
+      }).eq("id", 1);
+      return true;
+    } catch (e) { err = String(e).replace(/^\w*Error:\s*/, "").slice(0, 200); }
+  }
+  const { data: st } = await db.from("settings").select("framer_publish_attempts").eq("id", 1).single();
+  await db.from("settings").update({
+    framer_publish_pending: true, framer_publish_error: err, framer_publish_tried_at: new Date().toISOString(),
+    framer_publish_attempts: (st?.framer_publish_attempts ?? 0) + 1,
+  }).eq("id", 1);
+  return `not published yet (${err}); it will retry automatically`;
+}
+
+async function publishOnly(actor: string) {
+  const framer = await connect(PROJECT, Deno.env.get("FRAMER_API_KEY")!);
+  let published: true | string;
+  try { published = await publishNow(framer); } finally { await framer.disconnect(); }
+  await db.from("audit_log").insert({ actor, action: "framer_publish", circle_id: null, detail: { published } });
+  return { published };
 }
 
 // One sync at a time (the dashboard can trigger several in a row). The lock expires after 3 minutes.
@@ -218,6 +253,13 @@ async function withLock<T>(fn: () => Promise<T>) {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
+  const cronSecret = req.headers.get("x-cron-secret");
+  if (cronSecret) {
+    const { data: ok } = await db.rpc("framer_cron_ok", { s: cronSecret });
+    if (ok !== true) return json({ error: "Forbidden" }, 403);
+    try { return json(await withLock(() => sync("cron"))); }
+    catch (e) { return json({ error: e instanceof Error ? e.message : String(e) }, 400); }
+  }
   const auth = req.headers.get("Authorization") ?? "";
   const { data: userData } = await db.auth.getUser(auth.replace(/^Bearer\s+/i, ""));
   const email = userData?.user?.email?.toLowerCase();
@@ -227,6 +269,7 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     if (body.action === "sync") return json(await withLock(() => sync(email, { all: Boolean(body.all) })));
+    if (body.action === "publish") return json(await withLock(() => publishOnly(email)));
     if (body.action === "preview") return json(await sync(email, { all: true, preview: true }));
     return json({ error: `Unknown action ${body.action}` }, 400);
   } catch (e) {

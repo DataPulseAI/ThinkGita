@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  supabase, adminAction, websiteSync, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
+  supabase, adminAction, websiteSync, websitePublish, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
 } from "./lib.js";
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
@@ -205,10 +205,12 @@ export default function Admin() {
       try {
         const r = await websiteSync();
         if (r?.busy) return scheduleWebsiteSync(8000); // another sync is running: try again shortly
-        if (r?.errors?.length || typeof r?.published === "string") {
-          notify("warn", `Website update had a problem: ${r.errors?.[0] ?? r.published}. See the circle's Website section.`);
+        if (r?.errors?.length) {
+          notify("warn", `Website update had a problem: ${r.errors[0]}. See the circle's Website section.`);
+        } else if (typeof r?.published === "string") {
+          notify("ok", "Website updated. Framer isn't accepting a publish right now, so it will go live automatically in a few minutes.");
         }
-        if (r && (r.created || r.updated || r.hidden || r.errors?.length)) load();
+        if (r && (r.created || r.updated || r.hidden || r.errors?.length || r.published)) load();
       } catch (e) {
         notify("warn", `Website update failed: ${e.message}`);
       }
@@ -1782,6 +1784,7 @@ function Settings({ data, run }) {
           }, e.target.checked ? "The website will publish after each update" : "Website updates will wait for someone to publish in Framer")} />
           Publish the website after each update
         </label>
+        <PublishStatus s={data.settings} run={run} />
         <p className="muted small">Publishing also puts live any unpublished design edits in Framer. Turn this off while someone is redesigning the site.</p>
       </section>
 
@@ -2120,6 +2123,27 @@ function AdminName({ admin, run, onSaved }) {
 
 /* ---------------- Zoom (what's actually booked in Zoom) ---------------- */
 const fmtWhen = (iso) => iso ? new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+// Whether the last website change is live, and a manual retry when Framer refused a publish.
+function PublishStatus({ s, run }) {
+  if (!s.framer_publish_pending) {
+    return s.framer_published_at ? <p className="muted small">Website last published {ago(s.framer_published_at)}.</p> : null;
+  }
+  return (
+    <div className="card-note">
+      <p className="warn-text small">
+        Some website changes are saved in Framer but not live yet.
+        {s.framer_publish_error && <> Last try {s.framer_publish_tried_at ? ago(s.framer_publish_tried_at) : ""}: {s.framer_publish_error}.</>}
+        {s.framer_auto_publish !== false ? " It retries automatically." : " Auto publish is off, so publish in Framer or below."}
+      </p>
+      <button className="small" onClick={() => run(() => websitePublish(), (r) => r?.busy
+        ? { text: "A website update is running. Try again in a minute.", warn: true }
+        : r?.published === true ? "Website published" : { text: `Still not published: ${r?.published}`, warn: true })}>
+        Publish now
+      </button>
+    </div>
+  );
+}
+
 function ago(iso) {
   const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
   if (mins < 1) return "just now";

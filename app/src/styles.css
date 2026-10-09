@@ -543,3 +543,6 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .switch.compact .switch-label { font-size: 12px; }
 .card > label.check { display: flex; align-items: center; gap: 8px; font-size: 14px; margin: 6px 0; }
 .card > label.check input { width: auto; margin: 0; }
+
+.card-note { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.card-note p { margin: 0; flex: 1 1 240px; }

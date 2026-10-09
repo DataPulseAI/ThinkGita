@@ -114,7 +114,14 @@ export function requestSummary(type, d = {}) {
 
 // Pushes circles marked as changed to the website (Framer CMS) and publishes. all: re-push every circle.
 export async function websiteSync(all = false) {
-  const { data, error } = await supabase.functions.invoke("framer-sync", { body: { action: "sync", all } });
+  return framerCall({ action: "sync", all });
+}
+// Publishes the website now (used when an earlier publish failed and is waiting to retry).
+export async function websitePublish() {
+  return framerCall({ action: "publish" });
+}
+async function framerCall(body) {
+  const { data, error } = await supabase.functions.invoke("framer-sync", { body });
   if (error) {
     let msg = error.message;
     try { msg = (await error.context.json()).error ?? msg; } catch (_) { /* keep generic message */ }
