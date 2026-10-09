@@ -524,3 +524,9 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .email-view { width: max-content; }
 .email-frame { width: 100%; height: 200px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 .email-plain { white-space: pre-wrap; font: 13px/1.5 ui-monospace, Menlo, monospace; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin: 0; max-height: 520px; overflow: auto; }
+
+/* Co-facilitators in the circle panel */
+.cofac-row { padding: 6px 0; border-bottom: 1px solid var(--line, rgba(0,0,0,.08)); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.cofac-row:last-of-type { border-bottom: 0; }
+.modal label.check { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 14px; }
+.modal label.check input { width: auto; margin: 0; }

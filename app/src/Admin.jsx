@@ -91,7 +91,7 @@ function When({ c, block }) {
 // Turn database errors into plain English.
 function friendlyError(e) {
   const m = e?.message ?? String(e);
-  if (/no_licence_clash/.test(m)) return "That licence is already booked at this time. Pick another time or licence.";
+  if (/no_licence_clash/.test(m)) return "That licence already has 2 meetings at this time (Zoom's limit). Pick another time or licence.";
   if (/term_order/.test(m)) return "The term end date must be after the term start date.";
   return m;
 }
@@ -105,13 +105,22 @@ function readRoute() {
 }
 
 // One line about the facilitator email for the message after an action ("Email sent to ...").
+// Co-facilitators of a circle (people who share it with the main facilitator).
+const coFacs = (c) => (c?.cofacilitators ?? []).map((x) => x.facilitator).filter(Boolean);
+// "who gets the email" text for toasts: the facilitator, plus how many co-facilitators.
+const teamTo = (c) => {
+  const n = coFacs(c).length;
+  return c?.facilitator?.email ? `${c.facilitator.email}${n ? ` and ${n} co-facilitator${n > 1 ? "s" : ""}` : ""}` : undefined;
+};
+
 function emailNote(result, to) {
   if (!result || /^not needed/.test(result)) return "";
+  if (/^not sent \(approved without email\)/.test(result)) return " No email sent, as chosen. Use Resend details email when ready.";
   if (result === "sent") return ` Email sent${to ? ` to ${to}` : ""}.`;
   if (/^skipped/.test(result)) return ` Email not sent: ${result.replace(/^skipped \(|\)$/g, "")}.`;
   return ` Email failed: ${result.replace(/^failed: /, "")}. See Setup, Sent emails.`;
 }
-const emailFailed = (result) => Boolean(result) && result !== "sent" && !/^not needed/.test(result);
+const emailFailed = (result) => Boolean(result) && result !== "sent" && !/^not needed|^not sent \(approved without/.test(result);
 // Build a toast from an action result that may include an email outcome.
 const withEmail = (text, result, to) => ({ text: `${text}${emailNote(result, to)}`, warn: emailFailed(result) });
 const INVITE_NOTE = { invited: " Sign-in invite sent.", "already has an account": " They already have a sign-in." };
@@ -154,7 +163,7 @@ export default function Admin() {
     const user = session?.user;
     const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString();
     const [circles, licences, settings, requests, log, templates, admins, failed] = await Promise.all([
-      fetchAll(() => supabase.from("circles").select("*, facilitator:facilitators(*), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time").order("id")),
+      fetchAll(() => supabase.from("circles").select("*, facilitator:facilitators!circles_facilitator_id_fkey(*), cofacilitators:circle_cofacilitators(facilitator:facilitators(*)), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time").order("id")),
       supabase.from("licences").select("*").order("sort_order").order("label"),
       supabase.from("settings").select("*").eq("id", 1).single(),
       fetchAll(() => supabase.from("change_requests").select("*, circle:circles(name)").order("created_at", { ascending: false }).order("id")),
@@ -653,7 +662,7 @@ function Circles({ data, onSelect, onNew, onDelete, initial }) {
   const [status, setStatus] = useState(initial && FILTERS[initial] ? initial : (initial ? "all" : "active"));
   const rows = useMemo(() => data.circles.filter((c) => {
     if (!FILTERS[status].match(c.status)) return false;
-    const hay = `${c.name} ${c.facilitator?.name ?? ""} ${c.facilitator?.email ?? ""} ${c.licence?.label ?? ""} ${c.language ?? ""}`.toLowerCase();
+    const hay = `${c.name} ${c.facilitator?.name ?? ""} ${c.facilitator?.email ?? ""} ${coFacs(c).map((f) => `${f.name} ${f.email}`).join(" ")} ${c.licence?.label ?? ""} ${c.language ?? ""}`.toLowerCase();
     return hay.includes(q.toLowerCase());
   }), [data.circles, q, status]);
 
@@ -679,7 +688,8 @@ function Circles({ data, onSelect, onNew, onDelete, initial }) {
                   {c.name}
                   <div className="muted small">{[c.circle_type, c.language].filter(Boolean).join(" · ")}</div>
                 </td>
-                <td>{c.facilitator?.name}<div className="muted small">{c.facilitator?.email}</div></td>
+                <td>{c.facilitator?.name}<div className="muted small">{c.facilitator?.email}</div>
+                  {coFacs(c).length > 0 && <div className="muted small">+ {coFacs(c).map((f) => f.name).join(", ")}</div>}</td>
                 <td><When c={c} block /></td>
                 <td>{c.licence?.label ?? <span className="muted">none</span>}{c.licence?.is_mock && <span className="tag">mock</span>}</td>
                 <td><span className={`pill st-${c.status}`}>{STATUS_LABEL[c.status]}</span></td>
@@ -852,7 +862,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
       }
       const { data: out, error } = await supabase.from("circles")
         .update({ licence_id: f.licence_id, status: "pending", conflict_reason: null }).eq("id", id).select("*").single();
-      if (error) throw new Error(/no_licence_clash/.test(error.message) ? "That licence is already booked at this time" : error.message);
+      if (error) throw new Error(/no_licence_clash/.test(error.message) ? "That licence already has 2 meetings at this time (Zoom's limit)" : error.message);
       return out;
     }, (out) => `Saved: ${STATUS_LABEL[out.status]}${out.preference_used === 2 ? " (using 2nd preference)" : ""}`);
     if (ok) onClose();
@@ -884,7 +894,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
     if (!target) return;
     if (!confirm(`Move "${circle.name}" to ${target.label}?\n\nThis creates a new Zoom meeting on ${target.label}, so the join link changes. The facilitator is emailed the new link, and the old meeting is deleted. Remember to update the WhatsApp group.`)) return;
     setBusy(true);
-    await run(() => adminAction("move_licence", circle.id, { licence_id: moveTo }), (o) => withEmail(`Moved to ${o.licence}, new Zoom link created.`, o.email, circle.facilitator?.email));
+    await run(() => adminAction("move_licence", circle.id, { licence_id: moveTo }), (o) => withEmail(`Moved to ${o.licence}, new Zoom link created.`, o.email, teamTo(circle)));
     setBusy(false);
     setMoveTo("");
   }
@@ -997,7 +1007,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
             </div>
             <p className="muted small">Facilitator version includes the host key. Participants version is safe to post in the WhatsApp group.</p>
             <div className="actions">
-              <button onClick={() => run(() => adminAction("resend", circle.id), (o) => withEmail("Details email:", o.email, circle.facilitator?.email))}>Resend details email</button>
+              <button onClick={() => run(() => adminAction("resend", circle.id), (o) => withEmail("Details email:", o.email, teamTo(circle)))}>Resend details email</button>
               {onAttendance && <button onClick={() => onAttendance(circle.id)}>See attendance</button>}
               <button className="danger" onClick={() => confirm("Delete the Zoom meeting and end this circle?") && run(() => adminAction("cancel", circle.id), "Circle ended").then((ok) => ok && onClose())}>End circle</button>
             </div>
@@ -1031,6 +1041,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
           </div>
         )}
 
+        {circle && <CoFacilitators circle={circle} run={run} editable={editable} />}
         {circle && <CircleEmails circle={circle} onAll={onEmails} />}
 
         {requests.length > 0 && (
@@ -1150,6 +1161,70 @@ const EMAIL_KIND = { approved: "Circle details", updated: "Details changed", tes
 const EMAIL_STATUS = { sent: ["Sent", "st-live"], failed: ["Failed", "st-conflict"], skipped: ["Not sent", "st-pending"] };
 
 // Last few emails for one circle, inside the circle panel.
+// People who run the circle with the main facilitator: they see it in their portal and get its emails.
+function CoFacilitators({ circle, run, editable }) {
+  const list = coFacs(circle);
+  const [adding, setAdding] = useState(false);
+  const [p, setP] = useState({ name: "", email: "", phone: "" });
+  const set = (k) => (e) => setP({ ...p, [k]: e.target.value });
+  const email = p.email.trim().toLowerCase();
+  const valid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
+  async function add(e) {
+    e.preventDefault();
+    if (!valid) return;
+    const ok = await run(async () => {
+      if (email === circle.facilitator?.email) throw new Error("That's already the main facilitator.");
+      let { data: fac } = await supabase.from("facilitators").select("id, phone").eq("email", email).maybeSingle();
+      if (!fac) {
+        const { data: created, error } = await supabase.from("facilitators")
+          .insert({ email, name: p.name.trim() || email, phone: p.phone.trim() || null }).select("id, phone").single();
+        if (error) throw error;
+        fac = created;
+      } else if (!fac.phone && p.phone.trim()) {
+        await supabase.from("facilitators").update({ phone: p.phone.trim() }).eq("id", fac.id);
+      }
+      const { error } = await supabase.from("circle_cofacilitators").insert({ circle_id: circle.id, facilitator_id: fac.id });
+      if (error) throw /duplicate/.test(error.message) ? new Error("They're already on this circle.") : error;
+    }, circle.status === "live"
+      ? `${p.name.trim() || email} added. They'll get future emails; use Resend details email to send them the details now.`
+      : `${p.name.trim() || email} added.`);
+    if (ok) { setP({ name: "", email: "", phone: "" }); setAdding(false); }
+  }
+  return (
+    <div className="details">
+      <div className="details-head">
+        <span className="section-title">Co-facilitators</span>
+        {editable && !adding && <button className="link small" onClick={() => setAdding(true)}>Add co-facilitator</button>}
+      </div>
+      {!list.length && !adding && <p className="muted small">None. Co-facilitators see this circle when they sign in and get its emails.</p>}
+      {list.map((f) => (
+        <div key={f.id} className="row cofac-row">
+          <div className="row-main small"><b>{f.name}</b> · {f.email}{f.phone ? ` · ${f.phone}` : ""}</div>
+          {editable && (
+            <button className="link small" onClick={() => confirm(`Remove ${f.name} from this circle? They keep their other circles.`) && run(async () => {
+              const { error } = await supabase.from("circle_cofacilitators").delete().eq("circle_id", circle.id).eq("facilitator_id", f.id);
+              if (error) throw error;
+            }, `${f.name} removed from this circle`)}>Remove</button>
+          )}
+        </div>
+      ))}
+      {adding && (
+        <form className="form" onSubmit={add}>
+          <div className="grid3">
+            <label>Name<input value={p.name} onChange={set("name")} autoFocus /></label>
+            <label>Email<input type="email" value={p.email} onChange={set("email")} required /></label>
+            <label>Phone<input value={p.phone} onChange={set("phone")} placeholder="+44…" /></label>
+          </div>
+          <div className="actions">
+            <button type="button" className="ghost" onClick={() => setAdding(false)}>Cancel</button>
+            <button className="primary" disabled={!valid}>Add</button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
 function CircleEmails({ circle, onAll }) {
   const [rows, setRows] = useState(null);
   useEffect(() => {
@@ -1244,9 +1319,9 @@ function EmailLog({ data, run, onSelect, initial }) {
   async function resend(r) {
     const c = data.circles.find((x) => x.id === r.circle_id);
     if (!c || c.status !== "live") return;
-    if (!confirm(`Send the current details email for "${c.name}" to ${c.facilitator?.email ?? "the facilitator"} again?`)) return;
+    if (!confirm(`Send the current details email for "${c.name}" to ${teamTo(c) ?? "the facilitator"} again?`)) return;
     setBusy(r.id);
-    await run(() => adminAction("resend", c.id), (o) => withEmail("Details email:", o.email, c.facilitator?.email));
+    await run(() => adminAction("resend", c.id), (o) => withEmail("Details email:", o.email, teamTo(c)));
     setBusy(null);
     load();
   }
@@ -1867,8 +1942,10 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
   const [wa, setWa] = useState(circle.whatsapp_group_link ?? "");
   const [yt, setYt] = useState(circle.youtube_playlist_link ?? "");
   const [name, setName] = useState(data.me?.name ?? "");
+  const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
   const licence = data.licences.find((l) => l.id === circle.licence_id);
+  const team = [circle.facilitator, ...coFacs(circle)].filter(Boolean);
   const badUrl = (v) => v.trim() && !/^https?:\/\/\S+$/i.test(v.trim());
   const draft = { ...circle, whatsapp_group_link: wa.trim() || null, youtube_playlist_link: yt.trim() || null };
   const gaps = emailGaps(draft, { ...data, me: { ...data.me, name: name.trim() } });
@@ -1877,7 +1954,7 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
   async function approve(e) {
     e.preventDefault();
     if (badUrl(wa) || badUrl(yt) || !name.trim()) return;
-    if ((!wa.trim() || !yt.trim()) && !confirm(`${!wa.trim() ? "No WhatsApp group" : "No YouTube playlist"} yet. The email will say "to follow" there. Approve anyway?`)) return;
+    if (notify && (!wa.trim() || !yt.trim()) && !confirm(`${!wa.trim() ? "No WhatsApp group" : "No YouTube playlist"} yet. The email will say "to follow" there. Approve anyway?`)) return;
     setBusy(true);
     onBusy?.(true);
     const ok = await run(async () => {
@@ -1888,8 +1965,8 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
       const { error } = await supabase.from("circles")
         .update({ whatsapp_group_link: wa.trim() || null, youtube_playlist_link: yt.trim() || null }).eq("id", circle.id);
       if (error) throw error;
-      return adminAction("provision", circle.id);
-    }, (o) => withEmail(`${o.mock ? "Mock meeting" : "Zoom meeting"} created.${INVITE_NOTE[o.invite] ?? (o.invite ? ` Invite: ${o.invite}.` : "")}`, o.email, circle.facilitator?.email));
+      return adminAction("provision", circle.id, { notify });
+    }, (o) => withEmail(`${o.mock ? "Mock meeting" : "Zoom meeting"} created.${!notify ? "" : INVITE_NOTE[o.invite] ?? (o.invite ? ` Invite: ${o.invite}.` : "")}`, o.email, teamTo(circle)));
     setBusy(false);
     onBusy?.(false);
     if (ok) onClose();
@@ -1900,8 +1977,8 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
       <form className="card modal approve-modal" onClick={(e) => e.stopPropagation()} onSubmit={approve}>
         <h2>Approve {circle.name}</h2>
         <p className="muted small">
-          Creates the weekly Zoom meeting on {licence?.label ?? "its licence"}{licence?.is_mock ? " (mock)" : ""} and emails{" "}
-          {circle.facilitator?.name || "the facilitator"} their details.
+          Creates the weekly Zoom meeting on {licence?.label ?? "its licence"}{licence?.is_mock ? " (mock)" : ""}
+          {notify ? <> and emails {team.map((f) => f.name).join(", ") || "the facilitator"} their details and a sign-in invite.</> : <>. Nobody is emailed.</>}
         </p>
         <label>WhatsApp group link
           <input type="url" autoFocus value={wa} onChange={(e) => setWa(e.target.value)} placeholder="https://chat.whatsapp.com/…" />
@@ -1911,6 +1988,11 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
           <input type="url" value={yt} onChange={(e) => setYt(e.target.value)} placeholder={data.settings.youtube_playlist_link || "https://youtube.com/playlist?list=…"} />
         </label>
         {badUrl(yt) && <p className="error small">That doesn't look like a link. It should start with https://</p>}
+        <label className="check">
+          <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
+          Email {team.length > 1 ? `all ${team.length} facilitators` : "the facilitator"} their details and a sign-in invite
+        </label>
+        {!notify && <p className="muted small">You can send it later from the circle panel with Resend details email.</p>}
         <label>Email signed by
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" required />
         </label>
@@ -1920,7 +2002,7 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
         )}
         <div className="actions">
           <button type="button" className="ghost" disabled={busy} onClick={onClose}>Cancel</button>
-          <button className="primary" disabled={busy || badUrl(wa) || badUrl(yt) || !name.trim()}>{busy ? "Creating…" : "Approve + create Zoom"}</button>
+          <button className="primary" disabled={busy || badUrl(wa) || badUrl(yt) || !name.trim()}>{busy ? "Creating…" : notify ? "Approve + create Zoom" : "Create Zoom, no email"}</button>
         </div>
       </form>
     </div>

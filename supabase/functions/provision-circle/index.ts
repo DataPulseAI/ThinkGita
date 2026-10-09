@@ -128,6 +128,22 @@ async function sendDetailsEmail(key: TemplateKey, circle: any, facilitator: any,
   return await sendEmail(facilitator.email, subject, html, text, meta, settings?.support_contact || undefined);
 }
 
+// Everyone on a circle: the facilitator plus any co-facilitators (one email each, personalised).
+async function circleTeam(circleId: string, primary: any) {
+  const { data } = await db.from("circle_cofacilitators").select("facilitator:facilitators(*)").eq("circle_id", circleId);
+  const seen = new Set<string>();
+  return [primary, ...(data ?? []).map((r: any) => r.facilitator)]
+    .filter((f) => f?.email && !seen.has(f.email) && seen.add(f.email));
+}
+async function sendDetailsToTeam(key: TemplateKey, circle: any, primary: any, licence: any, actor: string) {
+  const team = await circleTeam(circle.id, primary);
+  if (!team.length) return await sendDetailsEmail(key, circle, null, licence, actor); // logged as skipped
+  const results: string[] = [];
+  for (const f of team) results.push(await sendDetailsEmail(key, circle, f, licence, actor));
+  const bad = results.find((x) => x !== "sent");
+  return !bad ? "sent" : team.length > 1 ? `${results.filter((x) => x === "sent").length} of ${team.length} sent; ${bad}` : bad;
+}
+
 // Send a rendered template (saved or unsaved draft) for one circle to the admin's own inbox.
 async function testEmail(circleId: string, actor: string, key: TemplateKey, draft?: { subject?: string; body?: string }) {
   if (!EMAIL_READY) throw new Error(EMAIL_MISSING);
@@ -171,7 +187,7 @@ async function audit(actor: string, action: string, circle_id: string | null, de
 async function loadCircle(id: string) {
   const { data, error } = await db
     .from("circles")
-    .select("*, facilitator:facilitators(*), licence:licences(*)")
+    .select("*, facilitator:facilitators!circles_facilitator_id_fkey(*), licence:licences(*)")
     .eq("id", id)
     .single();
   if (error) throw new Error(error.message);
@@ -189,7 +205,7 @@ function mockMeeting() {
 }
 
 // ---------- Actions ----------
-async function provision(circleId: string, actor: string) {
+async function provision(circleId: string, actor: string, notify = true) {
   const c = await loadCircle(circleId);
   if (c.status !== "pending") throw new Error(c.status === "approved" ? "This circle is already being approved" : `Circle is ${c.status}, not awaiting approval`);
   if (!c.licence) throw new Error("Circle has no licence assigned");
@@ -270,9 +286,18 @@ async function provision(circleId: string, actor: string) {
     throw new Error(`Saving failed, so the Zoom meeting was removed again: ${error.message}`);
   }
 
-  const invite = await inviteFacilitator(c.facilitator.email, { kind: "invite", circle: c, actor });
-  const email = await sendDetailsEmail("approved", updated, c.facilitator, c.licence, actor);
-  await audit(actor, "provision", c.id, { meeting_id: meeting.id, invite, email, mock: Boolean(c.licence.is_mock) });
+  let invite = "not sent (approved without email)";
+  let email = "not sent (approved without email)";
+  if (notify) {
+    const team = await circleTeam(c.id, c.facilitator);
+    const invites: string[] = [];
+    for (const f of team) invites.push(await inviteFacilitator(f.email, { kind: "invite", circle: c, actor }));
+    invite = invites.find((x) => x.startsWith("invite failed")) ?? invites[0] ?? "no facilitator";
+    email = await sendDetailsToTeam("approved", updated, c.facilitator, c.licence, actor);
+  } else {
+    await logEmail({ kind: "approved", circle: updated, actor }, c.facilitator?.email ?? null, null, "skipped", "Approved without emailing (admin's choice). Use Resend details when ready.");
+  }
+  await audit(actor, "provision", c.id, { meeting_id: meeting.id, invite, email, notify, mock: Boolean(c.licence.is_mock) });
   return { status: "live", meeting_id: meeting.id, join_url: meeting.join_url, invite, email, mock: Boolean(c.licence.is_mock) };
   } catch (e) {
     await release();
@@ -297,7 +322,7 @@ async function cancel(circleId: string, actor: string) {
 async function resend(circleId: string, actor: string) {
   const c = await loadCircle(circleId);
   if (c.status !== "live") throw new Error("Only live circles have details to send");
-  const email = await sendDetailsEmail("approved", c, c.facilitator, c.licence, actor);
+  const email = await sendDetailsToTeam("approved", c, c.facilitator, c.licence, actor);
   await audit(actor, "resend", c.id, { email });
   return { email };
 }
@@ -349,7 +374,7 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
   }
 
   const { data: final } = await db.from("circles").update({ starts_on: startsOn }).eq("id", c.id).select("*").single();
-  const email = await sendDetailsEmail("updated", final, c.facilitator, c.licence, actor);
+  const email = await sendDetailsToTeam("updated", final, c.facilitator, c.licence, actor);
   await audit(actor, "reschedule", c.id, { from: old, to: clean, email });
   return { status: "live", starts_on: startsOn, email };
 }
@@ -458,7 +483,7 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
   if (c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
     await zoom(`/meetings/${c.zoom_meeting_id}`, { method: "DELETE" }).catch(() => {});
   }
-  const email = await sendDetailsEmail("updated", updated, c.facilitator, target, actor);
+  const email = await sendDetailsToTeam("updated", updated, c.facilitator, target, actor);
   await audit(actor, "move_licence", c.id, { from: c.licence?.label, to: target.label, old_meeting: c.zoom_meeting_id, new_meeting: meeting.id, email });
   return { licence: target.label, join_url: meeting.join_url, email };
 }
@@ -777,9 +802,9 @@ Deno.serve(async (req) => {
   if (!admin) return json({ error: "Admins only" }, 403);
 
   try {
-    const { action, circle_id, patch, facilitator, date, licence_id, template_key, template } = await req.json();
+    const { action, circle_id, patch, facilitator, date, licence_id, template_key, template, notify } = await req.json();
     switch (action) {
-      case "provision": return json(await provision(circle_id, email));
+      case "provision": return json(await provision(circle_id, email, notify !== false));
       case "cancel": return json(await cancel(circle_id, email));
       case "resend": return json(await resend(circle_id, email));
       case "sync_licences": return json(await syncLicences(email));
