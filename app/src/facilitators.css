@@ -28,7 +28,7 @@
 .fac-list { display: grid; }
 .fac-row {
   display: grid; align-items: center; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--line);
-  grid-template-columns: minmax(200px, 2fr) minmax(190px, 1.6fr) minmax(120px, 1fr) minmax(170px, 1.2fr) minmax(100px, .8fr);
+  grid-template-columns: minmax(190px, 1.6fr) minmax(180px, 1.4fr) minmax(110px, .9fr) minmax(310px, 2.1fr) minmax(100px, .8fr);
 }
 .fac-row:not(.fac-head) { cursor: pointer; }
 .fac-row:not(.fac-head):hover { background: var(--surface-2); }
@@ -48,7 +48,9 @@
 .pill.fac-co { background: var(--surface-2); border-color: var(--line); color: var(--muted); }
 .fac-strips { display: grid; gap: 3px; }
 .fac-strip-row { display: flex; align-items: center; gap: 6px; }
-.fac-strip-day { width: 28px; font-size: 11px; color: var(--muted); font-weight: 600; }
+.fac-strip-label { width: 168px; flex: none; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fac-strip-label b { color: var(--ink); font-weight: 600; }
+.fac-strip-label.warn b { color: var(--warn); }
 .fac-last { display: grid; gap: 1px; }
 .fac-empty { padding: 16px 8px; }
 

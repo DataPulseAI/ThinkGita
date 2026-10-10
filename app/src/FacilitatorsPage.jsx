@@ -2,7 +2,7 @@
 // their live circles have met over the last 8 weeks, from Zoom attendance (attendance_sessions).
 // Pure helpers (time zones, weekly consistency, flags, filters) are exported for the unit tests.
 import { useEffect, useMemo, useState } from "react";
-import { supabase, adminAction, STATUS_LABEL, ukWhen, localWhen, isUk, UK_TZ } from "./lib.js";
+import { supabase, adminAction, STATUS_LABEL, ukWhen, localWhen, isUk, UK_TZ, DAYS, timeLabel, zoneLabel } from "./lib.js";
 import { CopyButton, Hover } from "./ui.jsx";
 import "./facilitators.css";
 
@@ -218,7 +218,8 @@ export function buildRows(facilitators, circles, sessions, now) {
       .map((x) => ({ ...x, h: health.get(x.c.id) }));
     const live = all.filter((x) => x.c.status === "live");
     const running = live.filter((x) => x.h.running);
-    const circleFlags = [...new Set(running.flatMap((x) => x.h.flags))];
+    // With several running circles, say which circle each flag is about.
+    const circleFlags = [...new Set(running.flatMap((x) => (running.length > 1 ? x.h.flags.map((f) => `${circleLabel(x.c).what} ${circleLabel(x.c).when}: ${f}`) : x.h.flags)))];
     let status = "none";
     if (circleFlags.length) status = "check";
     else if (running.length) status = "well";
@@ -276,6 +277,15 @@ const ymdToMs = (ymd) => Date.parse(`${ymd}T00:00:00Z`);
 const fmtYmd = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 const shortCircle = (name) => String(name ?? "").replace(/^Gita Circles \| /, "");
+// Short label that tells a facilitator's circles apart: type and language, then day and time in the circle's own zone.
+// { what: "Bhakti, Spanish", when: "Thu 6pm CDMX" }
+export function circleLabel(c) {
+  const type = clean(c?.circle_type).replace(/^Think (?=Gita)/i, "").replace(/ Circles?$/i, "") || "Circle";
+  const lang = clean(c?.language);
+  const what = lang && !/^english$/i.test(lang) ? `${type}, ${lang}` : type;
+  const when = c?.weekday && c?.start_time ? `${DAYS[c.weekday]} ${timeLabel(String(c.start_time).slice(0, 5))} ${zoneLabel(c.timezone || UK_TZ)}` : "";
+  return { what, when };
+}
 
 const WEEK_LABEL = {
   held: "Held", host: "Host only, nobody joined", missed: "No session", waiting: "Not synced yet",
@@ -298,19 +308,19 @@ function Avatar({ fac, size = 36 }) {
 }
 
 // Eight squares, oldest on the left. Hovering shows the date and what happened each week.
-export function WeekStrip({ weeks, large }) {
+export function WeekStrip({ weeks, large, title }) {
   if (!weeks.length) return null;
   const dots = (
     <span className={`fac-strip ${large ? "large" : ""}`} tabIndex={0}
-      aria-label={weeks.map((w) => `${fmtYmd(w.uk)}: ${weekText(w)}`).join("; ")}>
+      aria-label={`${title ? `${title}. ` : ""}${weeks.map((w) => `${fmtYmd(w.uk)}: ${weekText(w)}`).join("; ")}`}>
       {weeks.map((w) => <i key={w.ymd} className={`wk wk-${w.state}`} />)}
     </span>
   );
   return (
     <Hover content={(
       <>
-        <div className="hc-title">Last {weeks.length} weeks</div>
-        <div className="hc-sub">Scheduled dates in UK time</div>
+        <div className="hc-title">{title || `Last ${weeks.length} weeks`}</div>
+        <div className="hc-sub">{title ? `Last ${weeks.length} weeks, s` : "S"}cheduled dates in UK time</div>
         <dl className="hc-rows hc-times">
           {[...weeks].reverse().map((w) => (
             <Fragmentish key={w.ymd} dt={fmtYmd(w.uk)} dd={<><i className={`wk wk-${w.state} wk-inline`} /> {weekText(w)}</>} />
@@ -357,13 +367,17 @@ function RowStrips({ r }) {
   }
   return (
     <div className="fac-strips">
-      {shown.slice(0, 3).map((x) => (
-        <div key={x.c.id} className="fac-strip-row">
-          <span className="fac-strip-day" title={shortCircle(x.c.name)}>{ukWhen(x.c).split(" ")[0]}</span>
-          <WeekStrip weeks={x.h.weeks} />
-          {x.role === "co" && <span className="muted small">co</span>}
-        </div>
-      ))}
+      {shown.slice(0, 3).map((x) => {
+        const l = circleLabel(x.c);
+        return (
+          <div key={x.c.id} className="fac-strip-row">
+            <span className={`fac-strip-label ${x.h.flags.length ? "warn" : ""}`} title={shortCircle(x.c.name)}>
+              <b>{l.what}</b> <span>{l.when}</span>{x.role === "co" && <span> · co</span>}
+            </span>
+            <WeekStrip weeks={x.h.weeks} title={`${l.what} ${l.when}`} />
+          </div>
+        );
+      })}
       {shown.length > 3 && <span className="muted small">+{shown.length - 3} more</span>}
     </div>
   );

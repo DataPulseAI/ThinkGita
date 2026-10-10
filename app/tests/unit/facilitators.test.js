@@ -254,3 +254,23 @@ describe("facilitatorUpdate and formProblems", () => {
     expect(fp.formProblems(form({ name: "asha@example.org" })).name).toMatch(/not an email/);
   });
 });
+
+describe("circle labels on the week strips", () => {
+  it("names the type, language, day and time in the circle's own zone", () => {
+    expect(fp.circleLabel(circle({ circle_type: "Bhakti Circle", language: "Spanish", weekday: 4, start_time: "18:00:00", timezone: "America/Mexico_City" })))
+      .toEqual({ what: "Bhakti, Spanish", when: "Thu 6pm CDMX" });
+    expect(fp.circleLabel(circle({ circle_type: "Gita Circle", language: "English", weekday: 2, start_time: "19:30:00" })))
+      .toEqual({ what: "Gita", when: "Tue 7.30pm UK" });
+    expect(fp.circleLabel(circle({ circle_type: "Think Gita Circle", language: null, timezone: null })).what).toBe("Gita");
+    expect(fp.circleLabel(circle({ circle_type: "Morning Japa" })).what).toBe("Morning Japa");
+    expect(fp.circleLabel(circle({ circle_type: null })).what).toBe("Circle");
+  });
+  it("says which circle a flag is about when a facilitator runs several", () => {
+    const f = { id: "f1", name: "Olivia Example", email: "o@example.org" };
+    const a = circle({ id: "a", circle_type: "Gita Circle", language: "Spanish", facilitator: f, zoom_meeting_id: "1" });
+    const b = circle({ id: "b", circle_type: "Bhakti Circle", language: "Spanish", weekday: 4, start_time: "18:00:00", timezone: "America/Mexico_City", facilitator: f, zoom_meeting_id: "2" });
+    const sessions = mondays("08-17", "08-24", "08-31", "09-07", "09-14", "09-21", "09-28", "10-05").map((s) => ({ ...s, circle_id: "a" }));
+    const [row] = fp.buildRows([f], [a, b], sessions, NOW);
+    expect(row.circleFlags).toEqual(["Bhakti, Spanish Thu 6pm CDMX: No sessions on record"]);
+  });
+});
