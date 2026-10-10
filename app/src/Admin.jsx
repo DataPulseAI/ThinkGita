@@ -4,7 +4,8 @@ import {
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
 } from "./lib.js";
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
-import { WebsiteReadiness, WebsiteFields, isReadinessNote } from "./WebsiteFields.jsx";
+import { WebsiteReadiness, WebsiteFields, isReadinessNote, websiteMissing } from "./WebsiteFields.jsx";
+import { WebsitePage } from "./WebsitePage.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders } from "./emailTemplate.js";
 
 const ACTIVE = ["pending", "approved", "live"];
@@ -14,7 +15,7 @@ const NAV = [
   { label: "Queue", tabs: [["Queue", "Queue"]] },
   { label: "Circles", tabs: [["Circles", "All circles"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
   { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance"], ["Insights", "Attendance insights"]] },
-  { label: "Setup", tabs: [["Emails", "Email templates"], ["EmailLog", "Sent emails"], ["Settings", "Settings"]] },
+  { label: "Setup", tabs: [["Website", "Website"], ["Emails", "Email templates"], ["EmailLog", "Sent emails"], ["Settings", "Settings"]] },
 ];
 
 function NavGroup({ group, tab, setTab, counts }) {
@@ -322,6 +323,7 @@ export default function Admin() {
         {tab === "Insights" && <Insights data={data} openMeeting={(k) => go("Attendance", k)} onSelect={select} />}
         {tab === "Emails" && <Emails data={data} run={run} />}
         {tab === "EmailLog" && <EmailLog key={sub ?? ""} data={data} run={run} onSelect={select} initial={sub} />}
+        {tab === "Website" && <WebsitePage data={data} run={run} onSelect={select} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
       </main>
       {selected && (
@@ -1353,8 +1355,19 @@ function WebsiteSyncState({ circle }) {
   if (circle.framer_synced_at) return <>Website copy updated {ago(circle.framer_synced_at)}.</>;
   return null;
 }
+// Why a circle can't be switched on yet (null when it can). Same rules as framer-sync.
+function websiteBlock(c) {
+  if (["ended", "rejected"].includes(c.status)) return "Ended and rejected circles can't be listed";
+  if (c.status === "conflict") return "Needs a licence before it can be listed";
+  if (c.status === "paused") return "Paused circles aren't listed";
+  if (c.is_demo || /\btest\b/i.test(c.name ?? "") || c.licence?.is_mock) return "Test circles are never listed";
+  const m = websiteMissing(c);
+  return m.length ? `Not ready for the website. Needs: ${m.join(", ")}` : null;
+}
 function WebsiteSwitch({ circle, run, compact }) {
   const on = Boolean(circle.website_visible);
+  // Off and not allowed: the switch is disabled and says why on hover. Already on: it can always be turned off.
+  const block = on ? null : websiteBlock(circle);
   const [busy, setBusy] = useState(false);
   const toggle = async () => {
     setBusy(true);
@@ -1365,11 +1378,11 @@ function WebsiteSwitch({ circle, run, compact }) {
     setBusy(false);
   };
   return (
-    <button type="button" role="switch" aria-checked={on} disabled={busy} onClick={toggle}
-      className={`switch ${on ? "on" : ""} ${compact ? "compact" : ""}`}
-      title={on ? "Shown on website. Click to hide." : "Hidden from website. Click to show."}>
+    <button type="button" role="switch" aria-checked={on} aria-disabled={Boolean(block)} disabled={busy} onClick={block ? undefined : toggle}
+      className={`switch ${on ? "on" : ""} ${compact ? "compact" : ""} ${block ? "blocked" : ""}`}
+      title={block ?? (on ? "Shown on website. Click to hide." : "Hidden from website. Click to show.")}>
       <span className="switch-track"><span className="switch-dot" /></span>
-      <span className="switch-label">{on ? "Shown" : "Hidden"}</span>
+      <span className="switch-label">{on ? "Shown" : block && websiteMissing(circle).length ? "Not ready" : "Hidden"}</span>
     </button>
   );
 }

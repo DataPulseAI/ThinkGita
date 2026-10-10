@@ -580,3 +580,7 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 @media (max-width: 640px) { .day-count { margin: 4px 6px 0 0; } }
 /* The circle panel sits above the sticky page tabs (they hid its status line). */
 .drawer-bg { z-index: 25; }
+/* Website switch that can't be turned on yet: kept hoverable so the reason shows. */
+.switch.blocked { cursor: not-allowed; }
+.switch.blocked .switch-track { background: var(--surface-2); border: 1px dashed var(--line); }
+.switch.blocked .switch-dot { box-shadow: none; background: var(--line); }

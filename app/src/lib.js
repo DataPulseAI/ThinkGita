@@ -120,6 +120,18 @@ export async function websiteSync(all = false) {
 export async function websitePublish() {
   return framerCall({ action: "publish" });
 }
+// Read-only: every Course item in Framer as it is now (all fields), and for linked circles what the sync would write.
+export async function websiteSnapshot() {
+  return framerCall({ action: "snapshot" });
+}
+// Read-only: every circle that could be listed, with its card as the sync would write it and what it is missing.
+export async function websitePreview() {
+  return framerCall({ action: "preview" });
+}
+// Show/hide or reorder a hand-made website item that no circle is linked to.
+export async function websiteSetItem(id, change) {
+  return framerCall({ action: "set_item", id, ...change });
+}
 async function framerCall(body) {
   const { data, error } = await supabase.functions.invoke("framer-sync", { body });
   if (error) {

@@ -4,6 +4,8 @@
 // POST { action: "snapshot" }        admins: read-only. Every Course item with its current values, and for linked circles
 //                                   the values the sync would write, so edits made in Framer can be spotted.
 // POST { action: "publish" }         admins: publish the site now (retries a failed publish).
+// POST { action: "preview" }         admins: read-only. Every circle that could be listed, with its card and what is missing.
+// POST { action: "set_item", id, draft?, order? }  admins: show/hide or reorder a hand-made item no circle is linked to.
 // The cron tick (public.framer_sync_tick, every 2 minutes) calls { action: "sync" } with the x-cron-secret header when
 // circles are dirty or a publish is pending, so failed publishes and changes made outside the dashboard still go live.
 // Publishing is tracked in settings.framer_publish_pending: it is set when a published (or to-be-published) item changes
@@ -272,10 +274,12 @@ async function sync(actor: string, opts: { all?: boolean; preview?: boolean } = 
 async function syncInner(actor: string, { all = false, preview = false } = {}) {
   const circles = await loadCircles(all);
   if (preview) {
-    return circles.filter(wantsItem).map((c) => ({
-      circle: c.name, item: c.framer_item_id, draft: draftFor(c), missing: websiteMissing(c), title: title(c), time: timeText(c),
+    // Every circle that could be listed, with its card as the sync would write it (used by Settings, Website preview).
+    return circles.filter((c) => !isTest(c) && [...RUNNING, ...UPCOMING].includes(c.status)).map((c) => ({
+      id: c.id, circle: c.name, status: c.status, visible: Boolean(c.website_visible), item: c.framer_item_id, created: c.framer_created,
+      draft: draftFor(c), missing: websiteMissing(c), title: title(c), description: DESCRIPTION, time: timeText(c),
       lesson: startDate(c) || RUNNING.includes(c.status) ? lessonText(c) : null, author: displayName(c), photo: photoFor(c),
-      order: c.website_order ?? null, link: link(c),
+      banner: c.language === "Spanish" ? BANNER.spanish : BANNER.other, order: c.website_order ?? null, link: link(c),
     }));
   }
   const { data: settings } = await db.from("settings").select("framer_auto_publish, framer_publish_pending").eq("id", 1).single();
@@ -440,6 +444,41 @@ async function publishNow(framer: any): Promise<true | string> {
   return `not published yet (${err}); it will retry automatically`;
 }
 
+// Hand-made Course items that no circle is linked to (e.g. isvara-18oct): show or hide them and set their place on the
+// page from the dashboard. Items linked to a circle are changed through the circle instead (website switch and order).
+async function setItem(actor: string, body: any) {
+  const id = String(body.id ?? "");
+  if (!id) throw new Error("Which website item?");
+  const { data: linked } = await db.from("circles").select("id, name").eq("framer_item_id", id).maybeSingle();
+  if (linked) throw new Error(`This item belongs to "${linked.name}". Change it from that circle instead.`);
+  const input: any = { id };
+  if (typeof body.draft === "boolean") input.draft = body.draft;
+  if (body.order !== undefined) {
+    const n = body.order === null || body.order === "" ? "" : String(Math.trunc(Number(body.order)));
+    if (n !== "" && !(Number(n) > 0)) throw new Error("Order must be a whole number from 1");
+    input.fieldData = { [F.lessonNumber]: s(n) };
+  }
+  const { data: settings } = await db.from("settings").select("framer_auto_publish").eq("id", 1).single();
+  const framer = await connect(PROJECT, Deno.env.get("FRAMER_API_KEY")!);
+  let published: boolean | string = false;
+  try {
+    const col = (await framer.getCollections()).find((x: any) => x.id === COLLECTION);
+    if (!col) throw new Error("Course collection not found in Framer");
+    const item = (await col.getItems()).find((it: any) => it.id === id);
+    if (!item) throw new Error("That item is no longer in Framer");
+    await col.addItems([input]);
+    // A hidden item that stays hidden is invisible to visitors, so only publish when the page actually changes.
+    if (!(item as any).draft || input.draft === false) {
+      await db.from("settings").update({ framer_publish_pending: true }).eq("id", 1);
+      if (settings?.framer_auto_publish !== false) published = await publishNow(framer);
+    }
+  } finally {
+    await framer.disconnect();
+  }
+  await db.from("audit_log").insert({ actor, action: "framer_item", circle_id: null, detail: { id, draft: input.draft, order: body.order, published } });
+  return { ok: true, published };
+}
+
 async function publishOnly(actor: string) {
   const framer = await connect(PROJECT, Deno.env.get("FRAMER_API_KEY")!);
   let published: true | string;
@@ -478,6 +517,7 @@ Deno.serve(async (req) => {
     if (body.action === "sync") return json(await withLock(() => sync(email, { all: Boolean(body.all) })));
     if (body.action === "snapshot") return json(await snapshot());
     if (body.action === "publish") return json(await withLock(() => publishOnly(email)));
+    if (body.action === "set_item") return json(await withLock(() => setItem(email, body)));
     if (body.action === "preview") return json(await sync(email, { all: true, preview: true }));
     return json({ error: `Unknown action ${body.action}` }, 400);
   } catch (e) {
