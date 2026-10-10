@@ -584,3 +584,18 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .switch.blocked { cursor: not-allowed; }
 .switch.blocked .switch-track { background: var(--surface-2); border: 1px dashed var(--line); }
 .switch.blocked .switch-dot { box-shadow: none; background: var(--line); }
+/* Circles: website filter bar. Each chip is one website state with its count. */
+.web-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px; }
+.web-filter-label { font-size: 12px; font-weight: 600; color: var(--muted); margin-right: 4px; min-width: 56px; }
+.web-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 99px; font-size: 12.5px; background: var(--surface); }
+.web-chip .ws-n { color: var(--muted); font-variant-numeric: tabular-nums; }
+.web-chip.on { border-color: var(--primary); background: var(--primary); color: var(--primary-ink); }
+.web-chip.on .ws-n { color: inherit; opacity: .8; }
+.ws-dot { width: 8px; height: 8px; border-radius: 99px; background: var(--line); flex: none; }
+.ws-on .ws-dot { background: var(--live); }
+.ws-waiting .ws-dot { background: var(--warn); }
+.ws-ready .ws-dot { background: var(--pending); }
+.ws-notready .ws-dot { background: transparent; border: 1.5px solid var(--muted); }
+.ws-never .ws-dot { background: var(--line); }
+.web-chip.on .ws-dot { box-shadow: 0 0 0 1.5px var(--primary-ink); }
+.web-need { margin-top: -4px; }

@@ -806,20 +806,58 @@ const FILTERS = {
   active: { label: "Current (not ended)", match: (s) => ["pending", "conflict", "approved", "live", "paused"].includes(s) },
   action: { label: "Needs action", match: (s) => s === "pending" || s === "conflict" },
   live: { label: "Live", match: (s) => s === "live" },
-  web: { label: "Shown on website", match: (s, c) => Boolean(c?.website_visible) },
-  hidden: { label: "Live, hidden from website", match: (s, c) => s === "live" && !c?.website_visible },
   closed: { label: "Ended or rejected", match: (s) => s === "ended" || s === "rejected" },
   all: { label: "All circles", match: () => true },
 };
+// Where a circle stands for the website. One answer per circle, used by the filter bar above the circles table.
+const WEB_STATES = {
+  any: { label: "All" },
+  on: { label: "On website", hint: "Switched on and listed" },
+  waiting: { label: "On, but held back", hint: "Switched on, but details are missing so it stays hidden" },
+  ready: { label: "Ready to show", hint: "Everything is filled in: switch it on to list it" },
+  notready: { label: "Not ready", hint: "Could be listed once the missing details are set" },
+  never: { label: "Can't be listed", hint: "Ended, rejected, paused, without a licence, or a test circle" },
+};
+function webState(c) {
+  if (["ended", "rejected", "paused", "conflict"].includes(c.status) || c.is_demo || /\btest\b/i.test(c.name ?? "") || c.licence?.is_mock) return "never";
+  const missing = websiteMissing(c).length > 0;
+  if (c.website_visible) return missing ? "waiting" : "on";
+  return missing ? "notready" : "ready";
+}
+// Short labels for the "missing" breakdown.
+const MISSING_LABEL = { "WhatsApp group link": "WhatsApp link", "website order": "order", "start date (it is in the past)": "start date in the past" };
+
 function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
-  // Opened from another page: "#/Circles/live" picks a filter, anything else is a search ("#/Circles/Zoom 05").
-  const [q, setQ] = useState(initial && !FILTERS[initial] ? initial : "");
-  const [status, setStatus] = useState(initial && FILTERS[initial] ? initial : (initial ? "all" : "active"));
-  const rows = useMemo(() => data.circles.filter((c) => {
-    if (!FILTERS[status].match(c.status, c)) return false;
+  // Opened from another page: "#/Circles/live" picks a filter, "#/Circles/web-ready" a website view,
+  // anything else is a search ("#/Circles/Zoom 05").
+  const initWeb = initial?.startsWith("web-") && WEB_STATES[initial.slice(4)] ? initial.slice(4) : "any";
+  const [q, setQ] = useState(initial && !FILTERS[initial] && initWeb === "any" ? initial : "");
+  const [status, setStatus] = useState(initial && FILTERS[initial] ? initial : (initial && initWeb === "any" ? "all" : "active"));
+  const [web, setWeb] = useState(initWeb);
+  const [need, setNeed] = useState(null); // one missing item to narrow "Not ready" down to
+  const states = useMemo(() => new Map(data.circles.map((c) => [c.id, webState(c)])), [data.circles]);
+  const inStatus = useMemo(() => data.circles.filter((c) => FILTERS[status].match(c.status, c)), [data.circles, status]);
+  const webCounts = useMemo(() => {
+    const n = { any: inStatus.length };
+    for (const c of inStatus) n[states.get(c.id)] = (n[states.get(c.id)] ?? 0) + 1;
+    return n;
+  }, [inStatus, states]);
+  // What the not-ready (and held back) circles are missing, most common first.
+  const needCounts = useMemo(() => {
+    const n = new Map();
+    for (const c of inStatus) {
+      if (states.get(c.id) !== web) continue;
+      for (const m of websiteMissing(c)) n.set(m, (n.get(m) ?? 0) + 1);
+    }
+    return [...n.entries()].sort((a, b) => b[1] - a[1]);
+  }, [inStatus, states, web]);
+  const rows = useMemo(() => inStatus.filter((c) => {
+    if (web !== "any" && states.get(c.id) !== web) return false;
+    if (need && !websiteMissing(c).includes(need)) return false;
     const hay = `${c.name} ${c.facilitator?.name ?? ""} ${c.facilitator?.email ?? ""} ${coFacs(c).map((f) => `${f.name} ${f.email}`).join(" ")} ${c.licence?.label ?? ""} ${c.language ?? ""}`.toLowerCase();
     return hay.includes(q.toLowerCase());
-  }), [data.circles, q, status]);
+  }), [inStatus, states, web, need, q]);
+  const pickWeb = (k) => { setWeb(k); setNeed(null); };
 
   return (
     <section className="card">
@@ -833,6 +871,24 @@ function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
           <button className="primary" onClick={onNew}>Add circle</button>
         </div>
       </div>
+      <div className="web-filter" role="group" aria-label="Website">
+        <span className="web-filter-label">Website</span>
+        {Object.entries(WEB_STATES).map(([k, w]) => (k === "any" || webCounts[k]) ? (
+          <button key={k} type="button" className={`web-chip ws-${k} ${web === k ? "on" : ""}`} title={w.hint} aria-pressed={web === k} onClick={() => pickWeb(k)}>
+            {k !== "any" && <span className="ws-dot" />}{w.label} <span className="ws-n">{webCounts[k] ?? 0}</span>
+          </button>
+        ) : null)}
+      </div>
+      {["notready", "waiting"].includes(web) && needCounts.length > 0 && (
+        <div className="web-filter web-need">
+          <span className="web-filter-label">Missing</span>
+          {needCounts.map(([m, n]) => (
+            <button key={m} type="button" className={`web-chip ${need === m ? "on" : ""}`} aria-pressed={need === m} onClick={() => setNeed(need === m ? null : m)}>
+              {MISSING_LABEL[m] ?? m} <span className="ws-n">{n}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="table-wrap">
         <table className="table">
           <thead><tr><th>Circle</th><th>Facilitator</th><th>When</th><th>Licence</th><th>Status</th><th>Website</th><th></th></tr></thead>
@@ -849,7 +905,12 @@ function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
                 <td>{c.licence?.label ?? <span className="muted">none</span>}{c.licence?.is_mock && <span className="tag">mock</span>}</td>
                 <td><span className={`pill st-${c.status}`}>{STATUS_LABEL[c.status]}</span></td>
                 <td onClick={(e) => e.stopPropagation()}><WebsiteSwitch circle={c} run={run} compact />
-                  {c.website_visible && <div><WebsiteReadiness circle={c} compact /></div>}</td>
+                  {["waiting", "notready"].includes(states.get(c.id)) && (
+                    <div className={`small ${states.get(c.id) === "waiting" ? "warn-text" : "muted"}`} title={`Needs: ${websiteMissing(c).join(", ")}`}>
+                      Needs {websiteMissing(c).map((m) => MISSING_LABEL[m] ?? m).slice(0, 2).join(", ")}{websiteMissing(c).length > 2 ? ` +${websiteMissing(c).length - 2}` : ""}
+                    </div>
+                  )}
+                  {states.get(c.id) === "ready" && <div className="small ok-text">Ready</div>}</td>
                 <td className="cell-actions">
                   <IconButton icon="edit" label="Edit circle" onClick={() => onSelect(c)} />
                   <IconButton icon="trash" label="Delete circle" danger onClick={() => onDelete(c)}
