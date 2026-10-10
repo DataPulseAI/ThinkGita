@@ -599,3 +599,22 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .ws-never .ws-dot { background: var(--line); }
 .web-chip.on .ws-dot { box-shadow: 0 0 0 1.5px var(--primary-ink); }
 .web-need { margin-top: -4px; }
+/* Week at a glance, by hour */
+.matrix-intro { margin: -4px 0 8px; }
+.hour-matrix { border-spacing: 3px; }
+.hour-matrix td { height: 22px; font-size: 12px; border-radius: 4px; }
+.hour-matrix .rowhead { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.hour-matrix td.full { outline: 2px solid var(--coral); outline-offset: -2px; }
+.hour-matrix { table-layout: fixed; min-width: 0; }
+.hour-matrix th:first-child { width: 48px; }
+@media (max-width: 520px) { .hour-matrix { border-spacing: 2px; } .hour-matrix td { font-size: 11px; } .hour-matrix th { font-size: 12px; } }
+/* Week at a glance cells: the hover card covers the whole cell. */
+.matrix td .hover-anchor { display: block; height: 100%; }
+.matrix td .cell-fill { position: relative; display: flex; align-items: center; justify-content: center; gap: 4px; height: 100%; min-height: 22px; }
+.matrix td:has(.cell-fill) { padding: 0; }
+.hovercard .hc-meta { color: var(--muted); font-size: 12px; font-weight: 400; }
+.hovercard { text-align: left; font-weight: 400; }
+.hovercard .hc-rows.hc-times { grid-template-columns: auto 1fr; }
+.hovercard .hc-times dt { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.log-row .log-what { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-row.warn-text .log-what { color: inherit; }

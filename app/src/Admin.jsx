@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  supabase, adminAction, websiteSync, websitePublish, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
+  supabase, adminAction, websiteSync, websitePublish, websiteSetItem, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
 } from "./lib.js";
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
@@ -217,7 +217,7 @@ export default function Admin() {
       supabase.from("licences").select("*").order("sort_order").order("label"),
       supabase.from("settings").select("*").eq("id", 1).single(),
       fetchAll(() => supabase.from("change_requests").select("*, circle:circles(name)").order("created_at", { ascending: false }).order("id")),
-      supabase.from("audit_log").select("*").not("action", "in", "(zoom_meetings_snapshot,sync_attendance)").order("at", { ascending: false }).limit(60),
+      supabase.from("audit_log").select("*").not("action", "in", "(zoom_meetings_snapshot,sync_attendance)").order("at", { ascending: false }).limit(200),
       supabase.from("email_templates").select("*"),
       supabase.from("admin_emails").select("*").order("email"),
       supabase.from("email_log").select("id", { count: "exact", head: true }).eq("status", "failed").gte("sent_at", weekAgo),
@@ -287,13 +287,24 @@ export default function Admin() {
     }
   };
 
+  // Delete a circle. A live one is ended first (its Zoom meeting is deleted), and its website listing is hidden
+  // before the row goes, because once the circle is gone the website sync can no longer reach that listing.
   const deleteCircle = (c, after) => {
-    if (c.status === "live") return notify("error", "End the circle first. That deletes its Zoom meeting.");
-    if (!confirm(`Delete "${c.name}"? This can't be undone.`)) return;
+    const live = c.status === "live";
+    if (!confirm(live
+      ? `"${c.name}" is live. Delete it?\n\nThis ends it, deletes its Zoom meeting and removes it from the dashboard. It can't be undone.`
+      : `Delete "${c.name}"? This can't be undone.`)) return;
     run(async () => {
-      const { error } = await supabase.from("circles").delete().eq("id", c.id);
+      if (live) await adminAction("cancel", c.id);
+      if (c.framer_item_id) {
+        // Unlink first so the hide below is allowed, then hide the listing (only matters if it was shown).
+        await supabase.from("circles").update({ framer_item_id: null }).eq("id", c.id);
+        await websiteSetItem(c.framer_item_id, { draft: true }).catch(() => {});
+      }
+      const { data: gone, error } = await supabase.from("circles").delete().eq("id", c.id).select("id");
       if (error) throw error;
-    }, "Circle deleted").then(() => after?.());
+      if (!gone?.length) throw new Error("The circle wasn't deleted (it may already be gone, or you don't have access). Refresh and try again.");
+    }, live ? "Circle ended and deleted" : "Circle deleted").then(() => after?.());
   };
 
   if (!data) return <div className="center muted">Loading data…</div>;
@@ -364,6 +375,9 @@ function Overview({ data, onDay, onTab, go }) {
   const anyOver = [...peaks.values()].some((m) => [...m.values()].some((p) => p > ZOOM_AT_ONCE));
   const demo = circles.some((c) => c.is_demo);
   const mocks = active.filter((l) => l.is_mock);
+  // Which week view to show; remembered on this device.
+  const [weekView, setWeekView] = useState(() => { try { return localStorage.getItem("tg.weekView") || "licence"; } catch (_) { return "licence"; } });
+  const pickView = (v) => { setWeekView(v); try { localStorage.setItem("tg.weekView", v); } catch (_) { /* private mode */ } };
 
   return (
     <>
@@ -392,8 +406,15 @@ function Overview({ data, onDay, onTab, go }) {
       <section className="card">
         <div className="card-head">
           <h2>Week at a glance</h2>
-          <span className="muted">Circles per licence per day, in UK time. Click a day to see the timeline.</span>
+          <div className="seg" role="group" aria-label="View">
+            <button type="button" className={weekView === "licence" ? "on" : ""} aria-pressed={weekView === "licence"} onClick={() => pickView("licence")}>By licence</button>
+            <button type="button" className={weekView === "hour" ? "on" : ""} aria-pressed={weekView === "hour"} onClick={() => pickView("hour")}>By hour</button>
+          </div>
         </div>
+        <p className="muted small matrix-intro">{weekView === "hour"
+          ? "Circles running in each hour, UK time. Darker is busier; an outlined hour has every licence in use. Click to see that day."
+          : "Circles per licence per day, in UK time. Click a day to see the timeline."}</p>
+        {weekView === "hour" ? <HourGrid circles={circles} licences={active} onDay={onDay} /> : <>
         <div className="matrix-wrap">
           <table className="matrix">
             <thead>
@@ -411,10 +432,15 @@ function Overview({ data, onDay, onTab, go }) {
                   {days.map((n, i) => {
                     const peak = peaks.get(l.id)?.get(i + 1) ?? 0;
                     const over = peak > ZOOM_AT_ONCE;
+                    const list = n ? circles.filter((c) => c.licence_id === l.id && ukDay(c) === i + 1 && ACTIVE.includes(c.status)) : [];
                     return (
-                      <td key={i} onClick={() => onDay(i + 1)} style={{ "--a": n / max }} className={`${n ? "filled" : ""} ${peak >= 2 ? "shared" : ""} ${over ? "over" : ""}`}
-                        title={peak >= 2 ? `${l.label} has ${peak} circles at once on ${DAY_NAMES[i + 1]}${over ? ": over Zoom's limit of 2" : " (shared licence, allowed)"}` : undefined}>
-                        {n || ""}{peak >= 2 && <span className="at-once" aria-label={`${peak} at once`}>{peak}×</span>}
+                      <td key={i} onClick={() => onDay(i + 1)} style={{ "--a": n / max }} className={`${n ? "filled" : ""} ${peak >= 2 ? "shared" : ""} ${over ? "over" : ""}`}>
+                        {n ? (
+                          <Hover content={<SlotCard title={`${l.label}, ${DAY_NAMES[i + 1]}`} list={list} licence={l.label}
+                            note={peak >= 2 && <div className={`hc-foot ${over ? "warn-text" : ""}`}>{peak} at once at the busiest moment{over ? ": over Zoom's limit of 2, move one" : " (shared licence, Zoom allows 2)"}</div>} />}>
+                            <div className="cell-fill">{n}{peak >= 2 && <span className="at-once" aria-label={`${peak} at once`}>{peak}×</span>}</div>
+                          </Hover>
+                        ) : null}
                       </td>
                     );
                   })}
@@ -436,8 +462,95 @@ function Overview({ data, onDay, onTab, go }) {
             {anyOver && <> <span className="at-once over">3×</span> <span className="warn-text">more than Zoom allows: move one.</span></>}
           </p>
         )}
+        </>}
       </section>
     </>
+  );
+}
+
+// Hover card for a week-at-a-glance cell, in the same style as the weekly schedule's circle card
+// (title, subtitle, label/value rows, footer): who runs then, on which licence, and how much room is left.
+function SlotCard({ title, list, capacity, licence, note }) {
+  const sorted = [...list].sort((a, b) => toMin(ukStart(a)) - toMin(ukStart(b)) || String(a.name).localeCompare(String(b.name)));
+  const used = new Set(list.map((c) => c.licence_id).filter(Boolean)).size;
+  const free = capacity != null ? Math.max(0, capacity - used) : null;
+  const shown = sorted.slice(0, 8);
+  return (
+    <>
+      <div className="hc-title">{title}</div>
+      <div className="hc-sub">
+        {list.length} circle{list.length === 1 ? "" : "s"}
+        {free != null && (free ? ` · ${free} licence${free === 1 ? "" : "s"} free` : " · every licence in use")}
+      </div>
+      <dl className="hc-rows hc-times">
+        {shown.flatMap((c) => [
+          <dt key={`${c.id}-t`}>{hhmm(ukStart(c))}–{endTime(ukStart(c), c.duration_min)}</dt>,
+          <dd key={`${c.id}-n`}>
+            {blockName(c.name)}
+            {(!licence || c.status !== "live") && (
+              <div className="hc-meta">{[!licence && (c.licence?.label ?? "No licence"), c.status !== "live" && STATUS_LABEL[c.status]].filter(Boolean).join(" · ")}</div>
+            )}
+          </dd>,
+        ])}
+      </dl>
+      {sorted.length > shown.length && <div className="hc-meta">and {sorted.length - shown.length} more</div>}
+      {note}
+      <div className="hc-foot">Click to see the day</div>
+    </>
+  );
+}
+
+// Week at a glance, by hour: rows are UK hours, columns are days, each cell counts the circles running in that hour.
+// Only the hours that have circles (plus one either side) are drawn, so the grid stays compact.
+function HourGrid({ circles, licences, onDay }) {
+  const list = circles.filter((c) => ACTIVE.includes(c.status) && ukStart(c));
+  const spans = list.map((c) => {
+    const s = (ukDay(c) - 1) * 1440 + toMin(ukStart(c));
+    const e = s + (c.duration_min || 60);
+    return { c, parts: e > WEEK ? [[s, WEEK], [0, e - WEEK]] : [[s, e]] };
+  });
+  const cell = (d, h) => {
+    const a = (d - 1) * 1440 + h * 60, b = a + 60;
+    return spans.filter((x) => x.parts.some(([s, e]) => s < b && a < e)).map((x) => x.c);
+  };
+  const grid = [1, 2, 3, 4, 5, 6, 7].map((d) => Array.from({ length: 24 }, (_, h) => cell(d, h)));
+  const used = Array.from({ length: 24 }, (_, h) => grid.some((col) => col[h].length));
+  const first = Math.max(0, used.indexOf(true) - 1);
+  const last = Math.min(23, used.lastIndexOf(true) + 1);
+  if (used.indexOf(true) < 0) return <p className="muted">No circles scheduled yet.</p>;
+  const max = Math.max(1, ...grid.flat().map((x) => x.length));
+  const capacity = licences.filter((l) => !l.is_mock).length || licences.length;
+  const hours = Array.from({ length: last - first + 1 }, (_, i) => first + i);
+  const label = (h) => `${String(h).padStart(2, "0")}:00`;
+  return (
+    <div className="matrix-wrap">
+      <table className="matrix hour-matrix">
+        <thead>
+          <tr><th></th>{[1, 2, 3, 4, 5, 6, 7].map((d) => <th key={d}><button className="link" onClick={() => onDay(d)}>{DAYS[d]}</button></th>)}</tr>
+        </thead>
+        <tbody>
+          {hours.map((h) => (
+            <tr key={h}>
+              <th className="rowhead">{label(h)}</th>
+              {[1, 2, 3, 4, 5, 6, 7].map((d) => {
+                const here = grid[d - 1][h];
+                const n = here.length;
+                const full = n >= capacity;
+                return (
+                  <td key={d} onClick={() => onDay(d)} style={{ "--a": n / max }} className={`${n ? "filled" : ""} ${full ? "full" : ""}`}>
+                    {n ? (
+                      <Hover content={<SlotCard title={`${DAY_NAMES[d]}, ${label(h)} to ${label((h + 1) % 24)}`} list={here} capacity={capacity} />}>
+                        <div className="cell-fill">{n}</div>
+                      </Hover>
+                    ) : null}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -914,7 +1027,7 @@ function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
                 <td className="cell-actions">
                   <IconButton icon="edit" label="Edit circle" onClick={() => onSelect(c)} />
                   <IconButton icon="trash" label="Delete circle" danger onClick={() => onDelete(c)}
-                    title={c.status === "live" ? "End the circle before deleting" : "Delete circle"} />
+                    title={c.status === "live" ? "Delete circle (ends it and its Zoom meeting first)" : "Delete circle"} />
                 </td>
               </tr>
             ))}
@@ -1689,8 +1802,79 @@ const ACTION_LABEL = {
   provision: "Approved and created Zoom meeting", cancel: "Ended circle", resend: "Resent details email",
   reschedule: "Changed time", handover: "Handed over", end_on: "Set last session date", move_licence: "Moved to another licence",
   sync_licences: "Synced licences from Zoom", set_host_key: "Set host key", test_email: "Sent test email",
-  provision_failed: "Approval failed", tally_intake: "Form received", invite_admin: "Invited admin",
+  provision_failed: "Approval failed", tally_intake: "Form received", intake: "Form received", invite_admin: "Invited admin",
+  circle_created: "Created circle", circle_deleted: "Deleted circle", circle_edited: "Edited circle",
+  framer_sync: "Website update", framer_publish: "Published website", framer_item: "Changed website listing",
+  framer_refresh_from_cms: "Refreshed from website", intake_backfill: "Added from form export", import_create: "Imported circle",
+  import_fill: "Filled from Zoom", fix_timezone: "Fixed timezone", sync_attendance: "Synced attendance",
+  zoom_meetings_snapshot: "Checked Zoom meetings", rename: "Renamed Zoom meeting",
 };
+// Activity groups for the filter in Settings.
+const ACTIVITY_GROUPS = {
+  all: { label: "All", match: () => true },
+  circles: { label: "Circles", match: (a) => /^circle_|^provision|^cancel|^reschedule|^handover|^end_on|^move_licence|^resend|intake|^import|^fix_/.test(a) },
+  website: { label: "Website", match: (a) => /^framer_/.test(a) },
+  zoom: { label: "Zoom and admin", match: (a) => /licence|host_key|invite|test_email|attendance|zoom/.test(a) },
+};
+// Website updates that changed nothing visible are noise in the activity list.
+const quietSync = (l) => l.action === "framer_sync" && !l.detail?.failed && !l.detail?.errors?.length
+  && !l.detail?.created && !l.detail?.hidden && l.detail?.published !== true && typeof l.detail?.published !== "string";
+const FIELD_LABEL = { start_time: "start time", duration_min: "length", circle_type: "type", facilitator_id: "facilitator", licence_id: "licence",
+  preferred_start: "preferred start", starts_on: "start date", ends_on: "end date", whatsapp_group_link: "WhatsApp link",
+  website_visible: "website", website_name: "website name", website_order: "website order", website_photo_url: "website photo" };
+// One readable line for an activity entry.
+function activitySummary(l, circles, licences) {
+  const d = l.detail ?? {};
+  const name = d.name ?? circles.find((c) => c.id === l.circle_id)?.name;
+  const val = (k, v) => k === "licence_id" ? (licences.find((x) => x.id === v)?.label ?? "none")
+    : k === "website_visible" ? (v ? "shown" : "hidden") : v == null || v === "" ? "empty"
+    : /^\d{2}:\d{2}:00$/.test(String(v)) ? String(v).slice(0, 5) : String(v).slice(0, 40);
+  switch (l.action) {
+    case "circle_edited":
+      return `${name ?? "Circle"}: ${Object.entries(d.changes ?? {}).map(([k, x]) => k === "facilitator_id" ? "facilitator changed" : `${FIELD_LABEL[k] ?? k} ${val(k, x.from)} → ${val(k, x.to)}`).join("; ")}`;
+    case "circle_created": return `${name ?? "Circle"}${d.source ? ` (${d.source})` : ""}`;
+    case "circle_deleted": return `${name ?? "Circle"}${d.status ? `, was ${STATUS_LABEL[d.status] ?? d.status}` : ""}`;
+    case "framer_sync": return d.failed ? `Failed: ${d.failed}` : [d.created && `${d.created} added`, d.updated && `${d.updated} updated`, d.hidden && `${d.hidden} hidden`,
+      d.published === true ? "published" : typeof d.published === "string" ? d.published : null, d.errors?.length && `${d.errors.length} errors`].filter(Boolean).join(", ") || "No changes";
+    case "cancel": return `${name ?? "Circle"}${d.meeting_id ? `, Zoom meeting ${d.meeting_id} removed` : ""}`;
+    case "framer_item": return [d.draft === true && "hidden", d.draft === false && "shown", d.order !== undefined && `order set to ${d.order ?? "none"}`,
+      d.published === true && "published"].filter(Boolean).join(", ") || "Hand-made listing changed";
+    case "framer_publish": return d.published === true ? "Published" : String(d.published ?? "");
+    default: return name ?? (Object.keys(d).length ? JSON.stringify(d).slice(0, 200) : "");
+  }
+}
+
+// Settings, Activity: who did what, newest first, with a filter. Background website updates that changed nothing are hidden.
+function ActivityLog({ data }) {
+  const [group, setGroup] = useState("all");
+  const rows = data.log.filter((l) => !quietSync(l) && ACTIVITY_GROUPS[group].match(l.action ?? ""));
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2>Activity</h2>
+        <div className="seg" role="group" aria-label="Show">
+          {Object.entries(ACTIVITY_GROUPS).map(([k, g]) => (
+            <button key={k} type="button" className={group === k ? "on" : ""} aria-pressed={group === k} onClick={() => setGroup(k)}>{g.label}</button>
+          ))}
+        </div>
+      </div>
+      <div className="log">
+        {rows.map((l) => {
+          const bad = String(l.action ?? "").includes("failed") || l.detail?.failed || l.detail?.errors?.length;
+          return (
+            <div key={l.id} className={`log-row ${bad ? "warn-text" : ""}`}>
+              <span className="muted small">{fmtStamp(l.at)}</span>
+              <span><b>{ACTION_LABEL[l.action] ?? l.action}</b><span className="muted small"> by {l.actor === "cron" ? "automatic" : l.actor}</span></span>
+              <span className="small log-what" title={JSON.stringify(l.detail)}>{activitySummary(l, data.circles, data.licences)}</span>
+            </div>
+          );
+        })}
+        {!rows.length && <p className="muted">Nothing yet.</p>}
+      </div>
+      <p className="muted small">Showing the latest {data.log.length} entries.</p>
+    </section>
+  );
+}
 
 /* ---------------- Licences ---------------- */
 function Licences({ data, run, notify, go }) {
@@ -2096,19 +2280,7 @@ function Settings({ data, run }) {
         </section>
       )}
 
-      <section className="card">
-        <div className="card-head"><h2>Activity</h2></div>
-        <div className="log">
-          {data.log.map((l) => (
-            <div key={l.id} className={`log-row ${String(l.action ?? "").includes("failed") ? "warn-text" : ""}`}>
-              <span className="muted small">{fmtStamp(l.at)}</span>
-              <span><b>{ACTION_LABEL[l.action] ?? l.action}</b> by {l.actor}</span>
-              <code className="small">{JSON.stringify(l.detail)?.slice(0, 220)}</code>
-            </div>
-          ))}
-          {!data.log.length && <p className="muted">Nothing yet.</p>}
-        </div>
-      </section>
+      <ActivityLog data={data} />
     </>
   );
 }
