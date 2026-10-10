@@ -1851,11 +1851,12 @@ const ACTION_LABEL = {
   framer_refresh_from_cms: "Refreshed from website", intake_backfill: "Added from form export", import_create: "Imported circle",
   import_fill: "Filled from Zoom", fix_timezone: "Fixed timezone", sync_attendance: "Synced attendance",
   zoom_meetings_snapshot: "Checked Zoom meetings", rename: "Renamed Zoom meeting",
+  facilitator_self_edit: "Facilitator updated their details",
 };
 // Activity groups for the filter in Settings.
 const ACTIVITY_GROUPS = {
   all: { label: "All", match: () => true },
-  circles: { label: "Circles", match: (a) => /^circle_|^provision|^cancel|^reschedule|^handover|^end_on|^move_licence|^resend|intake|^import|^fix_/.test(a) },
+  circles: { label: "Circles", match: (a) => /^circle_|^facilitator_|^provision|^cancel|^reschedule|^handover|^end_on|^move_licence|^resend|intake|^import|^fix_/.test(a) },
   website: { label: "Website", match: (a) => /^framer_/.test(a) },
   zoom: { label: "Zoom and admin", match: (a) => /licence|host_key|invite|test_email|attendance|zoom/.test(a) },
 };
@@ -1864,7 +1865,8 @@ const quietSync = (l) => l.action === "framer_sync" && !l.detail?.failed && !l.d
   && !l.detail?.created && !l.detail?.hidden && l.detail?.published !== true && typeof l.detail?.published !== "string";
 const FIELD_LABEL = { start_time: "start time", duration_min: "length", circle_type: "type", facilitator_id: "facilitator", licence_id: "licence",
   preferred_start: "preferred start", starts_on: "start date", ends_on: "end date", whatsapp_group_link: "WhatsApp link",
-  website_visible: "website", website_name: "website name", website_order: "website order", website_photo_url: "website photo" };
+  website_visible: "website", website_name: "website name", website_order: "website order", website_photo_url: "website photo",
+  initiated_name: "initiated name", first_name: "first name", last_name: "last name", photo_url: "photo" };
 // One readable line for an activity entry.
 function activitySummary(l, circles, licences) {
   const d = l.detail ?? {};
@@ -1875,6 +1877,8 @@ function activitySummary(l, circles, licences) {
   switch (l.action) {
     case "circle_edited":
       return `${name ?? "Circle"}: ${Object.entries(d.changes ?? {}).map(([k, x]) => k === "facilitator_id" ? "facilitator changed" : `${FIELD_LABEL[k] ?? k} ${val(k, x.from)} → ${val(k, x.to)}`).join("; ")}`;
+    case "facilitator_self_edit":
+      return `${name ?? "Facilitator"}: ${Object.entries(d.changes ?? {}).map(([k, x]) => k === "photo_url" ? (x.to ? "new photo" : "photo removed") : `${FIELD_LABEL[k] ?? k} ${val(k, x.from)} → ${val(k, x.to)}`).join("; ")}`;
     case "circle_created": return `${name ?? "Circle"}${d.source ? ` (${d.source})` : ""}`;
     case "circle_deleted": return `${name ?? "Circle"}${d.status ? `, was ${STATUS_LABEL[d.status] ?? d.status}` : ""}`;
     case "framer_sync": return d.failed ? `Failed: ${d.failed}` : [d.created && `${d.created} added`, d.updated && `${d.updated} updated`, d.hidden && `${d.hidden} hidden`,

@@ -41,7 +41,11 @@ test.describe("Phone width", () => {
 
   test("the facilitator portal fits the screen @mobile", async ({ page }) => {
     await signIn(page, { role: "facilitator" });
-    await expect(page.locator("main section.card")).toHaveCount(2);
+    await expect(page.locator("main section.card:not(.profile-card)")).toHaveCount(2);
+    await expectNoHorizontalOverflow(page);
+    // The details form fits too.
+    await page.getByRole("button", { name: "Edit my details" }).click();
+    await expect(page.getByLabel("Phone (with country code)")).toBeVisible();
     await expectNoHorizontalOverflow(page);
   });
 });

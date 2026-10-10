@@ -78,3 +78,69 @@ test.describe("Facilitator portal", () => {
     await expect(page.getByText("There are no circles linked to newcomer@example.org yet.")).toBeVisible();
   });
 });
+
+test.describe("Facilitator portal: your details", () => {
+  const profile = (page) => page.locator("section.profile-card");
+  const input = (page, label) => profile(page).getByLabel(label);
+
+  test("shows their details and saves a new photo, names and phone", async ({ page, mock }) => {
+    await signIn(page, { role: "facilitator" });
+    await expect(profile(page)).toContainText("Esha Specimen");
+    await expect(profile(page)).toContainText("esha.specimen@example.org");
+    await expect(profile(page)).toContainText("+44 7700 900005");
+    await expect(profile(page)).toContainText("Add a photo so people can see who's leading their circle.");
+
+    await profile(page).getByRole("button", { name: "Edit my details" }).click();
+    // First and last name start from the name on record.
+    await expect(input(page, "First name")).toHaveValue("Esha");
+    await expect(input(page, "Last name")).toHaveValue("Specimen");
+    await input(page, "Phone (with country code)").fill("call me");
+    await expect(profile(page).getByText("Use digits, spaces or dashes")).toBeVisible();
+    await expect(profile(page).getByRole("button", { name: "Save" })).toBeDisabled();
+    await input(page, "Phone (with country code)").fill("+44 7700 900555");
+    await input(page, "Initiated name (if you have one)").fill("Isvari");
+    await profile(page).locator('input[type="file"]').setInputFiles({ name: "me.png", mimeType: "image/png", buffer: Buffer.from("png") });
+    await expect(profile(page).getByText("Change photo")).toBeVisible();
+    expect(mock.uploads()).toHaveLength(1);
+    expect(mock.uploads()[0]).toMatch(/^facilitator-photos\/fac-05\/\d+\.png$/);
+
+    await profile(page).getByRole("button", { name: "Save" }).click();
+    await expect(profile(page).getByRole("button", { name: "Edit my details" })).toBeVisible();
+    const [sent] = mock.rpc("update_my_profile");
+    expect(sent).toMatchObject({ p_initiated_name: "Isvari", p_first_name: "Esha", p_last_name: "Specimen", p_phone: "+44 7700 900555" });
+    expect(sent.p_photo_url).toMatch(/\/storage\/v1\/object\/public\/facilitator-photos\/fac-05\/\d+\.png$/);
+    await expect(profile(page).locator(".profile-name")).toHaveText("Isvari");
+    await expect(profile(page)).toContainText("+44 7700 900555");
+    await expect(profile(page).locator("img.fac-avatar")).toHaveCount(1);
+    // Facilitators never write the table directly.
+    expect(mock.rest("facilitators")).toEqual([]);
+  });
+
+  test("a refused save shows the reason from the database and keeps the form open", async ({ page, mock }) => {
+    mock.handle("rpc update_my_profile", fail("invalid_profile: upload the photo from this page", 400));
+    await signIn(page, { role: "facilitator" });
+    await profile(page).getByRole("button", { name: "Edit my details" }).click();
+    await input(page, "Phone (with country code)").fill("+44 7700 900556");
+    await profile(page).getByRole("button", { name: "Save" }).click();
+    await expect(profile(page).getByText("Upload the photo from this page.")).toBeVisible();
+    await expect(profile(page).getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  test("a wrong file type is refused before uploading, and cancel keeps the old details", async ({ page, mock }) => {
+    await signIn(page, { role: "facilitator" });
+    await profile(page).getByRole("button", { name: "Edit my details" }).click();
+    await profile(page).locator('input[type="file"]').setInputFiles({ name: "me.gif", mimeType: "image/gif", buffer: Buffer.from("gif") });
+    await expect(profile(page).getByText("Use a JPEG, PNG or WebP image.")).toBeVisible();
+    expect(mock.uploads()).toHaveLength(0);
+    await input(page, "Phone (with country code)").fill("+44 1");
+    await profile(page).getByRole("button", { name: "Cancel" }).click();
+    await expect(profile(page)).toContainText("+44 7700 900005");
+    expect(mock.rpc("update_my_profile")).toHaveLength(0);
+  });
+
+  test("no card when the sign-in has no facilitator profile", async ({ page }) => {
+    await signIn(page, { role: "facilitator", email: "someone.new@example.org" });
+    await expect(page.getByText("There are no circles linked to")).toBeVisible();
+    await expect(profile(page)).toHaveCount(0);
+  });
+});

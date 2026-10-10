@@ -91,6 +91,7 @@ export async function mockBackend(page, overrides = {}) {
     rpc(name) { return log.filter((r) => r.kind === "rpc" && r.name === name).map((r) => r.body); },
     fn(name, action) { return log.filter((r) => r.kind === "fn" && r.name === name && (!action || r.body?.action === action)).map((r) => r.body); },
     writes() { return log.filter((r) => (r.kind === "rest" && !["GET", "HEAD"].includes(r.method)) || r.kind === "fn" || r.kind === "rpc"); },
+    uploads() { return log.filter((r) => r.kind === "storage" && r.method !== "GET").map((r) => r.path); },
   };
   mocks.set(page, mock);
 
@@ -166,6 +167,13 @@ export async function mockBackend(page, overrides = {}) {
   function rpcDefault({ name, body }) {
     switch (name) {
       case "my_circles_v2": return myCircles();
+      case "update_my_profile": {
+        const me = db.facilitators.find((f) => f.email === mock.user.email);
+        if (!me) return reply(400, { code: "P0001", message: "not_a_facilitator: no facilitator profile for this sign-in" });
+        const v = (x) => (String(x ?? "").trim() || null);
+        Object.assign(me, { initiated_name: v(body.p_initiated_name), first_name: v(body.p_first_name), last_name: v(body.p_last_name), phone: v(body.p_phone), photo_url: v(body.p_photo_url) });
+        return me;
+      }
       case "allocate_circle": {
         const c = db.circles.find((x) => x.id === body.p_circle);
         if (c && c.status === "pending" && !c.licence_id) c.licence_id = db.licences[0].id;
@@ -256,12 +264,22 @@ export async function mockBackend(page, overrides = {}) {
     else if (p.startsWith("/rest/v1/")) req = { kind: "rest", table: p.slice("/rest/v1/".length), method, query, body, single: accept.includes("vnd.pgrst.object"), url: request.url() };
     else if (p.startsWith("/functions/v1/")) req = { kind: "fn", name: p.slice("/functions/v1/".length), method, body, url: request.url() };
     else if (p.startsWith("/auth/v1/")) req = { kind: "auth", name: p.slice("/auth/v1/".length), method, query, body, url: request.url() };
+    else if (p.startsWith("/storage/v1/object/")) req = { kind: "storage", path: p.slice("/storage/v1/object/".length), method, url: request.url() };
     else req = { kind: "other", method, url: request.url() };
     log.push(req);
 
     if (req.kind === "rest") return answer(route, req, restDefault);
     if (req.kind === "rpc") return answer(route, req, rpcDefault);
     if (req.kind === "fn") return answer(route, req, fnDefault);
+    if (req.kind === "storage") {
+      // Public photo URLs load as a tiny PNG; uploads succeed unless a test says otherwise.
+      if (method === "GET") return route.fulfill({ status: 200, contentType: "image/png", body: PNG });
+      const h = handlers.get(`storage ${method}`);
+      const res = h === undefined ? { Key: req.path, Id: `obj-${++seq}` } : typeof h === "function" ? await h(req, mock) : h;
+      const r = res && res[REPLY] ? res : reply(200, res);
+      if (r.status >= 400) errorUrls.add(req.url);
+      return route.fulfill({ status: r.status, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify(r.body) });
+    }
     if (req.kind === "auth") {
       return answer(route, req, ({ name }) => {
         if (name === "logout") return reply(204, null);

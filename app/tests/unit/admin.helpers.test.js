@@ -141,6 +141,12 @@ describe("activity log", () => {
     expect(sum("sync_licences", {}, null)).toBe("");
     expect(A.activitySummary({ action: "x", circle_id: null }, circles, licences)).toBe("");
   });
+  it("facilitator_self_edit names the facilitator and each change", () => {
+    expect(sum("facilitator_self_edit", { name: "Esha Specimen", changes: {
+      phone: { from: "+44 1", to: "+44 2" }, first_name: { from: null, to: "Esha" }, photo_url: { from: null, to: "https://x/y.png" },
+    } }, null)).toBe("Esha Specimen: phone +44 1 → +44 2; first name empty → Esha; new photo");
+    expect(sum("facilitator_self_edit", { name: "Esha", changes: { photo_url: { from: "https://x", to: null } } }, null)).toBe("Esha: photo removed");
+  });
   it("quietSync hides website updates that changed nothing visible", () => {
     const q = (detail) => A.quietSync({ action: "framer_sync", detail });
     expect(q({ updated: 2, published: false, errors: [] })).toBe(true);

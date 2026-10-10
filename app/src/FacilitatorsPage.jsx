@@ -298,7 +298,7 @@ function weekText(w) {
 
 /* ---------------- Components ---------------- */
 
-function Avatar({ fac, size = 36 }) {
+export function Avatar({ fac, size = 36 }) {
   const [broken, setBroken] = useState(false);
   useEffect(() => setBroken(false), [fac.photo_url]);
   const url = clean(fac.photo_url);

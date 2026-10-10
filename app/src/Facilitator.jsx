@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { supabase, DAY_NAMES, hhmm, endTime, STATUS_LABEL, tzName, fmtDate, circleMessage, REQUEST_TYPES, requestSummary } from "./lib.js";
 import { CopyButton } from "./ui.jsx";
+import Profile from "./Profile.jsx";
 
 export default function Facilitator({ email }) {
   const [circles, setCircles] = useState(null);
@@ -22,6 +23,7 @@ export default function Facilitator({ email }) {
 
   return (
     <main className="content narrow">
+      <Profile email={email} />
       <h1>Your circles</h1>
       {error && <p className="error">{error}</p>}
       {!circles.length && (

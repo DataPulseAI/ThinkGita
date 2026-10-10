@@ -618,3 +618,14 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .hovercard .hc-times dt { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .log-row .log-what { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-row.warn-text .log-what { color: inherit; }
+
+/* Facilitator portal: your details */
+.profile-card { margin-bottom: 18px; }
+.profile-view { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.profile-info { display: grid; gap: 2px; flex: 1; min-width: 180px; }
+.profile-name { font-weight: 600; font-size: 16px; }
+.profile-edit { flex: none; }
+.profile-form { margin-top: 0; padding: 0; border: 0; background: none; }
+.profile-photo-row { display: flex; gap: 14px; align-items: center; }
+.profile-photo-actions { display: grid; gap: 4px; justify-items: start; }
+.profile-photo-actions button.link { font-size: 12px; }
