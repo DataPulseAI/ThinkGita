@@ -14,9 +14,9 @@ const NOW = "2026-10-10T12:00:00Z";
 const settingsRow = (over = {}) => ({ id: 1, framer_auto_publish: true, framer_publish_pending: false, framer_publish_attempts: 0, framer_fail_count: 0, ...over });
 
 let db, fr;
-function setup({ circles = [], items = [], settings = {} } = {}) {
+function setup({ circles = [], items = [], settings = {}, orderType } = {}) {
   db = attachFake(fs.db, { circles, settings: [settingsRow(settings)], audit_log: [] });
-  fr = createFakeFramer({ items });
+  fr = createFakeFramer({ items, orderType });
   connect.mockReset();
   connect.mockResolvedValue(fr.framer);
 }
@@ -357,5 +357,41 @@ describe("publishOnly", () => {
     expect(r).toEqual({ published: true });
     expect(fr.state.disconnected).toBe(1);
     expect(db.tables.audit_log.at(-1)).toMatchObject({ action: "framer_publish" });
+  });
+});
+
+describe("order field type (LessonNumber as Text or Number in Framer)", () => {
+  // The type is read from Framer on each run; reset to Text after each test so other tests are unaffected.
+  afterEach(() => fs.readOrderType({ getFields: async () => [] }));
+
+  it("a Number field gets the order as a number", async () => {
+    const c = readyCircle({ website_order: 3 });
+    setup({ circles: [c], orderType: "number" });
+    await fs.syncInner("a");
+    expect(fr.state.addCalls[0][0].fieldData[F.lessonNumber]).toEqual({ type: "number", value: 3 });
+  });
+
+  it("a Text field gets the order as text", async () => {
+    const c = readyCircle({ website_order: 3 });
+    setup({ circles: [c], orderType: "string" });
+    await fs.syncInner("a");
+    expect(fr.state.addCalls[0][0].fieldData[F.lessonNumber]).toEqual({ type: "string", value: "3" });
+  });
+
+  it("an item already holding the same order is not resent after the field becomes a Number", async () => {
+    const c = readyCircle({ framer_item_id: "item-1", framer_created: true, framer_photo_src: "https://img.example.org/asha.jpg", website_order: 3 });
+    const item = syncedItem(c);
+    item.fieldData[F.lessonNumber] = { type: "number", value: 3 };
+    setup({ circles: [c], items: [item], orderType: "number" });
+    const r = await fs.syncInner("a");
+    expect(r).toMatchObject({ updated: 0, skipped: 1 });
+    expect(fr.state.addCalls).toHaveLength(0);
+  });
+
+  it("setItem sends a number to a Number field and refuses to clear it", async () => {
+    setup({ items: [{ id: "hand-1", slug: "isvara-18oct", draft: false, fieldData: {} }], orderType: "number" });
+    await fs.setItem("a", { id: "hand-1", order: "4.7" });
+    expect(fr.state.addCalls[0][0].fieldData[F.lessonNumber]).toEqual({ type: "number", value: 4 });
+    await expect(fs.setItem("a", { id: "hand-1", order: null })).rejects.toThrow("A listing on the website needs an order number");
   });
 });

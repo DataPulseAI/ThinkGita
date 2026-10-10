@@ -200,6 +200,14 @@ function websiteMissing(c: any, has: Has = c.framer_has ?? {}): string[] {
 
 // ===== CMS fields =====
 const s = (value: string) => ({ type: "string", value });
+// LessonNumber (the order on the page) may be a Text or a Number field in Framer. Each run reads its type from the
+// collection, so the page can be sorted numerically (1, 2, ... 10) once the field is a Number, without a code change.
+let orderType: "number" | "string" = "string";
+async function readOrderType(col: any) {
+  const field = (await col.getFields()).find((f: any) => f.id === F.lessonNumber);
+  orderType = field?.type === "number" ? "number" : "string";
+}
+const orderField = (n: number) => (orderType === "number" ? { type: "number", value: Number(n) } : s(String(n)));
 const fv = (it: any, id: string) => { const v = it?.fieldData?.[id]?.value; return v && typeof v === "object" ? (v.url ?? null) : (v ?? null); };
 // What the sync writes for a circle. `existing` is its current Framer item (null for a new one).
 // New items and items the sync created get every field. Items taken over from hand-made ones keep their title, name,
@@ -210,7 +218,7 @@ function fieldsFor(c: any, existing: any = null) {
   const f: Record<string, any> = { [F.time]: s(timeText(c)) };
   // Hand-made items of circles not yet live keep their own Lesson text (e.g. "Starts 8 Oct").
   if ((startDate(c) || RUNNING.includes(c.status)) && (own || RUNNING.includes(c.status))) f[F.lesson] = s(lessonText(c));
-  if (c.website_order > 0) f[F.lessonNumber] = s(String(c.website_order));
+  if (c.website_order > 0) f[F.lessonNumber] = orderField(c.website_order);
   const photo = photoFor(c);
   const hasImg = Boolean(fv(existing, F.authorImg));
   if (photo && (!hasImg || (photo !== c.framer_photo_src && (own || (c.website_photo_url ?? "").trim())))) {
@@ -232,7 +240,7 @@ function fieldsFor(c: any, existing: any = null) {
 // Only the fields whose value differs from the Framer item (images are tracked through framer_photo_src instead).
 function changedFields(f: Record<string, any>, existing: any) {
   if (!existing) return f;
-  return Object.fromEntries(Object.entries(f).filter(([id, v]) => v.type === "image" ? id === F.authorImg || !fv(existing, id) : fv(existing, id) !== v.value));
+  return Object.fromEntries(Object.entries(f).filter(([id, v]) => v.type === "image" ? id === F.authorImg || !fv(existing, id) : String(fv(existing, id) ?? "") !== String(v.value)));
 }
 const isTest = (c: any) => c.is_demo || /\btest\b/i.test(c.name ?? "") || c.licence?.is_mock;
 // Live circles always have an item (hidden unless switched on). Circles awaiting approval only get one when an
@@ -292,6 +300,7 @@ async function syncInner(actor: string, { all = false, preview = false } = {}) {
   try {
     const col = (await framer.getCollections()).find((x: any) => x.id === COLLECTION);
     if (!col) throw new Error("Course collection not found in Framer");
+    await readOrderType(col);
     const items = await col.getItems();
     const byId = new Map(items.map((it: any) => [it.id, it]));
     const slugs = new Set(items.map((it: any) => it.slug));
@@ -394,6 +403,7 @@ async function snapshot() {
   try {
     const col = (await framer.getCollections()).find((x: any) => x.id === COLLECTION);
     if (!col) throw new Error("Course collection not found in Framer");
+    await readOrderType(col);
     const items = await col.getItems();
     const fields = await col.getFields();
     const val = (it: any, id: string) => { const v = it.fieldData?.[id]?.value; return v && typeof v === "object" ? (v.url ?? v.id ?? null) : (v ?? null); };
@@ -453,11 +463,8 @@ async function setItem(actor: string, body: any) {
   if (linked) throw new Error(`This item belongs to "${linked.name}". Change it from that circle instead.`);
   const input: any = { id };
   if (typeof body.draft === "boolean") input.draft = body.draft;
-  if (body.order !== undefined) {
-    const n = body.order === null || body.order === "" ? "" : String(Math.trunc(Number(body.order)));
-    if (n !== "" && !(Number(n) > 0)) throw new Error("Order must be a whole number from 1");
-    input.fieldData = { [F.lessonNumber]: s(n) };
-  }
+  const order = body.order === undefined ? undefined : body.order === null || body.order === "" ? null : Math.trunc(Number(body.order));
+  if (order !== undefined && order !== null && !(order > 0)) throw new Error("Order must be a whole number from 1");
   const { data: settings } = await db.from("settings").select("framer_auto_publish").eq("id", 1).single();
   const framer = await connect(PROJECT, Deno.env.get("FRAMER_API_KEY")!);
   let published: boolean | string = false;
@@ -466,6 +473,11 @@ async function setItem(actor: string, body: any) {
     if (!col) throw new Error("Course collection not found in Framer");
     const item = (await col.getItems()).find((it: any) => it.id === id);
     if (!item) throw new Error("That item is no longer in Framer");
+    if (order !== undefined) {
+      await readOrderType(col);
+      if (order === null && orderType === "number") throw new Error("A listing on the website needs an order number");
+      input.fieldData = { [F.lessonNumber]: order === null ? s("") : orderField(order) };
+    }
     await col.addItems([input]);
     // A hidden item that stays hidden is invisible to visitors, so only publish when the page actually changes.
     if (!(item as any).draft || input.draft === false) {

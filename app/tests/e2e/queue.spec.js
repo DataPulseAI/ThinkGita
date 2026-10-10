@@ -15,7 +15,7 @@ test.describe("Queue", () => {
     await expect(rows.nth(1).locator(".row-title")).toHaveText(NAMES.c03);
     await expect(rows.nth(1)).toContainText("Assigned to Zoom 02");
     await expect(rows.nth(1)).toContainText("Tue 18:00 New York time");
-    await expect(page.getByRole("button", { name: "Approve all ready (2)" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: /Approve all ready/ })).toHaveCount(0);
     await expect(page.locator("nav.tabs .tab", { hasText: "Queue" }).locator(".count")).toHaveText("3");
   });
 
@@ -81,12 +81,10 @@ test.describe("Queue", () => {
     await expect(modal(page)).toBeVisible();
   });
 
-  test("approve all ready approves every pending circle with a licence", async ({ page, mock, dialogs }) => {
+  test("the approve all ready button is hidden", async ({ page }) => {
     await signIn(page, { hash: "/Queue" });
-    await page.getByRole("button", { name: "Approve all ready (2)" }).click();
-    await expect(toast(page)).toHaveText("2 circles approved. Emails sent: 2 of 2.");
-    expect(dialogs.messages[0]).toBe("Create Zoom meetings for 2 circles and email their facilitators?");
-    expect(mock.fn("provision-circle")).toEqual([{ action: "provision", circle_id: "c03" }, { action: "provision", circle_id: "c08" }]);
+    await expect(page.locator(".row-title").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: /Approve all ready/ })).toHaveCount(0);
   });
 
   test("a clash can suggest free times and move to one", async ({ page, mock }) => {

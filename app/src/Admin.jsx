@@ -788,6 +788,8 @@ function CircleHoverCard({ c, shared = [] }) {
 }
 
 /* ---------------- Queue ---------------- */
+// Bulk approval is hidden for now: each circle is approved one at a time from its own row (set true to bring it back).
+const SHOW_BULK_APPROVE = false;
 function Queue({ data, run, onSelect }) {
   const [approving, setApproving] = useState(null);
   const clashes = data.circles.filter((c) => c.status === "conflict").length;
@@ -853,9 +855,11 @@ function Queue({ data, run, onSelect }) {
             Re-check all clashes ({clashes})
           </button>
         )}
-        <button className="primary" disabled={!ready.length || bulk} onClick={provisionAll}>
-          {bulk ? `Creating ${bulk.done + 1} of ${bulk.total}…` : `Approve all ready (${ready.length})`}
-        </button>
+        {SHOW_BULK_APPROVE && (
+          <button className="primary" disabled={!ready.length || bulk} onClick={provisionAll}>
+            {bulk ? `Creating ${bulk.done + 1} of ${bulk.total}…` : `Approve all ready (${ready.length})`}
+          </button>
+        )}
         </div>
       </div>
       {!items.length && <p className="muted">Nothing waiting. New Tally submissions appear here.</p>}

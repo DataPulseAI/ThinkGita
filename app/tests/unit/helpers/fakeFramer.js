@@ -1,13 +1,15 @@
 // Fake Framer project: one "Course" collection held in memory, with call logs.
 const clone = (v) => structuredClone(v);
 
-export function createFakeFramer({ items = [], collectionId = "xsdOXNmfm" } = {}) {
+// orderType: the type of the LessonNumber field ("string" or "number"); omitted = the field is not reported.
+export function createFakeFramer({ items = [], collectionId = "xsdOXNmfm", orderType } = {}) {
   const state = { items: clone(items), addCalls: [], publishCalls: 0, deployCalls: [], disconnected: 0, publishErrors: [], addErrors: [], onAdd: null };
   let n = 1;
   const col = {
     id: collectionId,
     getItems: async () => clone(state.items),
-    getFields: async () => [{ id: "jwZTR596c", name: "MainTitle" }, { id: "jAVGSOlAT", name: "AuthorName" }],
+    getFields: async () => [{ id: "jwZTR596c", name: "MainTitle" }, { id: "jAVGSOlAT", name: "AuthorName" },
+      ...(orderType ? [{ id: "t3ANvge1d", name: "LessonNumber", type: orderType }] : [])],
     addItems: async (inputs) => {
       state.addCalls.push(clone(inputs));
       state.onAdd?.(inputs);

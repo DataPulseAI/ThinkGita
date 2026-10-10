@@ -1,0 +1,107 @@
+name: Tests
+
+# Runs on every pull request, and on pushes to main that touch the app or the database.
+# See TESTING.md for what each suite covers and how to run it locally.
+on:
+  pull_request:
+    paths: ["app/**", "supabase/**", ".github/workflows/test.yml"]
+  push:
+    branches: [main]
+    paths: ["app/**", "supabase/**", ".github/workflows/test.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (Vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  e2e:
+    name: End-to-end tests (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      # The dashboard is built and served locally and every Supabase call is mocked,
+      # so this job needs no secrets and never touches the live project.
+      - run: npm run test:e2e
+      - name: Upload Playwright report and traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            app/playwright-report/
+            app/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  database:
+    name: Database tests and checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Runs only when the TEST_DATABASE_URL repository secret is set (Settings, Secrets and variables, Actions).
+    # Secrets cannot be read in a job-level `if`, so the secret is mapped to an env var and each step checks it.
+    #
+    # What it runs (app/scripts/test-db.mjs):
+    #   supabase/tests/sql/*.sql     behaviour tests. Each file is one DO block that always ends by raising an
+    #                                exception, so every insert, update and delete it makes is rolled back.
+    #   supabase/tests/checks/schema_*.sql  read-only invariants (RLS, grants, triggers, cron). Must pass.
+    #   supabase/tests/checks/data_*.sql    read-only data quality checks. Reported as warnings.
+    #
+    # Even though everything rolls back, point TEST_DATABASE_URL at a Supabase branch or a local stack
+    # (supabase start), not at production: the tests take advisory locks and briefly lock rows while they run,
+    # and a branch is the only place to try a migration before it reaches the live project.
+    # Use the direct or session pooler connection string (port 5432), not the transaction pooler (6543).
+    env:
+      TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Skip when no test database is configured
+        if: env.TEST_DATABASE_URL == ''
+        working-directory: .
+        run: echo "::notice::TEST_DATABASE_URL is not set, so the database tests were skipped."
+      - uses: actions/checkout@v4
+        if: env.TEST_DATABASE_URL != ''
+      - uses: actions/setup-node@v4
+        if: env.TEST_DATABASE_URL != ''
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        if: env.TEST_DATABASE_URL != ''
+      - run: npm run test:db
+        if: env.TEST_DATABASE_URL != ''
