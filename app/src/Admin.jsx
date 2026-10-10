@@ -2,18 +2,20 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import {
   supabase, adminAction, websiteSync, websitePublish, websiteSetItem, DAYS, DAY_NAMES, hhmm, toMin, endTime, STATUS_LABEL,
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
+  followSchedule, followsSchedule, autoNamePreview,
 } from "./lib.js";
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
 import { WebsiteReadiness, WebsiteFields, isReadinessNote, websiteMissing } from "./WebsiteFields.jsx";
 import { WebsitePage } from "./WebsitePage.jsx";
-import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders } from "./emailTemplate.js";
+import { FacilitatorsPage } from "./FacilitatorsPage.jsx";
+import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders, sampleChanges } from "./emailTemplate.js";
 
 const ACTIVE = ["pending", "approved", "live"];
 // Top bar: a few groups, each a dropdown of pages. Page keys stay the same (onTab("Queue") etc. still work).
 const NAV = [
   { label: "Overview", tabs: [["Overview", "Overview"]] },
   { label: "Queue", tabs: [["Queue", "Queue"]] },
-  { label: "Circles", tabs: [["Circles", "All circles"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
+  { label: "Circles", tabs: [["Circles", "All circles"], ["Facilitators", "Facilitators"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
   { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance"], ["Insights", "Attendance insights"]] },
   { label: "Setup", tabs: [["Website", "Website"], ["Emails", "Email templates"], ["EmailLog", "Sent emails"], ["Settings", "Settings"]] },
 ];
@@ -335,6 +337,7 @@ export default function Admin() {
         {tab === "Emails" && <Emails data={data} run={run} />}
         {tab === "EmailLog" && <EmailLog key={sub ?? ""} data={data} run={run} onSelect={select} initial={sub} />}
         {tab === "Website" && <WebsitePage data={data} run={run} onSelect={select} />}
+        {tab === "Facilitators" && <FacilitatorsPage data={data} run={run} onSelect={select} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
       </main>
       {selected && (
@@ -1059,8 +1062,6 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
   const live = circle?.status === "live";
   const editable = isNew || circle.status !== "ended";
   const [f, setF] = useState(() => ({
-    name: circle?.name ?? "",
-    name_auto: circle?.name_auto ?? true,
     facilitator_name: circle?.facilitator?.name ?? "",
     facilitator_email: circle?.facilitator?.email ?? "",
     phone: circle?.facilitator?.phone ?? "",
@@ -1138,8 +1139,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
       }
 
       const hasAlt = f.alt_weekday && f.alt_start_time;
+      // No name here: the database renames the circle when the host, day or time changes (see CircleName).
       const { data: saved, error } = await supabase.from("circles").update({
-        name: f.name_auto ? circle.name : f.name, name_auto: f.name_auto,
         circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
         alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
         ...linkFields(),
@@ -1167,7 +1168,6 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
       const facilitator_id = await linkFacilitator(circle, f);
       const hasAlt = f.alt_weekday && f.alt_start_time;
       const row = {
-        name: f.name_auto ? (circle?.name || "Gita Circles") : f.name, name_auto: f.name_auto,
         facilitator_id, weekday: Number(f.weekday), start_time: f.start_time,
         alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
         duration_min: Number(f.duration_min), timezone: f.timezone, preferred_start: f.preferred_start || null,
@@ -1179,7 +1179,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
       if (f.licence_id === "auto") Object.assign(row, { licence_id: null, status: "pending", conflict_reason: null });
       let id = circle?.id;
       if (isNew) {
-        const { data: created, error } = await supabase.from("circles").insert({ ...row, source: "manual" }).select("id").single();
+        // New circles always get the automatic name; the database sets it (the placeholder only fills the column).
+        const { data: created, error } = await supabase.from("circles").insert({ ...row, name: "Gita Circles", name_auto: true, source: "manual" }).select("id").single();
         if (error) throw error;
         id = created.id;
       } else {
@@ -1414,15 +1415,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
         )}
 
         <div className="form">
-          <label>Circle name
-            <input value={f.name_auto && isNew ? "" : f.name} placeholder="Set automatically when saved" disabled={!editable}
-              onChange={(e) => setF({ ...f, name: e.target.value, name_auto: false })} />
-          </label>
-          <p className="muted small name-hint">
-            {f.name_auto
-              ? "Automatic: Gita Circles | Initiated Name (Host Name) | Day Time. Updates when the host, day or time changes. Type to set your own."
-              : <>Custom name. <button type="button" className="link small" disabled={!editable} onClick={() => setF({ ...f, name_auto: true, name: circle?.name ?? "" })}>Use automatic name</button></>}
-          </p>
+          <CircleName circle={circle} form={f} editable={editable} run={run} />
           <div className="grid2">
             <label>Circle type<input value={f.circle_type} onChange={set("circle_type")} disabled={!editable} /></label>
             <label>Language<input value={f.language} onChange={set("language")} disabled={!editable} /></label>
@@ -1482,7 +1475,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
           <label>Notes<textarea rows="3" value={f.notes} onChange={set("notes")} disabled={!editable} /></label>
           {live && <p className="hint">Changing the day, time or length moves the existing Zoom meeting. The join link stays the same, and the facilitator is emailed the update.</p>}
           {editable && (
-            <button className="primary wide" disabled={(!f.name_auto && !f.name.trim()) || saving} onClick={save}>
+            <button className="primary wide" disabled={saving} onClick={save}>
               {saving ? "Saving…" : isNew ? "Add circle" : circle.status === "rejected" ? "Save and put back in queue" : "Save changes"}
             </button>
           )}
@@ -1500,6 +1493,52 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
         )}
       </aside>
     </div>
+  );
+}
+
+// Circle name in the editor: never typed. New circles and automatic names show the automatic name; an imported
+// (custom) name is shown as it is, with what happens to it on a schedule change and a way to switch to automatic.
+function CircleName({ circle, form, editable, run }) {
+  const [busy, setBusy] = useState(false);
+  const isNew = !circle;
+  const schedule = { weekday: Number(form.weekday), start_time: form.start_time, timezone: form.timezone };
+  if (isNew || circle.name_auto) {
+    const shown = isNew ? autoNamePreview({ host: form.facilitator_name, ...schedule }) : circle.name;
+    return (
+      <>
+        <label>Circle name<input value={shown} readOnly aria-readonly="true" /></label>
+        <p className="muted small name-hint">
+          {isNew ? "Set automatically when you add the circle: " : "Automatic: "}
+          Gita Circles | host | day and time. It follows the host, day and time, so it can't be typed.
+        </p>
+      </>
+    );
+  }
+  const after = followSchedule(circle.name, circle, schedule);
+  async function useAutomatic() {
+    const message = `Use the automatic name for this circle?\n\n"${circle.name}" will be replaced by a name that follows the host, day and time (Gita Circles | host | day and time).`
+      + `${circle.status === "live" ? " The Zoom meeting title changes to match." : ""} The current name can't be put back from the dashboard.`;
+    if (!confirm(message)) return;
+    setBusy(true);
+    await run(async () => {
+      const { data: saved, error } = await supabase.from("circles").update({ name_auto: true }).eq("id", circle.id).select("name").single();
+      if (error) throw error;
+      if (circle.status === "live" && saved.name !== circle.name) await adminAction("rename", circle.id);
+      return saved;
+    }, (saved) => `Name is now automatic: ${saved.name}`);
+    setBusy(false);
+  }
+  return (
+    <>
+      <label>Circle name<input value={circle.name} readOnly aria-readonly="true" /></label>
+      <p className="muted small name-hint">
+        Imported name. {followsSchedule(circle.name)
+          ? "Its day and time are updated when the schedule changes; everything else stays."
+          : "It stays exactly as it is when the schedule changes."}{" "}
+        <button type="button" className="link small" disabled={!editable || busy} onClick={useAutomatic}>Use automatic name</button>
+      </p>
+      {after !== circle.name && <p className="small name-after">After saving: <b>{after}</b></p>}
+    </>
   );
 }
 
@@ -2286,13 +2325,15 @@ function Settings({ data, run }) {
 }
 
 /* ---------------- Emails ---------------- */
-// Renders a template for one circle, marking anything not set yet.
-function EmailPreview({ template, circle, data, compact }) {
+// Renders a template for one circle, marking anything not set yet. withChanges: show example "What changed" lines
+// (the details changed email), as the test email does.
+function EmailPreview({ template, circle, data, compact, withChanges = false }) {
   const licence = data.licences.find((l) => l.id === circle?.licence_id);
-  const vars = buildVars({ circle: circle ?? {}, facilitator: circle?.facilitator, licence, settings: data.settings, appUrl: APP_URL, sender: data.me?.name });
+  const changes = withChanges && circle ? sampleChanges(circle) : [];
+  const vars = buildVars({ circle: circle ?? {}, facilitator: circle?.facilitator, licence, settings: data.settings, appUrl: APP_URL, sender: data.me?.name, changes });
   // Before approval, show where the Zoom details will go instead of flagging them as missing.
   if (circle?.status !== "live") {
-    for (const p of PLACEHOLDERS) if (p.auto && !vars[p.key]) vars[p.key] = `[${p.label.toLowerCase()}, added on approval]`;
+    for (const p of PLACEHOLDERS) if (p.auto && p.key !== "changes" && !vars[p.key]) vars[p.key] = `[${p.label.toLowerCase()}, added on approval]`;
     if (vars.start_date && !circle?.starts_on) vars.start_date = `${vars.start_date} (expected)`;
   }
   const { subject, html } = render(template, vars, { preview: true });
@@ -2306,7 +2347,7 @@ function EmailPreview({ template, circle, data, compact }) {
 
 const TEMPLATE_TABS = [
   ["approved", "Approval email", "Sent when a circle is approved, and by Resend details or a handover."],
-  ["updated", "Details changed", "Sent when a live circle's day or time changes, or it moves to another licence."],
+  ["updated", "Details changed", "Sent when a live circle's day or time changes, or it moves to another licence. It opens with what changed ({{changes}}); if the text leaves that out, it is added after the greeting."],
 ];
 const LINK_SETTINGS = [
   ["drive_folder_link", "Google Drive folder", "https://drive.google.com/…"],
@@ -2440,7 +2481,8 @@ function Emails({ data, run }) {
             {previewCircle && previewCircle.status !== "live" && (
               <p className="muted small">Zoom link, meeting ID, passcode and exact first date are filled in when the circle is approved.</p>
             )}
-            {previewCircle ? <EmailPreview template={draft} circle={previewCircle} data={previewData} /> : <p className="muted">Add a circle to preview.</p>}
+            {key === "updated" && previewCircle && <p className="muted small">"What changed" shows example changes here and in the test email (as if the circle moved from the day before).</p>}
+            {previewCircle ? <EmailPreview template={draft} circle={previewCircle} data={previewData} withChanges={key === "updated"} /> : <p className="muted">Add a circle to preview.</p>}
           </div>
         </div>
       </section>

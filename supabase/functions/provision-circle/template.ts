@@ -15,6 +15,7 @@ export const PLACEHOLDERS = [
   { key: "duration", label: "Length in minutes", group: "Circle" },
   { key: "start_date", label: "First session date", group: "Circle", auto: true },
   { key: "circle_code", label: "Short circle code", group: "Circle" },
+  { key: "changes", label: "What changed, before and after (details changed email)", group: "Circle", auto: true },
   { key: "zoom_meeting_link", label: "Zoom meeting link", group: "Zoom", auto: true },
   { key: "zoom_meeting_id", label: "Zoom meeting ID", group: "Zoom", auto: true },
   { key: "zoom_passcode", label: "Zoom passcode", group: "Zoom", auto: true },
@@ -30,6 +31,8 @@ export const PLACEHOLDERS = [
 ];
 const KNOWN = new Set(PLACEHOLDERS.map((p) => p.key));
 const AUTO = new Set(PLACEHOLDERS.filter((p) => p.auto).map((p) => p.key));
+// Filled in by the system when the email is sent, never "missing" for a circle.
+const ON_SEND = new Set(["changes"]);
 
 const DAY_NAMES = ["", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -60,11 +63,55 @@ function expectedStart(circle, settings) {
   return d.toISOString().slice(0, 10);
 }
 
+// "2026-10-17" -> "Saturday 17 October" (no year: it is always soon).
+function shortDate(iso) {
+  return longDate(iso).replace(/ \d{4}$/, "");
+}
+
+// What changed for a live circle, as "before to after" lines in the facilitator's own timezone. before and after are
+// circle rows; licences are compared for the host key. Used for {{changes}} in the "updated" email.
+export function describeChanges(before = {}, after = {}, { oldLicence = null, newLicence = null } = {}) {
+  const lines = [];
+  const time = (c) => (c.start_time ? String(c.start_time).slice(0, 5) : "");
+  const when = (c) => [DAY_NAMES[c.weekday] ?? "", time(c)].filter(Boolean).join(" ");
+  const tzBefore = before.timezone || "Europe/London";
+  const tzAfter = after.timezone || "Europe/London";
+  const schedule = Number(before.weekday) !== Number(after.weekday) || time(before) !== time(after) || tzBefore !== tzAfter;
+  const newLink = Boolean(after.join_url) && (after.join_url !== before.join_url);
+  if (schedule) {
+    lines.push(tzBefore === tzAfter
+      ? `Day and time: ${when(before)} to ${when(after)} (${friendlyTz(tzAfter)})`
+      : `Day and time: ${when(before)} (${friendlyTz(tzBefore)}) to ${when(after)} (${friendlyTz(tzAfter)})`);
+  }
+  if (after.starts_on && (schedule || newLink)) {
+    lines.push(`${schedule ? "First session at the new time" : "First session with the new link"}: ${shortDate(after.starts_on)}`);
+  } else if (after.starts_on && before.starts_on && after.starts_on !== before.starts_on) {
+    lines.push(`Next session: ${shortDate(before.starts_on)} to ${shortDate(after.starts_on)}`);
+  }
+  if (before.duration_min && after.duration_min && Number(before.duration_min) !== Number(after.duration_min)) {
+    lines.push(`Length: ${before.duration_min} to ${after.duration_min} minutes`);
+  }
+  if (before.name && after.name && before.name !== after.name) lines.push(`Circle name: ${before.name} to ${after.name}`);
+  lines.push(newLink
+    ? "Zoom link: new. The meeting link, meeting ID and passcode below have changed, so please share the new link in your WhatsApp group."
+    : "Zoom link: the same as before, so nothing changes in your WhatsApp group.");
+  if (newLicence?.host_key && oldLicence?.host_key !== newLicence.host_key) lines.push("Host key: new, see below.");
+  return lines;
+}
+
+// Example changes for previews and test emails: the circle as if it had moved here from the day before.
+export function sampleChanges(circle = {}) {
+  const weekday = Number(circle.weekday) || 1;
+  const before = { ...circle, weekday: weekday === 1 ? 7 : weekday - 1 };
+  return describeChanges(before, circle);
+}
+
 const firstWord = (s) => String(s ?? "").trim().split(/\s+/)[0] ?? "";
 const pick = (...vals) => vals.find((v) => v != null && String(v).trim() !== "") ?? "";
 
 // sender: display name of the admin sending the email (signs it). Falls back to settings, then a team name.
-export function buildVars({ circle = {}, facilitator = {}, licence = {}, settings = {}, appUrl = "", sender = "" }) {
+// changes: lines from describeChanges() for the "updated" email (empty otherwise).
+export function buildVars({ circle = {}, facilitator = {}, licence = {}, settings = {}, appUrl = "", sender = "", changes = [] }) {
   const code = circle.id ? String(circle.id).slice(0, 8) : "";
   const nameIsEmail = /@/.test(facilitator?.name ?? "");
   const signupPattern = pick(settings?.participant_signup_link);
@@ -80,6 +127,7 @@ export function buildVars({ circle = {}, facilitator = {}, licence = {}, setting
     duration: circle.duration_min ? String(circle.duration_min) : "",
     start_date: longDate(circle.starts_on || (circle.weekday ? expectedStart(circle, settings) : "")),
     circle_code: code,
+    changes: (changes ?? []).filter(Boolean).map((line) => `- ${line}`).join("\n"),
     zoom_meeting_link: pick(circle.join_url),
     zoom_meeting_id: pick(circle.zoom_meeting_id),
     zoom_passcode: pick(circle.passcode),
@@ -106,7 +154,7 @@ export function usedPlaceholders(template) {
 
 // Placeholders in the template that have no value. `beforeApproval` ignores the ones filled in on approval.
 export function missingValues(template, vars, { beforeApproval = false } = {}) {
-  return usedPlaceholders(template).filter((k) => KNOWN.has(k) && !vars[k] && !(beforeApproval && AUTO.has(k)));
+  return usedPlaceholders(template).filter((k) => KNOWN.has(k) && !ON_SEND.has(k) && !vars[k] && !(beforeApproval && AUTO.has(k)));
 }
 export function unknownPlaceholders(template) {
   return usedPlaceholders(template).filter((k) => !KNOWN.has(k));
@@ -114,14 +162,28 @@ export function unknownPlaceholders(template) {
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 
+const NO_CHANGES = "- Your Circle's details were updated.";
+const CHANGES_BLOCK = "WHAT CHANGED\n{{changes}}";
+
+// Templates saved before {{changes}} existed (or edited without it) still open with what changed: the block goes
+// straight after the greeting line ("Dear ...,"), or at the very top if there is none.
+export function withChanges(template, vars) {
+  if (!vars?.changes || usedPlaceholders(template).includes("changes")) return template;
+  const body = String(template?.body ?? "").replace(/\r\n/g, "\n");
+  const m = /^([^\n]{1,80},)\n{2,}/.exec(body);
+  return { ...template, body: m ? `${m[1]}\n\n${CHANGES_BLOCK}\n\n${body.slice(m[0].length)}` : `${CHANGES_BLOCK}\n\n${body}` };
+}
+
 // opts.missing: text used for a blank value (sent emails use a neutral phrase, the preview marks it).
-export function render(template, vars, { missing = "to follow", preview = false } = {}) {
+export function render(baseTemplate, vars, { missing = "to follow", preview = false } = {}) {
+  const template = withChanges(baseTemplate, vars);
   const value = (k) => {
     if (!KNOWN.has(k)) return null;
     return vars[k] ? String(vars[k]) : null;
   };
-  const subject = String(template?.subject ?? "").replace(TOKEN, (_, k) => value(k) ?? (KNOWN.has(k) ? missing : `{{${k}}}`)).replace(/[\r\n]+/g, " ").trim();
-  const text = String(template?.body ?? "").replace(TOKEN, (_, k) => value(k) ?? (KNOWN.has(k) ? missing : `{{${k}}}`));
+  const blank = (k) => (k === "changes" ? NO_CHANGES : missing);
+  const subject = String(template?.subject ?? "").replace(TOKEN, (_, k) => value(k)?.replace(/\n/g, " ") ?? (KNOWN.has(k) ? blank(k) : `{{${k}}}`)).replace(/[\r\n]+/g, " ").trim();
+  const text = String(template?.body ?? "").replace(TOKEN, (_, k) => value(k) ?? (KNOWN.has(k) ? blank(k) : `{{${k}}}`));
 
   // HTML: escape everything, then add links, headings and paragraphs.
   const lineHtml = (line) => {
@@ -130,9 +192,9 @@ export function render(template, vars, { missing = "to follow", preview = false 
     for (const m of line.matchAll(TOKEN)) {
       out += esc(line.slice(last, m.index));
       const v = value(m[1]);
-      if (v) out += linkify(esc(v));
+      if (v) out += linkify(esc(v)).replace(/\n/g, "<br>");
       else if (preview) out += `<mark class="missing">${esc(KNOWN.has(m[1]) ? `${m[1]}: not set` : `unknown: ${m[1]}`)}</mark>`;
-      else out += esc(KNOWN.has(m[1]) ? missing : m[0]);
+      else out += esc(KNOWN.has(m[1]) ? blank(m[1]) : m[0]);
       last = m.index + m[0].length;
     }
     out += esc(line.slice(last));
@@ -209,7 +271,12 @@ Think Gita Circles Team`,
     subject: "Your Think Gita Circle details have changed, {{first_name}}",
     body: `Dear {{first_name}},
 
-Some details of your Circle have changed. Your up-to-date details are below. Please use these from now on.
+Some details of your Circle have changed.
+
+WHAT CHANGED
+{{changes}}
+
+Your up-to-date details are below. Please use these from now on.
 
 YOUR CIRCLE
 Circle name: {{circle_name}}

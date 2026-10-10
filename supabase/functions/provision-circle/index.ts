@@ -3,7 +3,7 @@
 //          | "set_host_key" | "rename" | "list_zoom_meetings" | "sync_attendance" | "invite_admin" | "test_email",
 //        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template? }
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { buildVars, render, DEFAULT_TEMPLATES } from "./template.ts";
+import { buildVars, render, DEFAULT_TEMPLATES, describeChanges, sampleChanges } from "./template.ts";
 import nodemailer from "npm:nodemailer@6.9.16";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -135,13 +135,14 @@ async function adminName(email: string) {
   const { data } = await db.from("admin_emails").select("name").eq("email", email).maybeSingle();
   return data?.name ?? "";
 }
-async function sendDetailsEmail(key: TemplateKey, circle: any, facilitator: any, licence: any, actor: string) {
+// changes: "before to after" lines (describeChanges) for the "updated" email; they open the email as "What changed".
+async function sendDetailsEmail(key: TemplateKey, circle: any, facilitator: any, licence: any, actor: string, changes: string[] = []) {
   const meta: EmailMeta = { kind: key, circle, actor };
   if (!EMAIL_READY) { await logEmail(meta, facilitator?.email ?? null, null, "skipped", "Email isn't set up (GMAIL_USER / GMAIL_APP_PASSWORD)"); return "skipped (GMAIL_USER / GMAIL_APP_PASSWORD not set)"; }
   if (!facilitator?.email) { await logEmail(meta, null, null, "skipped", "Circle has no facilitator email"); return "skipped (no facilitator)"; }
   const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
   const template = await loadTemplate(key);
-  const vars = buildVars({ circle, facilitator, licence, settings, appUrl: APP_URL, sender: await adminName(actor) });
+  const vars = buildVars({ circle, facilitator, licence, settings, appUrl: APP_URL, sender: await adminName(actor), changes });
   const { subject, html, text } = render(template, vars);
   return await sendEmail(facilitator.email, subject, html, text, meta, settings?.support_contact || undefined);
 }
@@ -153,11 +154,11 @@ async function circleTeam(circleId: string, primary: any) {
   return [primary, ...(data ?? []).map((r: any) => r.facilitator)]
     .filter((f) => f?.email && !seen.has(f.email) && seen.add(f.email));
 }
-async function sendDetailsToTeam(key: TemplateKey, circle: any, primary: any, licence: any, actor: string) {
+async function sendDetailsToTeam(key: TemplateKey, circle: any, primary: any, licence: any, actor: string, changes: string[] = []) {
   const team = await circleTeam(circle.id, primary);
-  if (!team.length) return await sendDetailsEmail(key, circle, null, licence, actor); // logged as skipped
+  if (!team.length) return await sendDetailsEmail(key, circle, null, licence, actor, changes); // logged as skipped
   const results: string[] = [];
-  for (const f of team) results.push(await sendDetailsEmail(key, circle, f, licence, actor));
+  for (const f of team) results.push(await sendDetailsEmail(key, circle, f, licence, actor, changes));
   const bad = results.find((x) => x !== "sent");
   return !bad ? "sent" : team.length > 1 ? `${results.filter((x) => x === "sent").length} of ${team.length} sent; ${bad}` : bad;
 }
@@ -168,7 +169,9 @@ async function testEmail(circleId: string, actor: string, key: TemplateKey, draf
   const c = await loadCircle(circleId);
   const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
   const template = draft?.subject != null && draft?.body != null ? draft : await loadTemplate(key);
-  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: c.licence, settings, appUrl: APP_URL, sender: await adminName(actor) });
+  // The details changed email shows example changes (the circle as if moved from the day before).
+  const changes = key === "updated" ? sampleChanges(c) : [];
+  const vars = buildVars({ circle: c, facilitator: c.facilitator, licence: c.licence, settings, appUrl: APP_URL, sender: await adminName(actor), changes });
   const { subject, html, text } = render(template as { subject: string; body: string }, vars);
   const result = await sendEmail(actor, `[TEST] ${subject}`, html, text, { kind: "test", circle: c, actor });
   if (result !== "sent") throw new Error(`Test email ${result}`);
@@ -358,6 +361,8 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
   if (!Object.keys(clean).length) return { status: "live", unchanged: true, email: "not needed (nothing changed)" };
   const old = Object.fromEntries(RESCHEDULE_FIELDS.map((k) => [k, c[k]]));
 
+  // The database renames the circle in the same update when its name follows the schedule (automatic names, and
+  // imported "TG ... | Tue | 5pm CT | ..." names), so `updated.name` below is already the new name.
   const { data: updated, error } = await db.from("circles").update(clean).eq("id", c.id).select("*").single();
   if (error) {
     throw new Error(/no_licence_clash/.test(error.message)
@@ -386,13 +391,15 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
         }),
       });
     } catch (e) {
-      await db.from("circles").update(old).eq("id", c.id);
+      await db.from("circles").update({ ...old, name: c.name }).eq("id", c.id); // the old name too, exactly as it was
       throw e;
     }
   }
 
-  const { data: final } = await db.from("circles").update({ starts_on: startsOn }).eq("id", c.id).select("*").single();
-  const email = await sendDetailsToTeam("updated", final, c.facilitator, c.licence, actor);
+  const { data: saved } = await db.from("circles").update({ starts_on: startsOn }).eq("id", c.id).select("*").single();
+  const final = saved ?? { ...updated, starts_on: startsOn };
+  const changes = describeChanges(c, final, { oldLicence: c.licence, newLicence: c.licence });
+  const email = await sendDetailsToTeam("updated", final, c.facilitator, c.licence, actor, changes);
   await audit(actor, "reschedule", c.id, { from: old, to: clean, email });
   return { status: "live", starts_on: startsOn, email };
 }
@@ -500,7 +507,8 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
   if (c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
     await zoom(`/meetings/${c.zoom_meeting_id}`, { method: "DELETE" }).catch(() => {});
   }
-  const email = await sendDetailsToTeam("updated", updated, c.facilitator, target, actor);
+  const changes = describeChanges(c, updated ?? c, { oldLicence: c.licence, newLicence: target });
+  const email = await sendDetailsToTeam("updated", updated, c.facilitator, target, actor, changes);
   await audit(actor, "move_licence", c.id, { from: c.licence?.label, to: target.label, old_meeting: c.zoom_meeting_id, new_meeting: meeting.id, email });
   return { licence: target.label, join_url: meeting.join_url, email };
 }
