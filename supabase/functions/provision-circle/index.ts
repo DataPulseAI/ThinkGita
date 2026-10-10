@@ -74,6 +74,24 @@ function firstOccurrence(from: string, weekday: number) {
   d.setUTCDate(d.getUTCDate() + ((weekday - cur + 7) % 7));
   return isoDate(d);
 }
+// Today's date in the circle's own timezone (an evening session in the Americas is still "today" there after UK midnight).
+function localToday(tz?: string | null) {
+  try { return new Date().toLocaleDateString("en-CA", { timeZone: tz || "Europe/London" }); } catch { return ukToday(); }
+}
+// Zoom wants the series end in UTC: 23:59 on the last day in the circle's own timezone, so a late-evening session in the
+// Americas (after midnight UTC) is not cut off.
+function endUtc(date: string, tz?: string | null) {
+  const [y, m, d] = date.split("-").map(Number);
+  const wall = Date.UTC(y, m - 1, d, 23, 59);
+  let offset = 0;
+  try {
+    const name = new Intl.DateTimeFormat("en-US", { timeZone: tz || "Europe/London", timeZoneName: "longOffset" })
+      .formatToParts(new Date(wall)).find((p) => p.type === "timeZoneName")?.value ?? "GMT";
+    const mm = /GMT([+-])(\d{1,2})(?::?(\d{2}))?/.exec(name);
+    if (mm) offset = (mm[1] === "-" ? -1 : 1) * (Number(mm[2]) * 60 + Number(mm[3] ?? 0));
+  } catch { /* unknown zone: treat as UTC */ }
+  return new Date(wall - offset * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
 function weeksBetween(a: string, b: string) {
   return Math.floor((Date.parse(b) - Date.parse(a)) / (7 * 86400000)) + 1;
 }
@@ -221,7 +239,7 @@ async function provision(circleId: string, actor: string, notify = true) {
   try {
 
   const { data: s } = await db.from("settings").select("*").eq("id", 1).single();
-  const today = ukToday();
+  const today = localToday(c.timezone);
   // Start from the latest of: today, term start, facilitator's preferred start date.
   const from = [today, s.term_start, c.preferred_start].filter(Boolean).sort().pop() as string;
   const startsOn = firstOccurrence(from, c.weekday);
@@ -236,7 +254,7 @@ async function provision(circleId: string, actor: string, notify = true) {
     if (weeksBetween(startsOn, s.term_end) > MAX_OCCURRENCES) {
       throw new Error(`Term is longer than ${MAX_OCCURRENCES} weeks; shorten term_end in Settings`);
     }
-    recurrence.end_date_time = `${s.term_end}T23:59:00Z`;
+    recurrence.end_date_time = endUtc(s.term_end, c.timezone);
     endsOn = s.term_end;
   } else {
     recurrence.end_times = MAX_OCCURRENCES;
@@ -343,18 +361,18 @@ async function reschedule(circleId: string, actor: string, patch: Record<string,
   const { data: updated, error } = await db.from("circles").update(clean).eq("id", c.id).select("*").single();
   if (error) {
     throw new Error(/no_licence_clash/.test(error.message)
-      ? `That time clashes with another circle on ${c.licence?.label}. Pick another time, or move the circle to another licence first.`
+      ? `${c.licence?.label} already has 2 meetings at that time. Pick another time, or move the circle to another licence first.`
       : error.message);
   }
 
-  const today = ukToday();
+  const today = localToday(updated.timezone ?? c.timezone);
   // Never pull a not-yet-started circle earlier than planned.
   const from = [today, updated.preferred_start, c.starts_on].filter(Boolean).sort().pop() as string;
   const startsOn = firstOccurrence(from, updated.weekday);
 
   if (!c.licence?.is_mock && c.zoom_meeting_id && !String(c.zoom_meeting_id).startsWith("MOCK")) {
     const recurrence: Record<string, unknown> = { type: 2, repeat_interval: 1, weekly_days: String((updated.weekday % 7) + 1) };
-    if (c.ends_on) recurrence.end_date_time = `${c.ends_on}T23:59:00Z`;
+    if (c.ends_on) recurrence.end_date_time = endUtc(c.ends_on, updated.timezone ?? c.timezone);
     else recurrence.end_times = MAX_OCCURRENCES;
     try {
       await zoom(`/meetings/${c.zoom_meeting_id}`, {
@@ -417,9 +435,8 @@ async function handover(circleId: string, actor: string, person: { name?: string
 // A date today or earlier ends it now.
 async function endOn(circleId: string, actor: string, date: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date ?? ""))) throw new Error("A valid end date is needed");
-  const today = ukToday();
-  if (date <= today) return cancel(circleId, actor);
   const c = await loadCircle(circleId);
+  if (date <= localToday(c.timezone)) return cancel(circleId, actor);
   if (c.status !== "live") {
     await db.from("circles").update({ ends_on: date }).eq("id", c.id);
     await audit(actor, "end_on", c.id, { date });
@@ -429,7 +446,7 @@ async function endOn(circleId: string, actor: string, date: string) {
     await zoom(`/meetings/${c.zoom_meeting_id}`, {
       method: "PATCH",
       body: JSON.stringify({
-        recurrence: { type: 2, repeat_interval: 1, weekly_days: String((c.weekday % 7) + 1), end_date_time: `${date}T23:59:00Z` },
+        recurrence: { type: 2, repeat_interval: 1, weekly_days: String((c.weekday % 7) + 1), end_date_time: endUtc(date, c.timezone) },
       }),
     });
   }
@@ -450,14 +467,14 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
 
   const { error: moveErr } = await db.from("circles").update({ licence_id: target.id }).eq("id", c.id);
   if (moveErr) {
-    throw new Error(/no_licence_clash/.test(moveErr.message) ? `${target.label} is already booked at this circle's time` : moveErr.message);
+    throw new Error(/no_licence_clash/.test(moveErr.message) ? `${target.label} already has 2 meetings at this circle's time` : moveErr.message);
   }
 
-  const today = ukToday();
+  const today = localToday(c.timezone);
   const from = [today, c.starts_on].filter(Boolean).sort().pop() as string;
   const startsOn = firstOccurrence(from, c.weekday);
   const recurrence: Record<string, unknown> = { type: 2, repeat_interval: 1, weekly_days: String((c.weekday % 7) + 1) };
-  if (c.ends_on) recurrence.end_date_time = `${c.ends_on}T23:59:00Z`;
+  if (c.ends_on) recurrence.end_date_time = endUtc(c.ends_on, c.timezone);
   else recurrence.end_times = MAX_OCCURRENCES;
 
   let meeting;

@@ -79,8 +79,8 @@ export function circleMessage(c, hostKey, { forFacilitator = true } = {}) {
     `Every ${DAY_NAMES[c.weekday]}, ${hhmm(c.start_time)}–${endTime(c.start_time, c.duration_min)} (${tzName(c.timezone)} time)`,
     c.starts_on && `From ${fmtDate(c.starts_on)}${c.ends_on ? ` to ${fmtDate(c.ends_on)}` : ""}`,
     "",
-    `Join Zoom: ${c.join_url}`,
-    `Meeting ID: ${c.zoom_meeting_id}`,
+    c.join_url ? `Join Zoom: ${c.join_url}` : "Join link: to follow",
+    c.zoom_meeting_id && `Meeting ID: ${c.zoom_meeting_id}`,
     c.passcode && `Passcode: ${c.passcode}`,
   ];
   if (forFacilitator) {

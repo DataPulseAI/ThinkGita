@@ -4,6 +4,7 @@ import {
   ukDay, ukStart, ukWhen, localWhen, isUk, tzName, TIMEZONES, UK_TZ, fmtDate, circleMessage, REQUEST_TYPES, requestSummary,
 } from "./lib.js";
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
+import { WebsiteReadiness, WebsiteFields, isReadinessNote } from "./WebsiteFields.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders } from "./emailTemplate.js";
 
 const ACTIVE = ["pending", "approved", "live"];
@@ -68,6 +69,54 @@ function emailGaps(c, data) {
 // Schedule blocks are small and already placed by time: show just the host part of an automatic name.
 const blockName = (name) => String(name ?? "").replace(/^Gita Circles \| /, "").replace(/ \| [A-Z][a-z]+day \d{2}:\d{2} \([^)]*\)$/, "");
 const placeholderLabel = (k) => PLACEHOLDERS.find((p) => p.key === k)?.label ?? k;
+
+// Licence sharing. Zoom runs up to 2 meetings at once on one licence, so two circles may overlap on a licence
+// (allowed, shown calmly); a 3rd at the same moment is over the limit (shown as a warning).
+// Times are UK minutes of the week (Mon 00:00 = 0) including the buffer, taken from the circle's `slots`
+// (every UK time it occupies across its run, so clock changes abroad are covered), as the database checks them.
+const WEEK = 10080;
+const ZOOM_AT_ONCE = 2;
+const HOLDS = ["pending", "approved", "live", "paused"]; // statuses that hold a licence (same as the database check)
+function circleRanges(c, buffer = 0) {
+  const m = String(c.slots ?? "").match(/\d+,\d+/g);
+  if (m) return m.map((p) => p.split(",").map(Number));
+  const s = (ukDay(c) - 1) * 1440 + toMin(ukStart(c));
+  const e = s + c.duration_min + buffer;
+  return e > WEEK ? [[s, WEEK], [0, e - WEEK]] : [[s, e]];
+}
+const rangesOverlap = (a, b) => a.some(([s1, e1]) => b.some(([s2, e2]) => s1 < e2 && s2 < e1));
+// Most of these circles running at the same moment, optionally only between `from` and `to`.
+function peakAtOnce(list, buffer, from = 0, to = WEEK) {
+  const ev = [];
+  for (const c of list) {
+    for (const [s, e] of circleRanges(c, buffer)) {
+      const a = Math.max(s, from), b = Math.min(e, to);
+      if (a < b) ev.push([a, 1], [b, -1]);
+    }
+  }
+  ev.sort((x, y) => x[0] - y[0] || x[1] - y[1]); // an end and a start at the same minute don't overlap
+  let n = 0, peak = 0;
+  for (const [, d] of ev) { n += d; peak = Math.max(peak, n); }
+  return peak;
+}
+// Circles holding licence `licenceId` (default: this circle's) whose time overlaps circle `c`.
+function sharers(c, circles, buffer, licenceId = c?.licence_id) {
+  if (!c || !licenceId) return [];
+  const mine = circleRanges(c, buffer);
+  return circles.filter((o) => o.id !== c.id && o.licence_id === licenceId && HOLDS.includes(o.status) && rangesOverlap(mine, circleRanges(o, buffer)));
+}
+// How many meetings would run at once on that licence at this circle's busiest moment (itself included).
+function atOnceWith(c, circles, buffer, licenceId) {
+  const others = sharers(c, circles, buffer, licenceId);
+  return 1 + Math.max(0, ...circleRanges(c, buffer).map(([s, e]) => peakAtOnce(others, buffer, s, e)));
+}
+// Days (1 to 7) on which a licence has 2 or more circles at once, with the peak for each.
+function sharedDays(licenceId, circles, buffer) {
+  const held = circles.filter((c) => c.licence_id === licenceId && HOLDS.includes(c.status));
+  return [1, 2, 3, 4, 5, 6, 7]
+    .map((d) => ({ d, peak: peakAtOnce(held, buffer, (d - 1) * 1440, d * 1440) }))
+    .filter((x) => x.peak >= 2);
+}
 // Ask before approving when the email would say "to follow" for something.
 function confirmGaps(circles, data) {
   const withGaps = circles.map((c) => [c, emailGaps(c, data)]).filter(([, g]) => g.length);
@@ -307,6 +356,10 @@ function Overview({ data, onDay, onTab, go }) {
     days: [1, 2, 3, 4, 5, 6, 7].map((d) => circles.filter((c) => c.licence_id === l.id && ukDay(c) === d && ACTIVE.includes(c.status)).length),
   }));
   const max = Math.max(1, ...matrix.flatMap((r) => r.days));
+  // Peak meetings at once per licence per day (2 = shared licence, allowed; 3+ = over Zoom's limit).
+  const peaks = new Map(active.map((l) => [l.id, new Map(sharedDays(l.id, circles, data.settings.buffer_minutes).map((x) => [x.d, x.peak]))]));
+  const anyShared = [...peaks.values()].some((m) => m.size);
+  const anyOver = [...peaks.values()].some((m) => [...m.values()].some((p) => p > ZOOM_AT_ONCE));
   const demo = circles.some((c) => c.is_demo);
   const mocks = active.filter((l) => l.is_mock);
 
@@ -353,9 +406,16 @@ function Overview({ data, onDay, onTab, go }) {
               {matrix.map(({ l, days }) => (
                 <tr key={l.id}>
                   <th className="rowhead">{l.label} {l.is_mock && <span className="tag">mock</span>}</th>
-                  {days.map((n, i) => (
-                    <td key={i} onClick={() => onDay(i + 1)} style={{ "--a": n / max }} className={n ? "filled" : ""}>{n || ""}</td>
-                  ))}
+                  {days.map((n, i) => {
+                    const peak = peaks.get(l.id)?.get(i + 1) ?? 0;
+                    const over = peak > ZOOM_AT_ONCE;
+                    return (
+                      <td key={i} onClick={() => onDay(i + 1)} style={{ "--a": n / max }} className={`${n ? "filled" : ""} ${peak >= 2 ? "shared" : ""} ${over ? "over" : ""}`}
+                        title={peak >= 2 ? `${l.label} has ${peak} circles at once on ${DAY_NAMES[i + 1]}${over ? ": over Zoom's limit of 2" : " (shared licence, allowed)"}` : undefined}>
+                        {n || ""}{peak >= 2 && <span className="at-once" aria-label={`${peak} at once`}>{peak}×</span>}
+                      </td>
+                    );
+                  })}
                 </tr>
               ))}
               <tr>
@@ -368,6 +428,12 @@ function Overview({ data, onDay, onTab, go }) {
             </tbody>
           </table>
         </div>
+        {anyShared && (
+          <p className="muted small matrix-note">
+            <span className="at-once">2×</span> two circles share that licence at the same time (Zoom allows 2 at once).
+            {anyOver && <> <span className="at-once over">3×</span> <span className="warn-text">more than Zoom allows: move one.</span></>}
+          </p>
+        )}
       </section>
     </>
   );
@@ -440,24 +506,70 @@ function Stat({ label, value, tone, onClick }) {
 /* ---------------- Schedule (day timeline, UK time) ---------------- */
 function Schedule({ data, day, setDay, onSelect }) {
   const { circles, licences, settings } = data;
-  const todays = circles.filter((c) => ukDay(c) === day && (ACTIVE.includes(c.status) || c.status === "conflict"));
+  const buffer = settings.buffer_minutes;
+  const shown = circles.filter((c) => HOLDS.includes(c.status) || c.status === "conflict");
+  const todays = shown.filter((c) => ukDay(c) === day);
   // Always show the whole day (00:00 to 24:00) fitted to the screen.
   const startH = 0;
   const endH = 24;
   const clashes = todays.filter((c) => c.status === "conflict").length;
   const span = (endH - startH) * 60;
   const pos = (min) => `${((min - startH * 60) / span) * 100}%`;
+  // Each circle's piece of this day, in minutes from 00:00 UK. A circle from the evening before that runs past
+  // midnight shows as a continued piece at the start of the day.
+  const dayStart = (day - 1) * 1440;
+  const pieces = (list) => list.flatMap((c) => {
+    const rel = ((((ukDay(c) - 1) * 1440 + toMin(ukStart(c)) - dayStart) % WEEK) + WEEK) % WEEK;
+    if (rel < 1440) return [{ c, s: rel, e: rel + c.duration_min }];
+    const s = rel - WEEK; // started before today
+    return s + c.duration_min > 0 ? [{ c, s, e: s + c.duration_min, cont: true }] : [];
+  }).sort((a, b) => a.s - b.s || a.e - b.e);
+  // Overlapping circles on one licence go side by side in rows (with the buffer, as the licence check counts it).
+  const rowsFor = (items) => {
+    const ends = [];
+    for (const it of items) {
+      let r = ends.findIndex((end) => end <= it.s);
+      if (r < 0) { r = ends.length; ends.push(0); }
+      ends[r] = it.e + buffer;
+      it.row = r;
+    }
+    return Math.max(1, ends.length);
+  };
+  // Stretches of the day where 2 or more of these circles run at once.
+  const bands = (items) => {
+    const ev = items.flatMap((it) => [[Math.max(0, it.s), 1], [Math.min(1440, it.e + buffer), -1]]).sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+    const out = [];
+    let n = 0, cur = null;
+    for (const [t, d] of ev) {
+      n += d;
+      if (n >= 2) cur = cur ? { ...cur, peak: Math.max(cur.peak, n) } : { s: t, peak: n };
+      else if (cur) { out.push({ ...cur, e: t }); cur = null; }
+    }
+    return out.filter((b) => b.e > b.s);
+  };
   const lanes = [
-    ...licences.filter((l) => l.active).map((l) => ({ key: l.id, label: l.label, mock: l.is_mock, items: todays.filter((c) => c.licence_id === l.id) })),
-    { key: "none", label: "No licence", items: todays.filter((c) => c.status === "conflict"), warn: true },
+    ...licences.filter((l) => l.active).map((l) => {
+      const held = shown.filter((c) => c.licence_id === l.id && HOLDS.includes(c.status));
+      const items = pieces(held);
+      return { key: l.id, label: l.label, mock: l.is_mock, items, rows: rowsFor(items), bands: bands(items), peak: peakAtOnce(held, buffer, dayStart, dayStart + 1440) };
+    }),
+    { key: "none", label: "No licence", items: pieces(todays.filter((c) => c.status === "conflict")).map((it, idx) => ({ ...it, row: idx })), warn: true },
   ];
+  const sharedLanes = lanes.filter((l) => l.peak >= 2);
+  const overLanes = lanes.filter((l) => l.peak > ZOOM_AT_ONCE);
 
   return (
     <section className="card">
       <div className="card-head">
         <h2>
           {DAY_NAMES[day]} <span className="muted small">UK time</span>
-          <span className="day-count">{todays.length} circle{todays.length === 1 ? "" : "s"}{clashes ? `, ${clashes} clash${clashes === 1 ? "" : "es"}` : ""}</span>
+          <span className="day-count">{todays.length} circle{todays.length === 1 ? "" : "s"}{clashes ? `, ${clashes} with no licence` : ""}</span>
+          {sharedLanes.length > 0 && (
+            <span className={`day-count ${overLanes.length ? "over" : "shared"}`}
+              title={overLanes.length ? `${overLanes.map((l) => l.label).join(", ")}: more than 2 meetings at once` : `${sharedLanes.map((l) => l.label).join(", ")}: 2 meetings at once, which Zoom allows`}>
+              {overLanes.length ? `${overLanes.length} licence${overLanes.length === 1 ? "" : "s"} over the limit` : `${sharedLanes.length} shared licence${sharedLanes.length === 1 ? "" : "s"}`}
+            </span>
+          )}
         </h2>
         <div className="seg">
           {[1, 2, 3, 4, 5, 6, 7].map((d) => (
@@ -465,7 +577,7 @@ function Schedule({ data, day, setDay, onSelect }) {
           ))}
         </div>
       </div>
-      <p className="muted small">Whole day, 00:00 to 24:00. Shaded tail = {settings.buffer_minutes}-minute buffer before the licence can be reused. Hover a circle for details, click to open it.</p>
+      <p className="muted small">Whole day, 00:00 to 24:00. Shaded tail = {settings.buffer_minutes}-minute buffer before the licence can be reused. A licence can run 2 meetings at once, so overlapping circles sit side by side. Hover a circle for details, click to open it.</p>
       {!todays.length && <p className="muted">No circles on {DAY_NAMES[day]}. Pick another day above, or add one from Circles.</p>}
       <div className="timeline">
         <div className="lane hours-row">
@@ -476,53 +588,71 @@ function Schedule({ data, day, setDay, onSelect }) {
             ))}
           </div>
         </div>
-        {lanes.map((lane) => (
-          <div key={lane.key} className={`lane ${lane.warn ? "lane-warn" : ""}`}>
-            <div className="lane-label">{lane.label}{lane.mock && <span className="tag">mock</span>}</div>
-            <div className="lane-track" style={lane.warn ? { height: Math.max(1, lane.items.length) * 30 + 8 } : undefined}>
-              {Array.from({ length: endH - startH }, (_, i) => (
-                <i key={i} className={`gridline ${(startH + i) % 3 ? "" : "major"}`} style={{ left: pos((startH + i) * 60) }} />
-              ))}
-              {lane.items.map((c, idx) => {
-                const s = toMin(ukStart(c));
-                const top = lane.warn ? 4 + idx * 30 : 4;
-                return (
-                  <Hover key={c.id} content={<CircleHoverCard c={c} />}>
-                    <button
-                      className={`block st-${c.status}`}
-                      style={{ left: pos(s), width: `calc(${pos(Math.min(s + c.duration_min, endH * 60))} - ${pos(s)})`, top, height: lane.warn ? 26 : undefined }}
-                      onClick={() => onSelect(c)}
-                      aria-label={`${c.name}, ${ukWhen(c)} UK, ${STATUS_LABEL[c.status]}`}
-                    >
-                      <span className="b-name">{blockName(c.name)}</span>
-                      <span className="b-time">{hhmm(ukStart(c))}–{endTime(ukStart(c), c.duration_min)}</span>
-                      {!lane.warn && (
-                        <em className="buffer" style={{ width: `${(settings.buffer_minutes / c.duration_min) * 100}%`, right: `-${(settings.buffer_minutes / c.duration_min) * 100}%` }} />
-                      )}
-                    </button>
-                  </Hover>
-                );
-              })}
+        {lanes.map((lane) => {
+          const stacked = lane.warn || lane.rows > 1;
+          const over = lane.peak > ZOOM_AT_ONCE;
+          return (
+            <div key={lane.key} className={`lane ${lane.warn ? "lane-warn" : over ? "lane-over" : ""} ${stacked ? "lane-stacked" : ""}`}>
+              <div className="lane-label">
+                <span>{lane.label}{lane.mock && <span className="tag">mock</span>}</span>
+                {lane.peak >= 2 && (
+                  <span className={`at-once-tag ${over ? "over" : ""}`} title={over ? "More meetings at once than Zoom allows (2). Move one of them." : "Two circles overlap on this licence. Zoom allows 2 meetings at once."}>
+                    {lane.peak} at once
+                  </span>
+                )}
+              </div>
+              <div className="lane-track" style={stacked ? { height: lane.warn ? Math.max(1, lane.items.length) * 30 + 8 : lane.rows * 34 + 6 } : undefined}>
+                {Array.from({ length: endH - startH }, (_, i) => (
+                  <i key={i} className={`gridline ${(startH + i) % 3 ? "" : "major"}`} style={{ left: pos((startH + i) * 60) }} />
+                ))}
+                {(lane.bands ?? []).map((b) => (
+                  <i key={b.s} className={`share-band ${b.peak > ZOOM_AT_ONCE ? "over" : ""}`} style={{ left: pos(b.s), width: `calc(${pos(b.e)} - ${pos(b.s)})` }} />
+                ))}
+                {lane.items.map(({ c, s, e, cont, row }) => {
+                  const from = Math.max(s, 0);
+                  const to = Math.min(e, endH * 60);
+                  const tail = Math.min(buffer, endH * 60 - to);
+                  return (
+                    <Hover key={c.id} content={<CircleHoverCard c={c} shared={lane.warn ? [] : sharers(c, circles, buffer)} />}>
+                      <button
+                        className={`block st-${c.status} ${cont ? "cont" : ""}`}
+                        style={{ left: pos(from), width: `calc(${pos(to)} - ${pos(from)})`, top: lane.warn ? 4 + row * 30 : 3 + row * 34, height: lane.warn ? 26 : stacked ? 31 : undefined }}
+                        onClick={() => onSelect(c)}
+                        aria-label={`${c.name}, ${ukWhen(c)} UK, ${STATUS_LABEL[c.status]}`}
+                      >
+                        <span className="b-name">{blockName(c.name)}</span>
+                        <span className="b-time">{cont ? `${DAYS[ukDay(c)]} ${hhmm(ukStart(c))}, until ${endTime(ukStart(c), c.duration_min)}` : `${hhmm(ukStart(c))}–${endTime(ukStart(c), c.duration_min)}`}</span>
+                        {!lane.warn && tail > 0 && (
+                          <em className="buffer" style={{ width: `${(tail / (to - from)) * 100}%`, right: `-${(tail / (to - from)) * 100}%` }} />
+                        )}
+                      </button>
+                    </Hover>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <div className="legend">
         {["pending", "live", "conflict"].map((s) => (
           <span key={s}><i className={`swatch st-${s}`} /> {STATUS_LABEL[s]}</span>
         ))}
+        <span><i className="swatch share-swatch" /> Shared licence: 2 at once (allowed)</span>
+        {overLanes.length > 0 && <span className="warn-text"><i className="swatch share-swatch over" /> 3 or more at once: over Zoom's limit</span>}
       </div>
     </section>
   );
 }
 
 // Content of the schedule hover card.
-function CircleHoverCard({ c }) {
+function CircleHoverCard({ c, shared = [] }) {
   const rows = [
     ["UK time", ukWhen(c)],
     !isUk(c) && ["Their time", localWhen(c)],
     ["Facilitator", c.facilitator?.name ?? "None"],
     ["Licence", c.licence ? `${c.licence.label}${c.licence.is_mock ? " (mock)" : ""}` : "Not assigned"],
+    shared.length > 0 && ["Shared with", shared.map((o) => `${blockName(o.name)} (${ukWhen(o)})`).join(", ")],
     (c.circle_type || c.language) && ["Circle", [c.circle_type, c.language].filter(Boolean).join(" · ")],
     c.preference_used === 2 && ["Preference", "Moved to 2nd choice"],
   ].filter(Boolean);
@@ -716,7 +846,8 @@ function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
                 <td><When c={c} block /></td>
                 <td>{c.licence?.label ?? <span className="muted">none</span>}{c.licence?.is_mock && <span className="tag">mock</span>}</td>
                 <td><span className={`pill st-${c.status}`}>{STATUS_LABEL[c.status]}</span></td>
-                <td onClick={(e) => e.stopPropagation()}><WebsiteSwitch circle={c} run={run} compact /></td>
+                <td onClick={(e) => e.stopPropagation()}><WebsiteSwitch circle={c} run={run} compact />
+                  {c.website_visible && <div><WebsiteReadiness circle={c} compact /></div>}</td>
                 <td className="cell-actions">
                   <IconButton icon="edit" label="Edit circle" onClick={() => onSelect(c)} />
                   <IconButton icon="trash" label="Delete circle" danger onClick={() => onDelete(c)}
@@ -901,6 +1032,10 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
   const [endDate, setEndDate] = useState("");
   const [showEmail, setShowEmail] = useState(false);
   const gaps = circle && ["pending", "conflict", "live"].includes(circle.status) ? emailGaps(circle, data) : [];
+  // Other circles on this licence at the same time (2 at once is allowed).
+  const buffer = data.settings.buffer_minutes;
+  const shared = circle && HOLDS.includes(circle.status) ? sharers(circle, data.circles, buffer) : [];
+  const atOnce = shared.length ? atOnceWith(circle, data.circles, buffer, circle.licence_id) : 1;
 
   // For clashes: who already holds this time. For live circles: which licences it could move to.
   useEffect(() => {
@@ -913,10 +1048,18 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
     }
   }, [circle?.id, circle?.status, circle?.updated_at]);
 
+  // Licences a live circle could also move to by sharing: one other meeting at its time, so 2 at once.
+  // Completely free licences come from the database (free_licences_for_circle).
+  const sharedTargets = live && freeLicences ? data.licences
+    .filter((l) => l.active && l.id !== circle.licence_id && !freeLicences.some((x) => x.licence_id === l.id))
+    .map((l) => ({ licence_id: l.id, label: l.label, is_mock: l.is_mock, has_zoom: Boolean(l.zoom_user_email), with: sharers(circle, data.circles, buffer, l.id) }))
+    .filter((l) => l.with.length && atOnceWith(circle, data.circles, buffer, l.licence_id) <= ZOOM_AT_ONCE) : [];
+
   async function moveLicence() {
-    const target = freeLicences.find((l) => l.licence_id === moveTo);
+    const target = [...freeLicences, ...sharedTargets].find((l) => l.licence_id === moveTo);
     if (!target) return;
-    if (!confirm(`Move "${circle.name}" to ${target.label}?\n\nThis creates a new Zoom meeting on ${target.label}, so the join link changes. The facilitator is emailed the new link, and the old meeting is deleted. Remember to update the WhatsApp group.`)) return;
+    const sharing = target.with?.length ? `\n\n${target.label} already has ${target.with.map((o) => blockName(o.name)).join(", ")} at this time. Zoom allows 2 meetings at once, so they will share the licence.` : "";
+    if (!confirm(`Move "${circle.name}" to ${target.label}?\n\nThis creates a new Zoom meeting on ${target.label}, so the join link changes. The facilitator is emailed the new link, and the old meeting is deleted. Remember to update the WhatsApp group.${sharing}`)) return;
     setBusy(true);
     await run(() => adminAction("move_licence", circle.id, { licence_id: moveTo }), (o) => withEmail(`Moved to ${o.licence}, new Zoom link created.`, o.email, teamTo(circle)));
     setBusy(false);
@@ -1009,7 +1152,16 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
           </div>
         )}
         {circle?.uk_time_shifts && (
-          <p className="hint">This circle is in {tzName(circle.timezone)} time, where the clocks change on different dates to the UK. Its UK time shifts by an hour for a few weeks a year; clash checks already cover both times.</p>
+          <p className="hint">This circle is in {tzName(circle.timezone)} time, where the clocks change on different dates to the UK. Its UK time shifts by an hour for a few weeks a year; licence checks already cover both times.</p>
+        )}
+        {shared.length > 0 && (
+          <p className={`hint ${atOnce > ZOOM_AT_ONCE ? "warn" : ""}`}>
+            {atOnce > ZOOM_AT_ONCE ? <>{licence?.label} has {atOnce} meetings at once here, more than Zoom allows (2). Move this circle or one of: </> : <>Shared licence: {licence?.label} also runs </>}
+            {shared.map((o, i) => (
+              <Fragment key={o.id}>{i ? ", " : ""}<button type="button" className="link small" onClick={() => onOpen?.(o)}>{blockName(o.name)}</button> ({ukWhen(o)} UK)</Fragment>
+            ))}
+            {atOnce > ZOOM_AT_ONCE ? "." : <> at this time. Zoom allows 2 meetings at once on one licence, so both can run.</>}
+          </p>
         )}
 
         {circle?.status === "live" && (
@@ -1044,17 +1196,21 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
             <div className="manage-row">
               <label>Move to another licence
                 <select value={moveTo} onChange={(e) => setMoveTo(e.target.value)} disabled={busy || !freeLicences}>
-                  <option value="">{freeLicences === null ? "Loading…" : freeLicences.length ? "Choose a free licence…" : "No other licence is free at this time"}</option>
-                  {(freeLicences ?? []).map((l) => (
-                    <option key={l.licence_id} value={l.licence_id} disabled={!l.is_mock && !l.has_zoom}>
-                      {l.label}{l.is_mock ? " (mock)" : ""}{!l.is_mock && !l.has_zoom ? " (no Zoom user set)" : ""}
-                    </option>
+                  <option value="">{freeLicences === null ? "Loading…" : freeLicences.length || sharedTargets.length ? "Choose a licence…" : "No other licence has room at this time"}</option>
+                  {[[freeLicences ?? [], "Free at this time"], [sharedTargets, "Shared: 1 other meeting at this time"]].map(([list, group]) => list.length > 0 && (
+                    <optgroup key={group} label={group}>
+                      {list.map((l) => (
+                        <option key={l.licence_id} value={l.licence_id} disabled={!l.is_mock && !l.has_zoom}>
+                          {l.label}{l.is_mock ? " (mock)" : ""}{!l.is_mock && !l.has_zoom ? " (no Zoom user set)" : ""}{l.with?.length ? `, shared with ${blockName(l.with[0].name)}` : ""}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
               </label>
               <button disabled={!moveTo || busy} onClick={moveLicence}>Move</button>
             </div>
-            <p className="muted small">Moving creates a new meeting, so the join link changes.</p>
+            <p className="muted small">Moving creates a new meeting, so the join link changes. A licence can host 2 meetings at once, so shared licences are listed too.</p>
             <div className="manage-row">
               <label>Last session date
                 <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} disabled={busy} />
@@ -1193,6 +1349,7 @@ function WebsiteSyncState({ circle }) {
   if (circle.status === "conflict" && circle.website_visible) return <>It shows once the circle has a licence.</>;
   if (!["live", "paused"].includes(circle.status) && !circle.website_visible && !circle.framer_item_id) return <>Switch it on to advertise it before it's approved.</>;
   if (circle.framer_dirty) return <>Website update pending.</>;
+  if (circle.website_visible && isReadinessNote(circle.framer_error)) return <>Kept hidden until the missing details below are set.</>;
   if (circle.framer_synced_at) return <>Website copy updated {ago(circle.framer_synced_at)}.</>;
   return null;
 }
@@ -1228,7 +1385,11 @@ function WebsiteVisibility({ circle, run }) {
         {circle.website_visible ? "Listed on the ThinkGita website." : "Not listed on the ThinkGita website (kept as a draft)."}
         {" "}<WebsiteSyncState circle={circle} />
       </p>
-      {circle.framer_error && <p className="warn-text small">Last website update failed: {circle.framer_error}</p>}
+      {circle.framer_error && !isReadinessNote(circle.framer_error) && <p className="warn-text small">Last website update failed: {circle.framer_error}</p>}
+      {!["ended", "rejected"].includes(circle.status) && <>
+        <WebsiteReadiness circle={circle} />
+        <WebsiteFields circle={circle} run={run} />
+      </>}
     </div>
   );
 }
@@ -1576,6 +1737,16 @@ function Licences({ data, run, notify, go }) {
                 <td><input type="checkbox" checked={r.is_mock} onChange={(e) => edit(r.id, "is_mock", e.target.checked)} /></td>
                 <td>
                   {booked(r.id) ? <button className="link" title="Show these circles" onClick={() => go("Circles", r.label)}>{booked(r.id)}</button> : 0}
+                  {(() => {
+                    const days = sharedDays(r.id, data.circles, data.settings.buffer_minutes);
+                    const over = days.filter((x) => x.peak > ZOOM_AT_ONCE);
+                    return days.length > 0 && (
+                      <span className={`small shared-days ${over.length ? "warn-text" : "muted"}`}
+                        title={over.length ? "More than 2 meetings at once on these days: over Zoom's limit" : "2 meetings at once on these days (shared licence, allowed)"}>
+                        {over.length ? `${over[0].peak} at once: ${over.map((x) => DAYS[x.d]).join(", ")}` : `2 at once: ${days.map((x) => DAYS[x.d]).join(", ")}`}
+                      </span>
+                    );
+                  })()}
                   {r.zoom_user_email && <button className="link small nowrap licence-meetings" onClick={() => go("Zoom", r.label)}>Meetings</button>}
                 </td>
                 <td className="cell-actions">
@@ -1740,7 +1911,7 @@ function Settings({ data, run }) {
     });
     if (error) {
       throw new Error(/no_licence_clash/.test(error.message)
-        ? "Not saved: with these settings two circles on the same licence would overlap. Reduce the buffer or move a circle first."
+        ? "Not saved: with these settings a licence would have 3 meetings at once (Zoom allows 2). Reduce the buffer or move a circle first."
         : error.message);
     }
   }, "Settings saved");
@@ -2040,6 +2211,8 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
   const [notify, setNotify] = useState(true);
   const [busy, setBusy] = useState(false);
   const licence = data.licences.find((l) => l.id === circle.licence_id);
+  const shared = sharers(circle, data.circles, data.settings.buffer_minutes);
+  const atOnce = shared.length ? atOnceWith(circle, data.circles, data.settings.buffer_minutes, circle.licence_id) : 1;
   const team = [circle.facilitator, ...coFacs(circle)].filter(Boolean);
   const badUrl = (v) => v.trim() && !/^https?:\/\/\S+$/i.test(v.trim());
   const draft = { ...circle, whatsapp_group_link: wa.trim() || null, youtube_playlist_link: yt.trim() || null };
@@ -2075,6 +2248,9 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
           Creates the weekly Zoom meeting on {licence?.label ?? "its licence"}{licence?.is_mock ? " (mock)" : ""}
           {notify ? <> and emails {team.map((f) => f.name).join(", ") || "the facilitator"} their details and a sign-in invite.</> : <>. Nobody is emailed.</>}
         </p>
+        {shared.length > 0 && (atOnce > ZOOM_AT_ONCE
+          ? <p className="hint warn">{licence?.label} would have {atOnce} meetings at once with {shared.map((o) => blockName(o.name)).join(", ")}, more than Zoom allows (2). Move one of them first.</p>
+          : <p className="hint">Shared licence: {licence?.label} also runs {shared.map((o) => blockName(o.name)).join(", ")} at this time. Zoom allows 2 meetings at once, so that's fine.</p>)}
         <label>WhatsApp group link
           <input type="url" autoFocus value={wa} onChange={(e) => setWa(e.target.value)} placeholder="https://chat.whatsapp.com/…" />
         </label>
@@ -2125,10 +2301,17 @@ function AdminName({ admin, run, onSaved }) {
 const fmtWhen = (iso) => iso ? new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
 // Whether the last website change is live, and a manual retry when Framer refused a publish.
 function PublishStatus({ s, run }) {
+  const failing = s.framer_fail_count > 0 && s.framer_last_error && (
+    <p className="warn-text small">
+      Website updates are failing{s.framer_failed_at ? ` (last try ${ago(s.framer_failed_at)})` : ""}: {s.framer_last_error}.
+      {" "}They retry automatically with longer gaps. If this persists, check the Framer API key and that the Course collection still exists.
+    </p>
+  );
   if (!s.framer_publish_pending) {
-    return s.framer_published_at ? <p className="muted small">Website last published {ago(s.framer_published_at)}.</p> : null;
+    return <>{failing}{s.framer_published_at ? <p className="muted small">Website last published {ago(s.framer_published_at)}.</p> : null}</>;
   }
   return (
+    <>{failing}
     <div className="card-note">
       <p className="warn-text small">
         Some website changes are saved in Framer but not live yet.
@@ -2141,6 +2324,7 @@ function PublishStatus({ s, run }) {
         Publish now
       </button>
     </div>
+    </>
   );
 }
 
@@ -2255,7 +2439,7 @@ function ZoomMeetings({ data, run, onSelect, onAttendance, initialAccount }) {
             <Stat label="Other Zoom meetings" value={outside} tone={outside ? "warn" : undefined} onClick={() => { setSource("outside"); setKind("all"); }} />
           </div>
           {outsideActive > 0 && (
-            <p className="hint">{outsideActive} meeting{outsideActive > 1 ? "s were" : " was"} set up directly in Zoom on active licences. The clash checks don't know about {outsideActive > 1 ? "them" : "it"}, so a new circle could be booked over {outsideActive > 1 ? "them" : "it"}. Filter by "Other Zoom meetings" to review.</p>
+            <p className="hint">{outsideActive} meeting{outsideActive > 1 ? "s were" : " was"} set up directly in Zoom on active licences. The licence checks don't count {outsideActive > 1 ? "them" : "it"}, so a licence could end up with more than 2 meetings at once. Filter by "Other Zoom meetings" to review.</p>
           )}
           {errors.length > 0 && (
             <p className="error small">Couldn't read {errors.map((a) => a.label).join(", ")}: {errors[0].error}</p>

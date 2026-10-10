@@ -1,0 +1,20 @@
+/* Website listing fields (WebsiteFields.jsx). Uses the tokens and base classes from styles.css. */
+.wf-ready { display: grid; gap: 8px; margin-top: 6px; }
+.wf-ready > p { margin: 0; }
+.wf-checklist { gap: 6px; }
+.wf-checklist li { font-size: 13px; }
+.wf-checklist .tick { width: 18px; height: 18px; font-size: 11px; }
+.wf-checklist li:not(.done) .tick { border-color: var(--warn); }
+.wf-checklist li:not(.done) .what { color: var(--warn); }
+.wf-form { margin-top: 10px; }
+.wf-photo-row { display: flex; gap: 12px; align-items: flex-start; }
+.wf-photo-fields { flex: 1; min-width: 0; display: grid; gap: 8px; }
+.wf-thumb { flex: none; width: 64px; height: 64px; border-radius: 99px; object-fit: cover; border: 1px solid var(--line); background: var(--surface); }
+.wf-thumb-empty { display: grid; place-items: center; color: var(--warn); font-weight: 700; border-style: dashed; }
+.wf-upload { display: inline-flex !important; position: relative; cursor: pointer; }
+.wf-upload input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.wf-upload .link { color: var(--link); font-weight: 600; }
+.wf-upload:focus-within .link { outline: 2px solid var(--focus); outline-offset: 1px; border-radius: 4px; }
+@media (max-width: 520px) {
+  .wf-photo-row { flex-direction: column; }
+}

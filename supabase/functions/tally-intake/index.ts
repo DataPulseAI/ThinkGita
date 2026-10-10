@@ -112,7 +112,8 @@ const TZ_KEYWORDS: [string, string][] = [
   ["bombay", "Asia/Kolkata"], ["calcutta", "Asia/Kolkata"], ["madras", "Asia/Kolkata"], ["new delhi", "Asia/Kolkata"],
   ["mumbai", "Asia/Kolkata"], ["kolkata", "Asia/Kolkata"], ["chennai", "Asia/Kolkata"],
   ["kathmandu", "Asia/Kathmandu"],
-  ["almaty", "Asia/Almaty"], ["dhaka", "Asia/Dhaka"], ["colombo", "Asia/Colombo"],
+  // Dhaka before Almaty: Tally's "(GMT+6) Almaty, Dhaka" option means UTC+6, and Almaty itself moved to UTC+5 in 2024.
+  ["dhaka", "Asia/Dhaka"], ["almaty", "Asia/Almaty"], ["colombo", "Asia/Colombo"],
   ["yangon", "Asia/Yangon"], ["mandalay", "Asia/Yangon"],
   ["bangkok", "Asia/Bangkok"], ["hanoi", "Asia/Bangkok"], ["jakarta", "Asia/Jakarta"],
   ["beijing", "Asia/Shanghai"], ["perth", "Australia/Perth"], ["singapore", "Asia/Singapore"], ["hong kong", "Asia/Hong_Kong"],

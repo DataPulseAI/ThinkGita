@@ -546,3 +546,37 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 
 .card-note { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .card-note p { margin: 0; flex: 1 1 240px; }
+
+/* ---- Shared licences: Zoom runs up to 2 meetings at once on one licence ---- */
+:root { --share: #7a5cc4; --share-soft: #efe9fb; }
+:root[data-theme="dark"] { --share: #b59cf0; --share-soft: #2a2340; }
+.lane-label { display: flex; flex-direction: column; justify-content: center; gap: 2px; overflow: hidden; }
+.lane-label > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.at-once-tag { align-self: flex-start; font-size: 10px; font-weight: 600; line-height: 1.5; padding: 0 6px; border-radius: 99px; background: var(--share-soft); color: var(--share); white-space: nowrap; }
+.at-once-tag.over { background: var(--warn); color: #fff; }
+.lane-stacked .block .buffer { top: 4px; bottom: 4px; }
+.lane-stacked .block .b-name, .lane-stacked .block .b-time { line-height: 1.15; }
+.block.cont { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
+.share-band { position: absolute; top: 2px; bottom: 2px; background: var(--share-soft); border-radius: 4px; pointer-events: none; }
+.share-band.over { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+.lane-over .lane-label > span:first-child { color: var(--warn); }
+.swatch.share-swatch { background: var(--share-soft); border-color: var(--share); }
+.swatch.share-swatch.over { background: color-mix(in srgb, var(--warn) 22%, transparent); border-color: var(--warn); }
+.day-count.shared { background: var(--share-soft); border-color: transparent; color: var(--share); }
+.day-count.over { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.matrix td { position: relative; }
+.at-once { display: inline-block; margin-left: 4px; font-size: 10px; font-weight: 700; line-height: 1.5; padding: 0 4px; border-radius: 4px; background: var(--share-soft); color: var(--share); vertical-align: 1px; }
+.at-once.over, .matrix td.over .at-once { background: var(--warn); color: #fff; }
+.matrix td.over { outline: 2px solid var(--warn); outline-offset: -2px; }
+.matrix-note { margin: 8px 0 0; }
+.shared-days { display: block; white-space: nowrap; }
+.hint.warn { background: var(--warn-soft); color: var(--warn); }
+.hint .link { font-size: inherit; padding: 0; }
+@media (max-width: 640px) {
+  .card-head .seg { max-width: 100%; }
+  .card-head .seg button { flex: 1 1 auto; min-width: 0; padding: 6px 4px; }
+}
+.day-count { display: inline-block; white-space: nowrap; }
+@media (max-width: 640px) { .day-count { margin: 4px 6px 0 0; } }
+/* The circle panel sits above the sticky page tabs (they hid its status line). */
+.drawer-bg { z-index: 25; }
