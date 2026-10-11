@@ -7,7 +7,8 @@ import {
 import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
 import { WebsiteReadiness, WebsiteFields, isReadinessNote, websiteMissing } from "./WebsiteFields.jsx";
 import { WebsitePage } from "./WebsitePage.jsx";
-import { FacilitatorsPage } from "./FacilitatorsPage.jsx";
+import { FacilitatorsPage, facilitatorNames } from "./FacilitatorsPage.jsx";
+import { FacilitatorPicker, PersonLine, UnverifiedTag, isVerified } from "./People.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders, sampleChanges } from "./emailTemplate.js";
 
 const ACTIVE = ["pending", "approved", "live"];
@@ -159,9 +160,17 @@ function readRoute() {
 // One line about the facilitator email for the message after an action ("Email sent to ...").
 // Co-facilitators of a circle (people who share it with the main facilitator).
 const coFacs = (c) => (c?.cofacilitators ?? []).map((x) => x.facilitator).filter(Boolean);
-// "who gets the email" text for toasts: the facilitator, plus how many co-facilitators.
+// Co-host from the Tally form, waiting to be added as a co-facilitator when the circle is approved (database trigger).
+const cohostName = (p) => {
+  if (!p) return "";
+  const full = [p.first_name, p.last_name].filter(Boolean).join(" ");
+  return p.initiated_name ? `${p.initiated_name}${full ? ` (${full})` : ""}` : full || p.email;
+};
+const pendingCohost = (c) => (c?.pending_cohost?.email ? c.pending_cohost : null);
+// "who gets the email" text for toasts: the facilitator, plus how many co-facilitators (a waiting co-host counts:
+// they are added the moment the circle goes live, before the emails are sent).
 const teamTo = (c) => {
-  const n = coFacs(c).length;
+  const n = coFacs(c).length + (pendingCohost(c) && c.status !== "live" ? 1 : 0);
   return c?.facilitator?.email ? `${c.facilitator.email}${n ? ` and ${n} co-facilitator${n > 1 ? "s" : ""}` : ""}` : undefined;
 };
 
@@ -214,7 +223,7 @@ export default function Admin() {
     const { data: { session } } = await supabase.auth.getSession();
     const user = session?.user;
     const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString();
-    const [circles, licences, settings, requests, log, templates, admins, failed] = await Promise.all([
+    const [circles, licences, settings, requests, log, templates, admins, failed, facilitators] = await Promise.all([
       fetchAll(() => supabase.from("circles").select("*, facilitator:facilitators!circles_facilitator_id_fkey(*), cofacilitators:circle_cofacilitators(facilitator:facilitators(*)), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time").order("id")),
       supabase.from("licences").select("*").order("sort_order").order("label"),
       supabase.from("settings").select("*").eq("id", 1).single(),
@@ -223,6 +232,7 @@ export default function Admin() {
       supabase.from("email_templates").select("*"),
       supabase.from("admin_emails").select("*").order("email"),
       supabase.from("email_log").select("id", { count: "exact", head: true }).eq("status", "failed").gte("sent_at", weekAgo),
+      fetchAll(() => supabase.from("facilitators").select("*").order("name").order("id")),
     ]);
     const err = [circles, licences, settings, requests, log, templates, admins].find((r) => r.error);
     if (err) setToast({ kind: "error", text: err.error.message });
@@ -234,6 +244,7 @@ export default function Admin() {
       log: log.data ?? [],
       emailFailures: failed.count ?? 0,
       admins: admins.data ?? [],
+      facilitators: facilitators.data ?? [],
       me: (admins.data ?? []).find((a) => a.email === user?.email?.toLowerCase()) ?? { email: user?.email },
       templates: {
         approved: templates.data?.find((t) => t.key === "approved") ?? { key: "approved", ...DEFAULT_TEMPLATES.approved },
@@ -337,16 +348,19 @@ export default function Admin() {
         {tab === "Emails" && <Emails data={data} run={run} />}
         {tab === "EmailLog" && <EmailLog key={sub ?? ""} data={data} run={run} onSelect={select} initial={sub} />}
         {tab === "Website" && <WebsitePage data={data} run={run} onSelect={select} />}
-        {tab === "Facilitators" && <FacilitatorsPage data={data} run={run} onSelect={select} />}
+        {tab === "Facilitators" && <FacilitatorsPage key={sub ?? ""} initial={sub} data={data} run={run} onSelect={select}
+          onNewCircle={(facId) => setSelected({ new: true, facilitator_id: facId })} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
       </main>
       {selected && (
         <CircleDrawer
-          key={selected === "new" ? "new" : selected.id}
+          key={selected === "new" || selected.new ? `new-${selected.facilitator_id ?? ""}` : selected.id}
           onAttendance={(id) => { setSelected(null); go("Attendance", id); }}
           onRequests={() => { setSelected(null); go("Requests"); }}
           onEmails={(name) => { setSelected(null); go("EmailLog", name); }}
-          circle={selected === "new" ? null : data.circles.find((c) => c.id === selected.id) ?? selected}
+          onProfile={(id) => { setSelected(null); go("Facilitators", id); }}
+          circle={selected === "new" || selected.new ? null : data.circles.find((c) => c.id === selected.id) ?? selected}
+          presetFacilitatorId={selected.new ? selected.facilitator_id : undefined}
           data={data}
           run={run}
           onDelete={deleteCircle}
@@ -790,14 +804,32 @@ function CircleHoverCard({ c, shared = [] }) {
 /* ---------------- Queue ---------------- */
 // Bulk approval is hidden for now: each circle is approved one at a time from its own row (set true to bring it back).
 const SHOW_BULK_APPROVE = false;
+const byCreated = (a, b) => String(a.created_at ?? "").localeCompare(String(b.created_at ?? ""));
+const bySlot = (a, b) => ukDay(a) - ukDay(b) || ukStart(a).localeCompare(ukStart(b));
+const QUEUE_SORTS = {
+  newest: { label: "Newest", cmp: (a, b) => byCreated(b, a) || bySlot(a, b) },
+  oldest: { label: "Oldest", cmp: (a, b) => byCreated(a, b) || bySlot(a, b) },
+  slot: { label: "Day and time", cmp: (a, b) => bySlot(a, b) || byCreated(a, b) },
+  name: { label: "Facilitator", cmp: (a, b) => (a.facilitator?.name ?? "").localeCompare(b.facilitator?.name ?? "", "en", { sensitivity: "base" }) || byCreated(a, b) },
+};
+// "Sat 11 Oct, 12:13" in UK time.
+const fmtSubmitted = (iso) => new Date(iso).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" });
+
 function Queue({ data, run, onSelect }) {
   const [approving, setApproving] = useState(null);
   const clashes = data.circles.filter((c) => c.status === "conflict").length;
   const [dialog, setDialog] = useState(null);
   const approveOne = (c) => setDialog(c);
-  const items = data.circles
-    .filter((c) => c.status === "pending" || c.status === "conflict")
-    .sort((a, b) => (a.status === "conflict" ? -1 : 0) - (b.status === "conflict" ? -1 : 0) || ukDay(a) - ukDay(b) || ukStart(a).localeCompare(ukStart(b)));
+  const [q, setQ] = useState("");
+  const [sortBy, setSortBy] = useState(() => { try { return localStorage.getItem("tg.queueSort") || "newest"; } catch { return "newest"; } });
+  const pickSort = (k) => { setSortBy(k); try { localStorage.setItem("tg.queueSort", k); } catch { /* private window */ } };
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const waiting = data.circles.filter((c) => c.status === "pending" || c.status === "conflict");
+  // Clashes always first; then the chosen order (newest form first by default, so a form that just came in is on top).
+  const items = waiting
+    .filter((c) => words.every((w) => [c.name, c.facilitator?.name, c.facilitator?.email, c.pending_cohost?.email, c.language]
+      .filter(Boolean).join(" ").toLowerCase().includes(w)))
+    .sort((a, b) => (a.status === "conflict" ? -1 : 0) - (b.status === "conflict" ? -1 : 0) || QUEUE_SORTS[sortBy].cmp(a, b));
   const [suggestions, setSuggestions] = useState({});
   const [bulk, setBulk] = useState(null);
   const ready = items.filter((c) => c.status === "pending" && c.licence_id && !c.is_demo);
@@ -844,8 +876,9 @@ function Queue({ data, run, onSelect }) {
     <section className="card">
       {dialog && <ApproveDialog circle={dialog} data={data} run={run} onBusy={(b) => setApproving(b ? dialog.id : null)} onClose={() => setDialog(null)} />}
       <div className="card-head">
-        <h2>Queue</h2>
+        <h2>Queue {waiting.length > 0 && <span className="muted">({waiting.length})</span>}</h2>
         <div className="filters">
+          {waiting.length > 5 && <input type="search" placeholder="Search name, email, language" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search the queue" />}
         {clashes > 0 && (
           <button onClick={() => run(async () => {
             const { data: n, error } = await supabase.rpc("recheck_conflicts");
@@ -862,7 +895,15 @@ function Queue({ data, run, onSelect }) {
         )}
         </div>
       </div>
-      {!items.length && <p className="muted">Nothing waiting. New Tally submissions appear here.</p>}
+      {waiting.length > 1 && (
+        <div className="web-filter" role="group" aria-label="Sort the queue">
+          <span className="web-filter-label">Sort</span>
+          {Object.entries(QUEUE_SORTS).map(([k, o]) => (
+            <button key={k} type="button" className={`web-chip ${sortBy === k ? "on" : ""}`} aria-pressed={sortBy === k} onClick={() => pickSort(k)}>{o.label}</button>
+          ))}
+        </div>
+      )}
+      {!items.length && <p className="muted">{waiting.length ? "Nothing matches that search." : "Nothing waiting. New Tally submissions appear here."}</p>}
       <div className="list">
         {items.map((c) => (
           <div key={c.id} className={`row ${c.status === "conflict" ? "row-warn" : ""}`}>
@@ -871,8 +912,11 @@ function Queue({ data, run, onSelect }) {
                 {c.name}
                 {c.is_demo && <span className="tag">demo</span>}
                 {c.preference_used === 2 && <span className="tag info">2nd preference</span>}
+                {c.created_at && Date.now() - Date.parse(c.created_at) < 2 * 86400e3 && <span className="tag new">New</span>}
               </div>
-              <div className="small"><When c={c} /> · {c.facilitator?.name ?? "No facilitator"}</div>
+              <div className="small"><When c={c} /> · {c.facilitator?.name ?? "No facilitator"}<UnverifiedTag fac={c.facilitator} label="Unverified host" /></div>
+              {c.created_at && <div className="small muted queue-submitted">{c.source === "tally" ? "Form submitted" : "Added"} {fmtSubmitted(c.created_at)} ({ago(c.created_at)})</div>}
+              {pendingCohost(c) && <div className="small">Co-host: <b>{cohostName(c.pending_cohost)}</b>, added when approved</div>}
               <div className="small">
                 {c.status === "conflict"
                   ? <span className="warn-text">{c.conflict_reason}</span>
@@ -1046,17 +1090,7 @@ function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
 }
 
 /* ---------------- Circle drawer ---------------- */
-// Facilitator details saved from the circle panel. A hand-edited name replaces the form's name parts,
-// so the automatic circle name uses exactly what the admin typed.
-function facilitatorPatch(fac, form, email) {
-  const patch = { phone: form.phone || null };
-  const typed = (form.facilitator_name || "").trim();
-  if (typed && typed !== (fac?.name ?? "")) Object.assign(patch, { name: typed, first_name: null, last_name: null, initiated_name: null });
-  else if (!fac?.name) patch.name = typed || email;
-  return patch;
-}
-
-function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendance, onRequests, onEmails }) {
+function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendance, onRequests, onEmails, onProfile, presetFacilitatorId }) {
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -1066,9 +1100,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
   const live = circle?.status === "live";
   const editable = isNew || circle.status !== "ended";
   const [f, setF] = useState(() => ({
-    facilitator_name: circle?.facilitator?.name ?? "",
-    facilitator_email: circle?.facilitator?.email ?? "",
-    phone: circle?.facilitator?.phone ?? "",
+    facilitator_id: circle?.facilitator_id ?? presetFacilitatorId ?? "",
     weekday: circle?.weekday ?? 1,
     start_time: hhmm(circle?.start_time) || "19:00",
     alt_weekday: circle?.alt_weekday ?? "",
@@ -1094,26 +1126,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const tzOptions = TIMEZONES.includes(f.timezone) ? TIMEZONES : [f.timezone, ...TIMEZONES];
 
-  // Same facilitator: update their details. Different email: link to that person (existing details untouched)
-  // or create them if new.
-  async function linkFacilitator(c, form) {
-    const email = form.facilitator_email.trim().toLowerCase();
-    if (!email) return c?.facilitator_id ?? null;
-    if (c?.facilitator && c.facilitator.email === email) {
-      const { error } = await supabase.from("facilitators").update(facilitatorPatch(c.facilitator, form, email)).eq("id", c.facilitator_id);
-      if (error) throw error;
-      return c.facilitator_id;
-    }
-    const { data: existing } = await supabase.from("facilitators").select("id").eq("email", email).maybeSingle();
-    if (existing) return existing.id;
-    const { data: created, error } = await supabase.from("facilitators")
-      .insert({ email, name: form.facilitator_name || email, phone: form.phone || null }).select("id").single();
-    if (error) throw error;
-    return created.id;
-  }
-
-  // Live circles: details save directly; a new facilitator goes through handover (invite + email);
-  // day/time/length/timezone changes move the existing Zoom meeting, so the link stays the same.
+  // Live circles: details save directly; day/time/length/timezone changes move the existing Zoom meeting, so the
+  // link stays the same. The facilitators are changed in their own section (handover for a live circle).
   async function saveLive() {
     const ok = await run(async () => {
       const id = circle.id;
@@ -1131,17 +1145,6 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
         if (r?.email) emails.push(r.email);
       }
 
-      const newEmail = f.facilitator_email.trim().toLowerCase();
-      if (newEmail && newEmail !== circle.facilitator?.email) {
-        const r = await adminAction("handover", id, { facilitator: { name: f.facilitator_name, email: newEmail } });
-        done.push(`handed over to ${newEmail}`);
-        if (r?.email) emails.push(r.email);
-      } else if (circle.facilitator_id) {
-        const { error: e2 } = await supabase.from("facilitators")
-          .update(facilitatorPatch(circle.facilitator, f, newEmail)).eq("id", circle.facilitator_id);
-        if (e2) throw e2;
-      }
-
       const hasAlt = f.alt_weekday && f.alt_start_time;
       // No name here: the database renames the circle when the host, day or time changes (see CircleName).
       const { data: saved, error } = await supabase.from("circles").update({
@@ -1156,7 +1159,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
         done.push("Zoom title updated");
       }
       return { done, email: emails.find(emailFailed) ?? emails[0] };
-    }, (o) => withEmail(`Saved${o?.done?.length ? `: ${o.done.join(", ")}` : ""}.`, o?.email, f.facilitator_email.trim().toLowerCase() || circle.facilitator?.email));
+    }, (o) => withEmail(`Saved${o?.done?.length ? `: ${o.done.join(", ")}` : ""}.`, o?.email, teamTo(circle)));
     if (ok) onClose();
   }
 
@@ -1168,11 +1171,15 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
     try { await (live ? saveLive() : saveDraft()); } finally { setSaving(false); }
   }
   async function saveDraft() {
+    if (isNew && !f.facilitator_id) {
+      await run(async () => { throw new Error("Choose the primary facilitator first (Facilitators, at the top)."); });
+      return;
+    }
     const ok = await run(async () => {
-      const facilitator_id = await linkFacilitator(circle, f);
       const hasAlt = f.alt_weekday && f.alt_start_time;
+      // The facilitator of an existing circle is changed in its own section, straight away; only a new circle sends it here.
       const row = {
-        facilitator_id, weekday: Number(f.weekday), start_time: f.start_time,
+        ...(isNew ? { facilitator_id: f.facilitator_id } : {}), weekday: Number(f.weekday), start_time: f.start_time,
         alt_weekday: hasAlt ? Number(f.alt_weekday) : null, alt_start_time: hasAlt ? f.alt_start_time : null,
         duration_min: Number(f.duration_min), timezone: f.timezone, preferred_start: f.preferred_start || null,
         circle_type: f.circle_type || null, language: f.language || null, notes: f.notes || null,
@@ -1285,6 +1292,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
           </div>
         )}
         {!isNew && <p className="small"><When c={circle} /></p>}
+        <CircleTeam circle={circle} form={f} setForm={setF} data={data} run={run} editable={editable} onProfile={onProfile} />
 
         {circle?.status === "pending" && circle.licence_id && (
           <div className="approve-bar">
@@ -1292,7 +1300,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
               <div className="approve-title">Ready to approve</div>
               <div className="muted small">
                 On {licence?.label}{licence?.is_mock ? " (mock: fake Zoom details)" : ""}. Approving creates the weekly Zoom meeting
-                {circle.facilitator?.name ? ` and sends ${circle.facilitator.name} their details` : ""}.
+                {circle.facilitator ? ` and sends ${facilitatorNames(circle.facilitator).title} their details` : ""}.
               </div>
             </div>
             <button className="primary" disabled={busy} onClick={approve}>{busy ? "Creating…" : "Approve + create Zoom"}</button>
@@ -1320,8 +1328,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
           </div>
         )}
         {circle?.status === "conflict" && holders?.length > 0 && (
-          <div className="details">
-            <span className="section-title">Who's using this time</span>
+          <Section id="holders" title="Who's using this time" summary={`${holders.length}`}>
             {holders.map((h) => (
               <button key={h.circle_id} type="button" className="holder" onClick={() => onOpen?.(data.circles.find((x) => x.id === h.circle_id) ?? { id: h.circle_id })}>
                 <b>{h.licence_label}</b>
@@ -1330,7 +1337,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
               </button>
             ))}
             <p className="muted small">To free a licence, open one of these and move it to another time (or, if it isn't live yet, to another licence), then re-check.</p>
-          </div>
+          </Section>
         )}
         {circle?.uk_time_shifts && (
           <p className="hint">This circle is in {tzName(circle.timezone)} time, where the clocks change on different dates to the UK. Its UK time shifts by an hour for a few weeks a year; licence checks already cover both times.</p>
@@ -1346,11 +1353,8 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
         )}
 
         {circle?.status === "live" && (
-          <div className="details">
-            <div className="details-head">
-              <span className="section-title">Zoom details</span>
-              {licence?.is_mock && <span className="tag">mock: not a real meeting</span>}
-            </div>
+          <Section id="zoom" title="Zoom details" summary={`${licence?.label ?? ""}${circle.zoom_meeting_id ? ` · ${circle.zoom_meeting_id}` : ""}`}
+            actions={licence?.is_mock && <span className="tag">mock: not a real meeting</span>}>
             <Detail label="Join link" value={circle.join_url} copy />
             <Detail label="Meeting ID" value={circle.zoom_meeting_id} copy />
             <Detail label="Passcode" value={circle.passcode} copy />
@@ -1368,12 +1372,11 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
               {onAttendance && <button onClick={() => onAttendance(circle.id)}>See attendance</button>}
               <button className="danger" onClick={() => confirm("Delete the Zoom meeting and end this circle?") && run(() => adminAction("cancel", circle.id), "Circle ended").then((ok) => ok && onClose())}>End circle</button>
             </div>
-          </div>
+          </Section>
         )}
 
         {live && (
-          <div className="details">
-            <span className="section-title">Manage</span>
+          <Section id="manage" title="Manage" summary="Move licence, set end date" defaultOpen={false}>
             <div className="manage-row">
               <label>Move to another licence
                 <select value={moveTo} onChange={(e) => setMoveTo(e.target.value)} disabled={busy || !freeLicences}>
@@ -1399,36 +1402,28 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
               <button className="danger" disabled={!endDate || busy} onClick={endOnDate}>Set end date</button>
             </div>
             <p className="muted small">Sessions carry on with the same link until that date. Today's date ends it now.</p>
-          </div>
+          </Section>
         )}
 
         {circle && <WebsiteVisibility circle={circle} run={run} />}
-        {circle && <CoFacilitators circle={circle} run={run} editable={editable} />}
         {circle && <CircleEmails circle={circle} onAll={onEmails} />}
 
         {requests.length > 0 && (
-          <div className="details">
-            <div className="details-head">
-              <span className="section-title">Change requests</span>
-              {onRequests && <button className="link small" onClick={onRequests}>Manage in Change requests</button>}
-            </div>
+          <Section id="requests" title="Change requests" summary={`${requests.filter((r) => r.status === "open").length} open`}
+            actions={onRequests && <button className="link small" onClick={onRequests}>Manage in Change requests</button>}>
             {requests.map((r) => (
               <div key={r.id} className="small"><b>{REQUEST_STATUS[r.status] ?? r.status}</b> · {r.message}</div>
             ))}
-          </div>
+          </Section>
         )}
 
+        <Section id="details" title={isNew ? "Circle" : "Circle details"} summary={isNew ? "" : `${circle.circle_type ?? "Circle"}${circle.language ? `, ${circle.language}` : ""}`}>
         <div className="form">
-          <CircleName circle={circle} form={f} editable={editable} run={run} />
+          <CircleName circle={circle} form={f} host={data.facilitators.find((x) => x.id === f.facilitator_id)?.name ?? f.facilitator_name} editable={editable} run={run} />
           <div className="grid2">
             <label>Circle type<input value={f.circle_type} onChange={set("circle_type")} disabled={!editable} /></label>
             <label>Language<input value={f.language} onChange={set("language")} disabled={!editable} /></label>
           </div>
-          <div className="grid2">
-            <label>Facilitator name<input value={f.facilitator_name} onChange={set("facilitator_name")} disabled={!editable} /></label>
-            <label>Facilitator email<input type="email" value={f.facilitator_email} onChange={set("facilitator_email")} disabled={!editable} /></label>
-          </div>
-          <label>Phone<input value={f.phone} onChange={set("phone")} disabled={!editable} /></label>
 
           <fieldset className="group" disabled={!editable}>
             <legend>When (facilitator's own time)</legend>
@@ -1484,6 +1479,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
             </button>
           )}
         </div>
+        </Section>
 
         {circle && (
           <div className="drawer-foot">
@@ -1502,12 +1498,12 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
 
 // Circle name in the editor: never typed. New circles and automatic names show the automatic name; an imported
 // (custom) name is shown as it is, with what happens to it on a schedule change and a way to switch to automatic.
-function CircleName({ circle, form, editable, run }) {
+function CircleName({ circle, form, host, editable, run }) {
   const [busy, setBusy] = useState(false);
   const isNew = !circle;
   const schedule = { weekday: Number(form.weekday), start_time: form.start_time, timezone: form.timezone };
   if (isNew || circle.name_auto) {
-    const shown = isNew ? autoNamePreview({ host: form.facilitator_name, ...schedule }) : circle.name;
+    const shown = isNew ? autoNamePreview({ host, ...schedule }) : circle.name;
     return (
       <>
         <label>Circle name<input value={shown} readOnly aria-readonly="true" /></label>
@@ -1579,7 +1575,10 @@ function websiteBlock(c) {
   if (c.status === "paused") return "Paused circles aren't listed";
   if (c.is_demo || /\btest\b/i.test(c.name ?? "") || c.licence?.is_mock) return "Test circles are never listed";
   const m = websiteMissing(c);
-  return m.length ? `Not ready for the website. Needs: ${m.join(", ")}` : null;
+  if (m.length) return `Not ready for the website. Needs: ${m.join(", ")}`;
+  // A circle that isn't running yet only goes on the website once its host is verified (the database checks this too).
+  if (c.status !== "live" && c.facilitator && !isVerified(c.facilitator)) return "Verify the host first (approve the circle, or verify them on their profile)";
+  return null;
 }
 function WebsiteSwitch({ circle, run, compact }) {
   const on = Boolean(circle.website_visible);
@@ -1599,18 +1598,16 @@ function WebsiteSwitch({ circle, run, compact }) {
       className={`switch ${on ? "on" : ""} ${compact ? "compact" : ""} ${block ? "blocked" : ""}`}
       title={block ?? (on ? "Shown on website. Click to hide." : "Hidden from website. Click to show.")}>
       <span className="switch-track"><span className="switch-dot" /></span>
-      <span className="switch-label">{on ? "Shown" : block && websiteMissing(circle).length ? "Not ready" : "Hidden"}</span>
+      <span className="switch-label">{on ? "Shown" : block && /^Verify the host/.test(block) ? "Host unverified" : block && websiteMissing(circle).length ? "Not ready" : "Hidden"}</span>
     </button>
   );
 }
 
 function WebsiteVisibility({ circle, run }) {
+  const missing = ["ended", "rejected"].includes(circle.status) ? [] : websiteMissing(circle);
+  const summary = circle.website_visible ? (missing.length ? `On, ${missing.length} missing` : "Listed") : missing.length ? `Not listed, ${missing.length} missing` : "Not listed, ready";
   return (
-    <div className="details">
-      <div className="details-head">
-        <span className="section-title">Website</span>
-        <WebsiteSwitch circle={circle} run={run} />
-      </div>
+    <Section id="website" title="Website" summary={summary} defaultOpen={false} actions={<WebsiteSwitch circle={circle} run={run} />}>
       <p className="muted small">
         {circle.website_visible ? "Listed on the ThinkGita website." : "Not listed on the ThinkGita website (kept as a draft)."}
         {" "}<WebsiteSyncState circle={circle} />
@@ -1620,71 +1617,177 @@ function WebsiteVisibility({ circle, run }) {
         <WebsiteReadiness circle={circle} />
         <WebsiteFields circle={circle} run={run} />
       </>}
-    </div>
+    </Section>
   );
 }
 
-// People who run the circle with the main facilitator: they see it in their portal and get its emails.
-function CoFacilitators({ circle, run, editable }) {
+// Collapsible panel section. Open or closed is remembered per section (this browser only).
+function Section({ id, title, summary, actions, defaultOpen = true, className = "", children }) {
+  const key = `tg.section.${id}`;
+  const [open, setOpen] = useState(() => {
+    try { const v = localStorage.getItem(key); return v === null ? defaultOpen : v === "1"; } catch { return defaultOpen; }
+  });
+  const toggle = () => {
+    setOpen((o) => { try { localStorage.setItem(key, o ? "0" : "1"); } catch { /* private window */ } return !o; });
+  };
+  return (
+    <section className={`details sec ${open ? "open" : "closed"} ${className}`} aria-label={title}>
+      <div className="details-head sec-head">
+        <button type="button" className="sec-toggle" aria-expanded={open} onClick={toggle}>
+          <span className="sec-chevron" aria-hidden="true">▸</span>
+          <span className="section-title">{title}</span>
+          {summary && <span className="sec-summary muted small">{summary}</span>}
+        </button>
+        {actions}
+      </div>
+      {open && <div className="sec-body">{children}</div>}
+    </section>
+  );
+}
+
+// Who runs the circle: the primary facilitator and any co-facilitators, all picked from the people on file
+// (or added once as a new person). Their names, photos and contact details are edited on the person, not here.
+function CircleTeam({ circle, form, setForm, data, run, editable, onProfile }) {
+  const isNew = !circle;
+  const primaryId = isNew ? form.facilitator_id : circle.facilitator_id;
+  // A person added just now isn't in the loaded list yet, so a new circle also keeps the one it picked.
+  const [chosen, setChosen] = useState(null);
+  const primary = (isNew ? data.facilitators.find((f) => f.id === primaryId) ?? (chosen?.id === primaryId ? chosen : null) : circle.facilitator) ?? null;
   const list = coFacs(circle);
-  const [adding, setAdding] = useState(false);
-  const [p, setP] = useState({ name: "", email: "", phone: "" });
-  const set = (k) => (e) => setP({ ...p, [k]: e.target.value });
-  const email = p.email.trim().toLowerCase();
-  const valid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email);
-  async function add(e) {
-    e.preventDefault();
-    if (!valid) return;
+  const [picking, setPicking] = useState(null); // "primary" | "co" | null
+  const [busy, setBusy] = useState(false);
+  const live = circle?.status === "live";
+  const pending = pendingCohost(circle);
+  const nameOf = (f) => facilitatorNames(f).title;
+
+  const removeCo = async (facId) => {
+    const { error } = await supabase.from("circle_cofacilitators").delete().eq("circle_id", circle.id).eq("facilitator_id", facId);
+    if (error) throw error;
+  };
+  const addCo = async (fac) => {
+    if (fac.id === circle.facilitator_id) throw new Error("That's already the primary facilitator.");
+    const { error } = await supabase.from("circle_cofacilitators").insert({ circle_id: circle.id, facilitator_id: fac.id });
+    if (error) throw /duplicate/.test(error.message) ? new Error("They're already on this circle.") : error;
+  };
+  const addedNote = (who) => (live
+    ? `${who} added. They'll get future emails; use Resend details email to send them the details now.`
+    : `${who} added.`);
+
+  async function pickPrimary(fac) {
+    if (isNew) { setChosen(fac); setForm((f) => ({ ...f, facilitator_id: fac.id, facilitator_name: fac.name })); setPicking(null); return; }
+    if (fac.id === circle.facilitator_id) { setPicking(null); return; }
+    const message = live
+      ? `Hand "${circle.name}" over to ${nameOf(fac)}?\n\nThey get a sign-in invite and the circle's details by email. The Zoom link stays the same.`
+      : `Make ${nameOf(fac)} the primary facilitator of "${circle.name}"?`;
+    if (!confirm(message)) return;
+    setBusy(true);
     const ok = await run(async () => {
-      if (email === circle.facilitator?.email) throw new Error("That's already the main facilitator.");
-      let { data: fac } = await supabase.from("facilitators").select("id, phone").eq("email", email).maybeSingle();
+      // Someone moving from co-facilitator to primary is no longer listed twice.
+      if (list.some((x) => x.id === fac.id)) await removeCo(fac.id);
+      if (live) return adminAction("handover", circle.id, { facilitator: { name: fac.name, email: fac.email } });
+      const { error } = await supabase.from("circles").update({ facilitator_id: fac.id }).eq("id", circle.id);
+      if (error) throw error;
+      return {};
+    }, (o) => live ? withEmail(`Handed over to ${nameOf(fac)}.`, o?.email, fac.email) : `${nameOf(fac)} is now the primary facilitator.`);
+    setBusy(false);
+    if (ok) setPicking(null);
+  }
+  async function pickCo(fac) {
+    setBusy(true);
+    const ok = await run(() => addCo(fac), addedNote(nameOf(fac)));
+    setBusy(false);
+    if (ok) setPicking(null);
+  }
+  // A co-host from the form who wasn't added (only on a live circle): the person on file with that email, or a new one.
+  async function addPendingNow() {
+    await run(async () => {
+      let fac = data.facilitators.find((f) => f.email === pending.email);
       if (!fac) {
-        const { data: created, error } = await supabase.from("facilitators")
-          .insert({ email, name: p.name.trim() || email, phone: p.phone.trim() || null }).select("id, phone").single();
+        const { data: created, error } = await supabase.from("facilitators").insert({
+          email: pending.email, name: cohostName(pending), phone: pending.phone || null,
+          first_name: pending.first_name || null, last_name: pending.last_name || null, initiated_name: pending.initiated_name || null,
+        }).select("*").single();
         if (error) throw error;
         fac = created;
-      } else if (!fac.phone && p.phone.trim()) {
-        await supabase.from("facilitators").update({ phone: p.phone.trim() }).eq("id", fac.id);
       }
-      const { error } = await supabase.from("circle_cofacilitators").insert({ circle_id: circle.id, facilitator_id: fac.id });
-      if (error) throw /duplicate/.test(error.message) ? new Error("They're already on this circle.") : error;
-    }, circle.status === "live"
-      ? `${p.name.trim() || email} added. They'll get future emails; use Resend details email to send them the details now.`
-      : `${p.name.trim() || email} added.`);
-    if (ok) { setP({ name: "", email: "", phone: "" }); setAdding(false); }
+      await addCo(fac);
+      const { error } = await supabase.from("circles").update({ pending_cohost: null }).eq("id", circle.id);
+      if (error) throw error;
+    }, addedNote(cohostName(pending)));
   }
+  const clearPending = async () => {
+    const { error } = await supabase.from("circles").update({ pending_cohost: null }).eq("id", circle.id);
+    if (error) throw error;
+  };
+
+  const summary = primary ? `${nameOf(primary)}${list.length ? ` + ${list.length}` : ""}` : "No primary facilitator";
   return (
-    <div className="details">
-      <div className="details-head">
-        <span className="section-title">Co-facilitators</span>
-        {editable && !adding && <button className="link small" onClick={() => setAdding(true)}>Add co-facilitator</button>}
+    <Section id="team" title="Facilitators" summary={summary} className="team">
+      <div className="team-role">
+        <span className="team-label">Primary facilitator</span>
+        {primary && picking !== "primary" && (
+          <div className="team-person">
+            <PersonLine fac={primary} size={40} />
+            <span className="row-actions">
+              {onProfile && !isNew && <button type="button" className="link small" onClick={() => onProfile(primary.id)}>Profile</button>}
+              {editable && <button type="button" className="link small" disabled={busy} onClick={() => setPicking("primary")}>Change</button>}
+            </span>
+          </div>
+        )}
+        {!primary && picking !== "primary" && (
+          <div className="team-empty">
+            <span className={`small ${isNew ? "warn-text" : "muted"}`}>{isNew ? "Choose who runs this circle." : "None assigned."}</span>
+            {editable && <button type="button" className="small" onClick={() => setPicking("primary")}>Choose facilitator</button>}
+          </div>
+        )}
+        {picking === "primary" && (
+          <FacilitatorPicker facilitators={data.facilitators} exclude={[primaryId]} busy={busy} label="Choose the primary facilitator"
+            onPick={pickPrimary} onCancel={() => setPicking(null)} />
+        )}
       </div>
-      {!list.length && !adding && <p className="muted small">None. Co-facilitators see this circle when they sign in and get its emails.</p>}
-      {list.map((f) => (
-        <div key={f.id} className="row cofac-row">
-          <div className="row-main small"><b>{f.name}</b> · {f.email}{f.phone ? ` · ${f.phone}` : ""}</div>
-          {editable && (
-            <button className="link small" onClick={() => confirm(`Remove ${f.name} from this circle? They keep their other circles.`) && run(async () => {
-              const { error } = await supabase.from("circle_cofacilitators").delete().eq("circle_id", circle.id).eq("facilitator_id", f.id);
-              if (error) throw error;
-            }, `${f.name} removed from this circle`)}>Remove</button>
+
+      {!isNew && (
+        <div className="team-role">
+          <span className="team-label">Co-facilitators</span>
+          {list.map((f) => (
+            <div key={f.id} className="team-person cofac-row">
+              <PersonLine fac={f} size={32} />
+              <span className="row-actions">
+                {onProfile && <button type="button" className="link small" onClick={() => onProfile(f.id)}>Profile</button>}
+                {editable && (
+                  <button type="button" className="link small" onClick={() => confirm(`Remove ${nameOf(f)} from this circle? They stay in the system and keep their other circles.`)
+                    && run(() => removeCo(f.id), `${nameOf(f)} removed from this circle`)}>Remove</button>
+                )}
+              </span>
+            </div>
+          ))}
+          {pending && (
+            <div className="team-person cofac-row cofac-pending">
+              <span className="person-text small">
+                <span className="person-name">{cohostName(pending)}</span>
+                <span className="muted">{pending.email}{pending.phone ? ` · ${pending.phone}` : ""}</span>
+                <span className="muted">
+                  {live ? "Co-host from the form, not added yet." : ["rejected", "ended"].includes(circle.status)
+                    ? "Co-host from the form, never added." : "Co-host from the form. Added as a co-facilitator when this circle is approved, and emailed with the host."}
+                </span>
+              </span>
+              {editable && (
+                <span className="row-actions">
+                  {live && <button type="button" className="link small" onClick={addPendingNow}>Add now</button>}
+                  <button type="button" className="link small" onClick={() => confirm(`Don't add ${cohostName(pending)} as a co-host?`) && run(clearPending, `${cohostName(pending)} won't be added`)}>Remove</button>
+                </span>
+              )}
+            </div>
           )}
+          {!list.length && !pending && picking !== "co" && <p className="muted small">None. Co-facilitators see this circle when they sign in and get its emails.</p>}
+          {picking === "co" ? (
+            <FacilitatorPicker facilitators={data.facilitators} exclude={[circle.facilitator_id, ...list.map((f) => f.id)]} busy={busy}
+              label="Choose a co-facilitator" onPick={pickCo} onCancel={() => setPicking(null)} />
+          ) : editable && <button type="button" className="link small team-add" onClick={() => setPicking("co")}>+ Add co-facilitator</button>}
         </div>
-      ))}
-      {adding && (
-        <form className="form" onSubmit={add}>
-          <div className="grid3">
-            <label>Name<input value={p.name} onChange={set("name")} autoFocus /></label>
-            <label>Email<input type="email" value={p.email} onChange={set("email")} required /></label>
-            <label>Phone<input value={p.phone} onChange={set("phone")} placeholder="+44…" /></label>
-          </div>
-          <div className="actions">
-            <button type="button" className="ghost" onClick={() => setAdding(false)}>Cancel</button>
-            <button className="primary" disabled={!valid}>Add</button>
-          </div>
-        </form>
       )}
-    </div>
+      <p className="muted small">Names, photos and contact details are kept on each person (Circles, Facilitators), so every circle shows the same details.</p>
+    </Section>
   );
 }
 
@@ -1696,11 +1799,8 @@ function CircleEmails({ circle, onAll }) {
   }, [circle.id, circle.status, circle.updated_at]);
   if (!rows?.length) return null;
   return (
-    <div className="details">
-      <div className="details-head">
-        <span className="section-title">Emails</span>
-        {onAll && <button className="link small" onClick={() => onAll(circle.name)}>All emails for this circle</button>}
-      </div>
+    <Section id="emails" title="Emails" summary={`Last: ${EMAIL_KIND[rows[0].kind] ?? rows[0].kind}, ${fmtStamp(rows[0].sent_at)}`} defaultOpen={false}
+      actions={onAll && <button className="link small" onClick={() => onAll(circle.name)}>All emails for this circle</button>}>
       {rows.map((r) => (
         <div key={r.id} className="small email-mini clickable" role="button" tabIndex={0} title="Open this email"
           onClick={() => onAll?.(`id:${r.id}`)} onKeyDown={(e) => e.key === "Enter" && onAll?.(`id:${r.id}`)}>
@@ -1710,7 +1810,7 @@ function CircleEmails({ circle, onAll }) {
           {r.error && <div className="warn-text">{r.error}</div>}
         </div>
       ))}
-    </div>
+    </Section>
   );
 }
 
@@ -1852,6 +1952,8 @@ const ACTION_LABEL = {
   import_fill: "Filled from Zoom", fix_timezone: "Fixed timezone", sync_attendance: "Synced attendance",
   zoom_meetings_snapshot: "Checked Zoom meetings", rename: "Renamed Zoom meeting",
   facilitator_self_edit: "Facilitator updated their details",
+  facilitator_verified: "Verified facilitator", facilitator_unverified: "Removed verification",
+  cohost_added: "Added co-host from the form", cohost_failed: "Couldn't add co-host",
 };
 // Activity groups for the filter in Settings.
 const ACTIVITY_GROUPS = {
@@ -1877,8 +1979,11 @@ function activitySummary(l, circles, licences) {
   switch (l.action) {
     case "circle_edited":
       return `${name ?? "Circle"}: ${Object.entries(d.changes ?? {}).map(([k, x]) => k === "facilitator_id" ? "facilitator changed" : `${FIELD_LABEL[k] ?? k} ${val(k, x.from)} → ${val(k, x.to)}`).join("; ")}`;
+    case "facilitator_verified": case "facilitator_unverified": return d.name ?? d.email ?? "Facilitator";
     case "facilitator_self_edit":
       return `${name ?? "Facilitator"}: ${Object.entries(d.changes ?? {}).map(([k, x]) => k === "photo_url" ? (x.to ? "new photo" : "photo removed") : `${FIELD_LABEL[k] ?? k} ${val(k, x.from)} → ${val(k, x.to)}`).join("; ")}`;
+    case "cohost_added": case "cohost_failed":
+      return `${name ?? "Circle"}: ${d.email ?? "co-host"}${d.result ? `, ${d.result}` : ""}${d.error ? `, ${d.error}` : ""}`;
     case "circle_created": return `${name ?? "Circle"}${d.source ? ` (${d.source})` : ""}`;
     case "circle_deleted": return `${name ?? "Circle"}${d.status ? `, was ${STATUS_LABEL[d.status] ?? d.status}` : ""}`;
     case "framer_sync": return d.failed ? `Failed: ${d.failed}` : [d.created && `${d.created} added`, d.updated && `${d.updated} updated`, d.hidden && `${d.hidden} hidden`,
@@ -2509,7 +2614,7 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
   const licence = data.licences.find((l) => l.id === circle.licence_id);
   const shared = sharers(circle, data.circles, data.settings.buffer_minutes);
   const atOnce = shared.length ? atOnceWith(circle, data.circles, data.settings.buffer_minutes, circle.licence_id) : 1;
-  const team = [circle.facilitator, ...coFacs(circle)].filter(Boolean);
+  const team = [circle.facilitator, ...coFacs(circle), pendingCohost(circle) && { name: cohostName(circle.pending_cohost) }].filter(Boolean);
   const badUrl = (v) => v.trim() && !/^https?:\/\/\S+$/i.test(v.trim());
   const draft = { ...circle, whatsapp_group_link: wa.trim() || null, youtube_playlist_link: yt.trim() || null };
   const gaps = emailGaps(draft, { ...data, me: { ...data.me, name: name.trim() } });
@@ -2544,6 +2649,9 @@ function ApproveDialog({ circle, data, run, onBusy, onClose }) {
           Creates the weekly Zoom meeting on {licence?.label ?? "its licence"}{licence?.is_mock ? " (mock)" : ""}
           {notify ? <> and emails {team.map((f) => f.name).join(", ") || "the facilitator"} their details and a sign-in invite.</> : <>. Nobody is emailed.</>}
         </p>
+        {[circle.facilitator, ...coFacs(circle)].some((f) => f && !isVerified(f)) && (
+          <p className="hint">Approving also verifies {[circle.facilitator, ...coFacs(circle)].filter((f) => f && !isVerified(f)).map((f) => facilitatorNames(f).title).join(", ")}{pendingCohost(circle) ? ` and the co-host ${cohostName(circle.pending_cohost)}` : ""}.</p>
+        )}
         {shared.length > 0 && (atOnce > ZOOM_AT_ONCE
           ? <p className="hint warn">{licence?.label} would have {atOnce} meetings at once with {shared.map((o) => blockName(o.name)).join(", ")}, more than Zoom allows (2). Move one of them first.</p>
           : <p className="hint">Shared licence: {licence?.label} also runs {shared.map((o) => blockName(o.name)).join(", ")} at this time. Zoom allows 2 meetings at once, so that's fine.</p>)}

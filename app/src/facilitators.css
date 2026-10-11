@@ -101,3 +101,14 @@
   .fac-photo-preview { width: 56px; height: 56px; font-size: 19px; }
   .fac-circle-weeks { grid-template-columns: 1fr; }
 }
+
+/* Verified status in the facilitator panel */
+.fac-verify { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); }
+.fac-verify.ok { background: var(--live-soft); border-color: transparent; }
+.fac-verify.warn { background: var(--warn-soft); border-color: transparent; }
+.fac-verify-title { font-weight: 600; }
+.fac-verify.ok .fac-verify-title { color: var(--live); }
+.fac-verify.warn .fac-verify-title { color: var(--warn); }
+.fac-name .tag { vertical-align: 1px; }
+.fac-circles-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.assign-role { display: flex; gap: 6px; flex-wrap: wrap; }

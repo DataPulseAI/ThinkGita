@@ -1,5 +1,5 @@
 import { test, expect, signIn, toast, fail } from "./support/test.js";
-import { NAMES } from "../fixtures/data.js";
+import { NAMES, NOW } from "../fixtures/data.js";
 
 const row = (page, name) => page.locator(".list .row", { has: page.locator(".row-title", { hasText: name }) });
 const modal = (page) => page.locator("form.approve-modal");
@@ -126,5 +126,39 @@ test.describe("Queue", () => {
     expect(dialogs.messages).toEqual([`Reject ${NAMES.c08}?`]);
     expect(mock.rest("circles", "PATCH").map((r) => [r.query.id, r.body])).toEqual([["eq.c08", { status: "rejected", licence_id: null }]]);
     await expect(page.locator(".list .row")).toHaveCount(2);
+  });
+
+  test("newest form first by default with its submitted date, other orders and search", async ({ page, mock }) => {
+    const at = (h) => new Date(Date.parse(NOW) - h * 3600e3).toISOString();
+    mock.db.circles.find((x) => x.id === "c08").created_at = at(2);
+    mock.db.circles.find((x) => x.id === "c03").created_at = at(240);
+    await signIn(page, { hash: "/Queue" });
+    const rows = page.locator(".list .row:not(.row-warn)");
+    const titles = page.locator(".list .row:not(.row-warn) .row-title");
+    await expect(titles.nth(0)).toContainText(NAMES.c08);
+    await expect(rows.nth(0).locator(".tag.new")).toHaveText("New");
+    await expect(rows.nth(0).locator(".queue-submitted")).toHaveText(/^(Form submitted|Added) Wed,? 7 Oct, 09:00 \(2 hours ago\)$/);
+    await expect(rows.nth(1).locator(".tag.new")).toHaveCount(0);
+    // The clash stays on top whatever the order.
+    await expect(page.locator(".list .row").first()).toHaveClass(/row-warn/);
+
+    const sorts = page.getByRole("group", { name: "Sort the queue" });
+    await sorts.getByRole("button", { name: "Oldest" }).click();
+    await expect(titles.nth(0)).toContainText(NAMES.c03);
+    await sorts.getByRole("button", { name: "Day and time" }).click();
+    await expect(sorts.getByRole("button", { name: "Day and time" })).toHaveAttribute("aria-pressed", "true");
+    await expect(titles.nth(0)).toContainText(NAMES.c03); // Tuesday before Saturday
+    await page.reload();
+    await expect(page.getByRole("group", { name: "Sort the queue" }).getByRole("button", { name: "Day and time" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("an unverified host is flagged, and approving says it verifies them", async ({ page }) => {
+    await signIn(page, { hash: "/Queue" });
+    const r = page.locator(".list .row", { has: page.locator(".row-title", { hasText: NAMES.c03 }) });
+    await expect(r.locator(".tag.unverified")).toHaveText("Unverified host");
+    const esha = page.locator(".list .row", { has: page.locator(".row-title", { hasText: NAMES.c08 }) });
+    await expect(esha.locator(".tag.unverified")).toHaveCount(0);
+    await r.getByRole("button", { name: "Approve + create Zoom" }).click();
+    await expect(page.locator("form.approve-modal .hint", { hasText: "Approving also verifies" })).toHaveText("Approving also verifies Chitra Placeholder.");
   });
 });

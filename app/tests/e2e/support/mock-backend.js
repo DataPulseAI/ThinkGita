@@ -167,6 +167,12 @@ export async function mockBackend(page, overrides = {}) {
   function rpcDefault({ name, body }) {
     switch (name) {
       case "my_circles_v2": return myCircles();
+      case "set_facilitator_verified": {
+        const f = db.facilitators.find((x) => x.id === body.p_facilitator);
+        if (!f) return reply(400, { code: "P0001", message: "not_found: no such facilitator" });
+        Object.assign(f, body.p_verified ? { verified_at: f.verified_at ?? new Date().toISOString(), verified_by: f.verified_by ?? mock.user.email } : { verified_at: null, verified_by: null });
+        return f;
+      }
       case "update_my_profile": {
         const me = db.facilitators.find((f) => f.email === mock.user.email);
         if (!me) return reply(400, { code: "P0001", message: "not_a_facilitator: no facilitator profile for this sign-in" });

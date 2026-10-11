@@ -147,6 +147,10 @@ describe("activity log", () => {
     } }, null)).toBe("Esha Specimen: phone +44 1 → +44 2; first name empty → Esha; new photo");
     expect(sum("facilitator_self_edit", { name: "Esha", changes: { photo_url: { from: "https://x", to: null } } }, null)).toBe("Esha: photo removed");
   });
+  it("co-host from the form: added, skipped or failed", () => {
+    expect(sum("cohost_added", { email: "p@example.org", result: "added (new facilitator)" })).toBe("Circle A: p@example.org, added (new facilitator)");
+    expect(sum("cohost_failed", { email: "p@example.org", error: "boom" })).toBe("Circle A: p@example.org, boom");
+  });
   it("quietSync hides website updates that changed nothing visible", () => {
     const q = (detail) => A.quietSync({ action: "framer_sync", detail });
     expect(q({ updated: 2, published: false, errors: [] })).toBe(true);
@@ -208,14 +212,6 @@ describe("toast and email helpers", () => {
     expect(A.emailGaps(c, data).sort()).toEqual(["drive_folder_link", "host_key", "support_contact", "whatsapp_group_link", "youtube_playlist_link"]);
     const full = { ...data, licences: [{ id: "L1", host_key: "123456" }], settings: { drive_folder_link: "https://d.example.org", youtube_playlist_link: "https://y.example.org", support_contact: "help@example.org" } };
     expect(A.emailGaps({ ...c, licence_id: "L1", whatsapp_group_link: "https://chat.whatsapp.com/A" }, full)).toEqual([]);
-  });
-  it("facilitatorPatch", () => {
-    const fac = { name: "Asha Example" };
-    expect(A.facilitatorPatch(fac, { phone: "", facilitator_name: "Asha Example" }, "a@example.org")).toEqual({ phone: null });
-    expect(A.facilitatorPatch(fac, { phone: "+44 1", facilitator_name: " Asha E. " }, "a@example.org")).toEqual({ phone: "+44 1", name: "Asha E.", first_name: null, last_name: null, initiated_name: null });
-    expect(A.facilitatorPatch({ name: "" }, { facilitator_name: "" }, "a@example.org")).toEqual({ phone: null, name: "a@example.org" });
-    expect(A.facilitatorPatch(null, { facilitator_name: "" }, "a@example.org")).toEqual({ phone: null, name: "a@example.org" });
-    expect(A.facilitatorPatch(fac, { facilitator_name: "" }, "a@example.org")).toEqual({ phone: null });
   });
 });
 

@@ -11,6 +11,7 @@ export function createFakeDb(seed = {}) {
   const rpcCalls = [];
   const errors = {}; // "table.op" -> array of queued errors (consumed one per call)
   const rpcResults = {};
+  const uploads = []; // storage uploads: { bucket, path, size, contentType }
   const triggers = {}; // table -> (row, oldRow) => void, run after each updated row changes (stands in for BEFORE UPDATE triggers)
   let nextId = 1;
 
@@ -98,6 +99,17 @@ export function createFakeDb(seed = {}) {
       const r = rpcResults[name];
       return typeof r === "function" ? r(args) : (r ?? { data: null, error: null });
     },
+    storage: {
+      from: (bucket) => ({
+        upload: async (path, body, opts = {}) => {
+          const queued = errors["storage.upload"]?.shift();
+          if (queued) return { data: null, error: queued };
+          uploads.push({ bucket, path, size: body?.length ?? body?.byteLength ?? 0, contentType: opts.contentType });
+          return { data: { path }, error: null };
+        },
+        getPublicUrl: (path) => ({ data: { publicUrl: `https://fake.supabase.co/storage/v1/object/public/${bucket}/${path}` } }),
+      }),
+    },
     auth: {
       getUser: async () => ({ data: { user: { email: "admin@example.org" } }, error: null }),
       admin: { inviteUserByEmail: async () => ({ data: {}, error: null }) },
@@ -105,7 +117,7 @@ export function createFakeDb(seed = {}) {
   };
 
   return {
-    tables, calls, rpcCalls, errors, rpcResults, triggers, client,
+    tables, calls, rpcCalls, errors, rpcResults, triggers, client, uploads,
     // Calls for one table and operation, e.g. writes("settings", "update").
     writes: (table, op = "update") => calls.filter((c) => c.table === table && c.op === op),
     row: (table, id) => tables[table]?.find((r) => r.id === id),
@@ -124,5 +136,6 @@ export function attachFake(db, seed) {
   db.from = fake.client.from;
   db.rpc = fake.client.rpc;
   db.auth = fake.client.auth;
+  db.storage = fake.client.storage;
   return fake;
 }

@@ -63,6 +63,105 @@ export function preferencePair(fields: TallyField[], pattern: RegExp, exclude: R
   return [first, second] as const;
 }
 
+// Co-host (optional second facilitator). The form may label the fields "Co-host email" and so on, or repeat the host's
+// "First Name" / "Email Address" fields after a co-host question. Either way they are split off here so the host's
+// answers never mix with the co-host's.
+const COHOST = /co[\s-]?host|co[\s-]?facilitat|second facilitator|other facilitator|additional facilitator/;
+const PERSON = /name|e-?mail|phone|whatsapp|mobile|number/;
+const isPerson = (f: TallyField) => f.type === "INPUT_EMAIL" || f.type === "INPUT_PHONE_NUMBER" || PERSON.test(lower(f));
+const personKind = (f: TallyField) =>
+  f.type === "INPUT_EMAIL" || /e-?mail/.test(lower(f)) ? "email"
+  : f.type === "INPUT_PHONE_NUMBER" || /phone|whatsapp|mobile/.test(lower(f)) ? "phone"
+  : /initiated/.test(lower(f)) ? "initiated" : /first/.test(lower(f)) ? "first" : /last|surname/.test(lower(f)) ? "last"
+  : /name/.test(lower(f)) ? "name" : null;
+export function splitCohost(fields: TallyField[]) {
+  // Tally adds a derived "(Yes)" checkbox field per option: skip those.
+  const gateIdx = fields.findIndex((f) => COHOST.test(lower(f)) && !/\((yes|no)\)\s*$/.test(lower(f)));
+  if (gateIdx < 0) {
+    // No co-host question: a second set of person fields (say a second "First Name" after the host's email) is still
+    // the co-host's.
+    const seen: string[] = [];
+    let start = -1;
+    for (let i = 0; i < fields.length && start < 0; i++) {
+      const k = isPerson(fields[i]) ? personKind(fields[i]) : null;
+      if (k && seen.includes(k) && seen.includes("email")) start = i;
+      else if (k) seen.push(k);
+    }
+    if (start < 0) return { host: fields, cohost: [] as TallyField[], gate: undefined };
+    const cohost = fields.filter((f, i) => i >= start && isPerson(f) && personKind(f) !== null);
+    return { host: fields.filter((f) => !cohost.includes(f)), cohost, gate: undefined };
+  }
+  // When the co-host's fields are labelled ("Co-Facilitator Phone Number"), only labelled fields are theirs: the
+  // host's own fields can come after the question too (the live form asks it before the host's phone number).
+  // Otherwise, fields after the question that repeat one of the host's (a second "Email Address") mean the person
+  // fields after it are the co-host's.
+  const labelled = fields.some((f) => COHOST.test(lower(f)) && isPerson(f) && personKind(f) !== null);
+  const before = new Set(fields.slice(0, gateIdx).filter(isPerson).map(personKind));
+  const after = (f: TallyField, i: number) => i > gateIdx && isPerson(f) && personKind(f) !== null;
+  const repeated = !labelled && fields.some((f, i) => after(f, i) && before.has(personKind(f)));
+  const cohost = fields.filter((f, i) => COHOST.test(lower(f)) || (repeated && after(f, i)));
+  return { host: fields.filter((f) => !cohost.includes(f)), cohost, gate: fields[gateIdx] };
+}
+export type Cohost = { email: string; first_name: string | null; last_name: string | null; initiated_name: string | null; phone: string | null; photo_url?: string };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// The co-host's details, or why they couldn't be used. null when there is no co-host.
+export function parseCohost(cohost: TallyField[], gate?: TallyField): { cohost: Cohost | null; problem: string | null } {
+  if (!cohost.length) return { cohost: null, problem: null };
+  const answer = gate && !isPerson(gate) ? text(gate) : "";
+  if (/^(no|false)\b/i.test(answer)) return { cohost: null, problem: null };
+  const pick = (kind: string) => text(cohost.find((f) => personKind(f) === kind && text(f)));
+  let first = pick("first"), last = pick("last");
+  const full = pick("name");
+  if (!first && !last && full) { const w = full.split(/\s+/); first = w[0]; last = w.slice(1).join(" "); }
+  // A free-text answer ("Priya, priya@example.org") still gives an email.
+  const typed = pick("email").toLowerCase();
+  const found = cohost.map((f) => text(f).match(/[^\s@,;<>()]+@[^\s@,;<>()]+\.[a-z]{2,}/i)?.[0]).find(Boolean)?.toLowerCase() ?? "";
+  const email = EMAIL_RE.test(typed) ? typed : found || typed;
+  const out = { email, first_name: first || null, last_name: last || null, initiated_name: pick("initiated") || null, phone: pick("phone") || null };
+  const named = [out.initiated_name, [first, last].filter(Boolean).join(" ")].filter(Boolean).join(" / ");
+  if (!email && !named && !out.phone) return { cohost: null, problem: null };
+  if (!EMAIL_RE.test(email)) return { cohost: null, problem: `Co-host ${named || "given"} but ${email ? `"${email}" is not a valid email` : "no email"}: add them by hand.` };
+  return { cohost: out, problem: null };
+}
+const cohostLabel = (c: Cohost) => {
+  const full = [c.first_name, c.last_name].filter(Boolean).join(" ");
+  return `${c.initiated_name ? `${c.initiated_name}${full ? ` (${full})` : ""}` : full || c.email}`;
+};
+
+// Photo upload on the form ("Please upload a non-devotional picture of yourself"). Tally's file links are signed and
+// expire, so the photo is copied into our own public facilitator-photos bucket straight away.
+const PHOTO_BUCKET = "facilitator-photos";
+const PHOTO_TYPES: Record<string, string> = { "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png", "image/webp": "webp" };
+const PHOTO_MAX = 5 * 1024 * 1024;
+type TallyFile = { url?: string; name?: string; mimeType?: string; size?: number };
+export function photoFile(fields: TallyField[]): TallyFile | null {
+  const f = fields.find((x) => x.type === "FILE_UPLOAD" && /picture|photo|image|headshot/.test(lower(x)));
+  const file = Array.isArray(f?.value) ? (f!.value as TallyFile[])[0] : null;
+  return file?.url ? file : null;
+}
+// Copies a form photo into <folder>/ of the photo bucket. Returns its public link, or why it couldn't be used.
+export async function copyPhoto(file: TallyFile, folder: string): Promise<{ url?: string; problem?: string }> {
+  const what = file.name ? `"${file.name}"` : "The photo";
+  const declared = String(file.mimeType ?? "").toLowerCase();
+  if (declared && !PHOTO_TYPES[declared]) return { problem: `${what} from the form is ${declared.replace("image/", "").toUpperCase()}; only JPEG, PNG or WebP can be shown. Add a photo by hand.` };
+  if (Number(file.size) > PHOTO_MAX) return { problem: `${what} from the form is over 5 MB. Add a smaller photo by hand.` };
+  try {
+    const res = await fetch(String(file.url));
+    if (!res.ok) return { problem: `${what} from the form couldn't be downloaded (${res.status}). Add a photo by hand.` };
+    const type = (res.headers.get("content-type") ?? declared).split(";")[0].trim().toLowerCase();
+    const ext = PHOTO_TYPES[type];
+    if (!ext) return { problem: `${what} from the form isn't a JPEG, PNG or WebP image. Add a photo by hand.` };
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.length > PHOTO_MAX) return { problem: `${what} from the form is over 5 MB. Add a smaller photo by hand.` };
+    const path = `${folder}/${Date.now()}.${ext}`;
+    const { error } = await db.storage.from(PHOTO_BUCKET).upload(path, bytes, { contentType: type === "image/jpg" ? "image/jpeg" : type, cacheControl: "31536000", upsert: false });
+    if (error) return { problem: `${what} from the form couldn't be saved: ${error.message}` };
+    return { url: db.storage.from(PHOTO_BUCKET).getPublicUrl(path).data.publicUrl };
+  } catch (e) {
+    return { problem: `${what} from the form couldn't be copied: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 const DAYS: Record<string, number> = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 7 };
 
 export function parseDay(raw: string): number | null {
@@ -145,8 +244,38 @@ async function audit(action: string, detail: unknown, circle_id: string | null =
   await db.from("audit_log").insert({ actor: "tally", action, circle_id, detail });
 }
 
+// Photos from earlier forms: circles from Tally whose facilitator has no photo but whose form had one. Tally's links
+// expire, so older ones may no longer download; those are reported, not retried. Run by hand with the cron secret.
+export async function copyFormPhotos() {
+  const { data: rows } = await db.from("circles").select("id, raw_submission, facilitator:facilitators!circles_facilitator_id_fkey(id, photo_url)")
+    .eq("source", "tally").order("created_at", { ascending: false }).limit(200);
+  const results: { circle_id: string; result: string }[] = [];
+  const done = new Set<string>();
+  for (const c of rows ?? []) {
+    const fac = (c as any).facilitator;
+    if (!fac || fac.photo_url || done.has(fac.id)) continue;
+    const { host } = splitCohost((c as any).raw_submission?.data?.fields ?? []);
+    const file = photoFile(host);
+    if (!file) continue;
+    done.add(fac.id);
+    const r = await copyPhoto(file, fac.id);
+    if (r.url) await db.from("facilitators").update({ photo_url: r.url }).eq("id", fac.id).is("photo_url", null);
+    results.push({ circle_id: c.id, result: r.url ? "copied" : r.problem ?? "not copied" });
+  }
+  await audit("form_photos", { results });
+  return { results };
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ ok: true });
+  const cronSecret = req.headers.get("x-cron-secret");
+  if (cronSecret) {
+    const { data: ok } = await db.rpc("framer_cron_ok", { s: cronSecret });
+    if (ok !== true) return json({ error: "Forbidden" }, 403);
+    const action = (await req.json().catch(() => ({})))?.action;
+    if (action === "copy_photos") return json(await copyFormPhotos());
+    return json({ error: "Unknown action" }, 400);
+  }
   const body = await req.text();
 
   if (!SIGNING_SECRET) return json({ error: "TALLY_SIGNING_SECRET not configured" }, 500);
@@ -161,7 +290,8 @@ Deno.serve(async (req) => {
     await audit("intake_ignored", { reason: "different form", formId: data.formId, formName: data.formName });
     return json({ ok: true, ignored: "different form" });
   }
-  const fields: TallyField[] = data.fields ?? [];
+  const allFields: TallyField[] = data.fields ?? [];
+  const { host: fields, cohost: cohostFields, gate } = splitCohost(allFields);
   const submissionId: string = data.responseId ?? data.submissionId ?? payload.eventId;
 
   const { data: settings } = await db.from("settings").select("*").eq("id", 1).single();
@@ -191,10 +321,13 @@ Deno.serve(async (req) => {
   if (!weekday) problems.push(`could not read first preference day from "${text(day1)}"`);
   if (!start) problems.push(`could not read first preference time from "${text(time1)}"`);
   if (problems.length) {
-    await audit("intake_failed", { submissionId, problems, fields });
+    await audit("intake_failed", { submissionId, problems, fields: allFields });
     // 200 so Tally does not retry; the failure is visible in Settings > Activity.
     return json({ ok: false, problems });
   }
+
+  let { cohost, problem: cohostProblem } = parseCohost(cohostFields, gate);
+  if (cohost && cohost.email === email) { cohost = null; cohostProblem = "Co-host email is the same as the host's, so no co-host was added."; }
 
   const fullName = [firstName, lastName].filter(Boolean).join(" ");
   const displayName = initiated ? `${initiated} (${fullName || email})` : fullName || email;
@@ -220,6 +353,22 @@ Deno.serve(async (req) => {
     fac = created;
   }
 
+  // Their photo from the form, when they don't have one yet (a form never replaces a photo already on file).
+  let photoProblem: string | null = null;
+  const hostPhoto = photoFile(fields);
+  if (hostPhoto && !fac.photo_url) {
+    const r = await copyPhoto(hostPhoto, fac.id);
+    if (r.url) await db.from("facilitators").update({ photo_url: r.url }).eq("id", fac.id);
+    else photoProblem = r.problem ?? null;
+  }
+  // A co-host's photo is kept with their details until approval, in a folder of its own.
+  const cohostPhoto = cohost ? photoFile(cohostFields) : null;
+  if (cohost && cohostPhoto) {
+    const r = await copyPhoto(cohostPhoto, `cohost-${String(submissionId).replace(/[^A-Za-z0-9_-]/g, "")}`);
+    if (r.url) cohost.photo_url = r.url;
+    else photoProblem = [photoProblem, `Co-host: ${r.problem}`].filter(Boolean).join("\n");
+  }
+
   // Flag likely duplicates: same facilitator already has a circle that isn't ended or rejected.
   const { data: existing } = await db.from("circles").select("name")
     .eq("facilitator_id", fac.id).not("status", "in", "(ended,rejected)");
@@ -228,6 +377,9 @@ Deno.serve(async (req) => {
     specify && `Specified: ${specify}`,
     !tzExact && tzLabel && `Timezone "${tzLabel}" was not recognised exactly; check it.`,
     existing?.length && `Possible duplicate: this facilitator already has ${existing.map((c) => `"${c.name}"`).join(", ")}.`,
+    cohost && `Co-host: ${cohostLabel(cohost)}, ${cohost.email}. Added as a co-facilitator when the circle is approved.`,
+    cohostProblem,
+    photoProblem,
   ].filter(Boolean).join("\n") || null;
 
   const { data: circle, error: circErr } = await db
@@ -249,6 +401,7 @@ Deno.serve(async (req) => {
       source: "tally",
       tally_submission_id: submissionId,
       raw_submission: payload,
+      pending_cohost: cohost,
     })
     .select("id")
     .single();
@@ -267,7 +420,7 @@ Deno.serve(async (req) => {
   const { data: allocated, error: allocErr } = await db.rpc("allocate_circle", { p_circle: circle.id });
   await audit("intake", {
     submissionId, status: allocated?.status, preference_used: allocated?.preference_used,
-    timezone: tz, error: allocErr?.message,
+    timezone: tz, error: allocErr?.message, cohost: cohost?.email ?? (cohostProblem ? "not added" : undefined),
   }, circle.id);
 
   return json({ ok: true, circle_id: circle.id, status: allocated?.status });

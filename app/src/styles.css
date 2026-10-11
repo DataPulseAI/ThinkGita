@@ -233,7 +233,7 @@ button svg { vertical-align: -2px; }
 
 /* ---- Drawer & forms ---- */
 .drawer-bg { position: fixed; inset: 0; background: rgb(8 20 22 / .45); display: flex; justify-content: flex-end; z-index: 10; }
-.drawer { width: min(500px, 100%); height: 100%; overflow-y: auto; background: var(--surface); padding: 20px; display: grid; gap: 14px; align-content: start; }
+.drawer { width: min(max(520px, 50vw), 960px, 100%); height: 100%; overflow-y: auto; background: var(--surface); padding: 20px; display: grid; gap: 14px; align-content: start; }
 .drawer-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .drawer-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 12px; }
 .drawer-foot button { display: inline-flex; align-items: center; gap: 6px; }
@@ -629,3 +629,47 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .profile-photo-row { display: flex; gap: 14px; align-items: center; }
 .profile-photo-actions { display: grid; gap: 4px; justify-items: start; }
 .profile-photo-actions button.link { font-size: 12px; }
+
+/* Circle panel: collapsible sections */
+.sec { gap: 8px; }
+.sec.closed { padding-top: 8px; padding-bottom: 8px; }
+.sec-head { margin-bottom: 0; }
+.sec-toggle { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 4px 0; background: none; border: 0; box-shadow: none; text-align: left; cursor: pointer; color: inherit; }
+.sec-toggle:hover .section-title { color: var(--ink); }
+.sec-chevron { display: inline-block; font-size: 11px; color: var(--muted); transition: transform .15s; }
+.sec.open .sec-chevron { transform: rotate(90deg); }
+.sec-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sec.open .sec-summary { display: none; }
+.sec-body { display: grid; gap: 8px; }
+.sec-body > .form { padding: 0; }
+
+/* Circle panel: facilitators */
+.team-role { display: grid; gap: 6px; }
+.team-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.team-person { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.team-person.cofac-pending { border-style: dashed; }
+.team-empty { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 10px; }
+.team-add { justify-self: start; }
+.person-line { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.person-text { display: grid; gap: 1px; min-width: 0; }
+.person-text > span { overflow: hidden; text-overflow: ellipsis; }
+.person-name { font-weight: 600; }
+
+/* Facilitator picker and new person form */
+.picker { display: grid; gap: 8px; padding: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.picker-list { display: grid; gap: 2px; max-height: 320px; overflow-y: auto; }
+.picker-option { display: flex; width: 100%; padding: 6px 8px; background: none; border: 1px solid transparent; border-radius: 8px; box-shadow: none; text-align: left; cursor: pointer; color: inherit; }
+.picker-option:hover, .picker-option:focus-visible { background: var(--surface-2); border-color: var(--line); }
+.picker-empty { margin: 4px 2px; }
+.picker-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.new-person label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; }
+.new-person-head { display: grid; gap: 2px; }
+.new-person .actions { justify-content: flex-end; margin-top: 0; }
+.person-match { display: grid; gap: 6px; padding: 8px; border-radius: 8px; background: var(--warn-soft); }
+.person-match-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tag.new { background: var(--live-soft); color: var(--live); border-color: transparent; }
+.tag.unverified { background: var(--warn-soft); color: var(--warn); }
+.new-person-photo { display: flex; align-items: center; gap: 14px; }
+.new-person-photo-actions { display: grid; gap: 4px; justify-items: start; }
+.new-person-photo-actions button.link { font-size: 12px; }
+.new-person.standalone { border: 0; padding: 0; background: none; }

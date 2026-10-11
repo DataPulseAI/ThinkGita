@@ -11,10 +11,16 @@ async function openCircle(page, name) {
 // A field in the panel's main form, by the start of its label.
 const field = (d, label) => d.locator(".form > label, .form .grid2 > label, .form .grid3 > label, .form fieldset label")
   .filter({ hasText: new RegExp(`^${label}`) }).locator("input, select, textarea").first();
-const section = (d, title) => d.locator(".details", { has: d.page().locator(".section-title", { hasText: title }) });
+// A panel section, opened if it is collapsed.
+async function section(d, title) {
+  const s = d.locator("section.sec", { has: d.page().locator(".sec-head .section-title", { hasText: new RegExp(`^${title}$`) }) });
+  const toggle = s.locator(".sec-toggle").first();
+  if ((await toggle.getAttribute("aria-expanded")) === "false") await toggle.click();
+  return s;
+}
 
 test.describe("Circle panel", () => {
-  test("editing a pending circle saves the facilitator and circle rows", async ({ page, mock }) => {
+  test("editing a pending circle saves the circle row only (people are edited on their profile)", async ({ page, mock }) => {
     await signIn(page, { hash: "/Circles" });
     const d = await openCircle(page, NAMES.c03);
     await expect(d.locator(".pills .pill").first()).toHaveText("Awaiting approval");
@@ -27,12 +33,12 @@ test.describe("Circle panel", () => {
 
     await expect(toast(page)).toHaveText("Saved: Awaiting approval");
     await expect(drawer(page)).toHaveCount(0);
-    expect(mock.rest("facilitators", "PATCH").map((r) => [r.query.id, r.body])).toEqual([["eq.fac-03", { phone: "+1 555 0100" }]]);
+    expect(mock.rest("facilitators")).toEqual([]);
     const patches = mock.rest("circles", "PATCH");
     expect(patches).toHaveLength(2);
     expect(patches[0].query).toEqual({ id: "eq.c03" });
     expect(patches[0].body).toEqual({
-      facilitator_id: "fac-03", weekday: 2, start_time: "18:30",
+      weekday: 2, start_time: "18:30",
       alt_weekday: null, alt_start_time: null, duration_min: 60, timezone: "America/New_York", preferred_start: "2026-10-20",
       circle_type: "Beginner", language: "Portuguese", notes: "Prefers a small group",
       whatsapp_group_link: null, participant_signup_link: null, youtube_playlist_link: null, drive_folder_link: null,
@@ -128,30 +134,79 @@ test.describe("Circle panel", () => {
     expect(circlePatch.body).not.toHaveProperty("name_auto");
   });
 
-  test("adding a new circle creates the facilitator and picks a licence", async ({ page, mock }) => {
+  test("a new circle needs a primary facilitator picked from the people on file", async ({ page, mock }) => {
     await signIn(page, { hash: "/Circles" });
     await page.getByRole("button", { name: "Add circle" }).click();
     const d = drawer(page);
     await expect(d.locator("h2").first()).toHaveText("New circle");
     await expect(field(d, "Circle name")).toHaveAttribute("readonly", "");
     await expect(d.locator(".name-hint")).toHaveText("Set automatically when you add the circle: Gita Circles | host | day and time. It follows the host, day and time, so it can't be typed.");
-    await field(d, "Facilitator name").fill("Gita Newcomer");
-    await field(d, "Facilitator email").fill("Gita.Newcomer@Example.org");
+    // No facilitator yet: saving is refused.
+    await d.getByRole("button", { name: "Add circle" }).click();
+    await expect(page.locator(".toast.error")).toHaveText("Choose the primary facilitator first (Facilitators, at the top).");
+    expect(mock.rest("circles", "POST")).toHaveLength(0);
+
+    const team = await section(d, "Facilitators");
+    await expect(team).toContainText("Choose who runs this circle.");
+    await team.getByRole("button", { name: "Choose facilitator" }).click();
+    await team.getByLabel("Choose the primary facilitator").fill("chitra");
+    await expect(team.getByRole("option")).toHaveCount(1);
+    await team.getByRole("option", { name: /Chitra Placeholder/ }).click();
+    await expect(team.locator(".team-person")).toContainText("Chitra Placeholder");
+    await expect(team.locator(".team-person")).toContainText("chitra.placeholder@example.org");
     await field(d, "Day").selectOption("4");
     await field(d, "Start").fill("20:00");
-    await expect(field(d, "Circle name")).toHaveValue("Gita Circles | Gita Newcomer | Thursday 20:00 (UK time)");
+    await expect(field(d, "Circle name")).toHaveValue("Gita Circles | Chitra Placeholder | Thursday 20:00 (UK time)");
     await d.getByRole("button", { name: "Add circle" }).click();
     await expect(toast(page)).toHaveText("Saved: Awaiting approval");
-    expect(mock.rest("facilitators", "POST").map((r) => r.body)).toEqual([{ email: "gita.newcomer@example.org", name: "Gita Newcomer", phone: null }]);
+    expect(mock.rest("facilitators")).toEqual([]);
     const created = mock.rest("circles", "POST")[0].body;
-    expect(created).toMatchObject({ name: "Gita Circles", name_auto: true, weekday: 4, start_time: "20:00", duration_min: 75, timezone: "Europe/London", source: "manual", licence_id: null, status: "pending" });
+    expect(created).toMatchObject({ facilitator_id: "fac-03", name: "Gita Circles", name_auto: true, weekday: 4, start_time: "20:00", duration_min: 75, timezone: "Europe/London", source: "manual", licence_id: null, status: "pending" });
     expect(mock.rpc("allocate_circle")).toHaveLength(1);
+  });
+
+  test("a new person is added to the system once, and an email on file offers that person instead", async ({ page, mock }) => {
+    await signIn(page, { hash: "/Circles" });
+    await page.getByRole("button", { name: "Add circle" }).click();
+    const team = await section(drawer(page), "Facilitators");
+    await team.getByRole("button", { name: "Choose facilitator" }).click();
+    await team.getByLabel("Choose the primary facilitator").fill("Gita Newcomer");
+    await expect(team.getByText("Nobody matches. Add them as a new facilitator.")).toBeVisible();
+    await team.getByRole("button", { name: "+ New facilitator" }).click();
+    const form = team.locator("form.new-person");
+    await expect(form.getByLabel("First name")).toHaveValue("Gita");
+    await expect(form.getByLabel("Last name")).toHaveValue("Newcomer");
+    await form.getByLabel("Email").fill("Bram.Sample@example.org");
+    await expect(form.getByText("Already in the system:")).toBeVisible();
+    await expect(form.getByRole("button", { name: "Add to the system" })).toBeDisabled();
+    await form.getByLabel("Email").fill("Gita.Newcomer@Example.org");
+    await form.getByLabel("Phone").fill("+44 7700 900777");
+    await form.getByRole("button", { name: "Add to the system" }).click();
+    await expect(team.locator(".team-person")).toContainText("Gita Newcomer");
+    expect(mock.rest("facilitators", "POST").map((r) => r.body)).toEqual([{
+      name: "Gita Newcomer", email: "gita.newcomer@example.org", phone: "+44 7700 900777", first_name: "Gita", last_name: "Newcomer", initiated_name: null,
+    }]);
+  });
+
+  test("someone who looks like a person on file is offered before adding", async ({ page }) => {
+    await signIn(page, { hash: "/Circles" });
+    await page.getByRole("button", { name: "Add circle" }).click();
+    const team = await section(drawer(page), "Facilitators");
+    await team.getByRole("button", { name: "Choose facilitator" }).click();
+    await team.getByRole("button", { name: "+ New facilitator" }).click();
+    const form = team.locator("form.new-person");
+    await form.getByLabel("First name").fill("Bram");
+    await form.getByLabel("Last name").fill("Sample");
+    await form.getByLabel("Email").fill("bram.other@example.org");
+    await expect(form.getByText("Is this one of these people?")).toBeVisible();
+    await form.locator(".person-match-row", { hasText: "Bram Sample" }).getByRole("button", { name: "Use them" }).click();
+    await expect(team.locator(".team-person")).toContainText("bram.sample@example.org");
   });
 
   test("live circle details, resend email and the shared licence note", async ({ page, mock }) => {
     await signIn(page, { hash: "/Circles" });
     const d = await openCircle(page, NAMES.c01);
-    const zoom = section(d, "Zoom details");
+    const zoom = await section(d, "Zoom details");
     await expect(zoom).toContainText("https://zoom.example.org/j/100000001?pwd=fake");
     await expect(zoom).toContainText("111111");
     await expect(zoom).toContainText("Mondays 19:00 (London time)");
@@ -180,7 +235,7 @@ test.describe("Circle panel", () => {
     mock.handle("rpc free_licences_for_circle", [{ licence_id: LIC.z3, label: "Zoom 03", is_mock: false, has_zoom: true }]);
     await signIn(page, { hash: "/Circles" });
     const d = await openCircle(page, NAMES.c01);
-    const manage = section(d, "Manage");
+    const manage = await section(d, "Manage");
     const menu = manage.getByLabel("Move to another licence");
     await expect(menu.locator("option").first()).toHaveText("Choose a licence…");
     await expect(menu.locator("optgroup")).toHaveCount(2);
@@ -200,7 +255,7 @@ test.describe("Circle panel", () => {
   test("with no other licence free, the move menu says so", async ({ page }) => {
     await signIn(page, { hash: "/Circles" });
     const d = await openCircle(page, NAMES.c02);
-    await expect(section(d, "Manage").getByLabel("Move to another licence").locator("option").first()).toHaveText("No other licence has room at this time");
+    await expect((await section(d, "Manage")).getByLabel("Move to another licence").locator("option").first()).toHaveText("No other licence has room at this time");
   });
 
   test("a clash lists who holds the time", async ({ page, mock }) => {
@@ -208,55 +263,93 @@ test.describe("Circle panel", () => {
     await signIn(page, { hash: "/Circles" });
     const d = await openCircle(page, NAMES.c04);
     await expect(d.locator(".approve-bar.warn")).toContainText("Can't approve yet");
-    const holders = section(d, "Who's using this time");
+    const holders = await section(d, "Who's using this time");
     await expect(holders.locator("button.holder")).toContainText("Mon 19:00 UK · Live · Asha Example");
     await holders.locator("button.holder").click();
     await expect(drawer(page).locator("h2").first()).toHaveText(NAMES.c01);
   });
 
-  test("co-facilitators can be added and removed", async ({ page, mock, dialogs }) => {
+  test("co-facilitators are picked from the people on file and can be removed", async ({ page, mock, dialogs }) => {
     await signIn(page, { hash: "/Circles" });
     let d = await openCircle(page, NAMES.c02);
-    const co = section(d, "Co-facilitators");
+    const co = await section(d, "Facilitators");
+    await expect(co.locator(".team-role").first()).toContainText("Primary facilitator");
+    await expect(co.locator(".team-role").first()).toContainText("Bram Sample");
     await expect(co).toContainText("None. Co-facilitators see this circle when they sign in and get its emails.");
-    await co.getByRole("button", { name: "Add co-facilitator" }).click();
-    await expect(co.getByRole("button", { name: "Add", exact: true })).toBeDisabled();
-    await co.getByLabel("Name").fill("Hari Helper");
-    await co.getByLabel("Email").fill("Hari.Helper@example.org");
-    await co.getByLabel("Phone").fill("+44 7700 900009");
-    await co.getByRole("button", { name: "Add", exact: true }).click();
-    await expect(toast(page)).toHaveText("Hari Helper added. They'll get future emails; use Resend details email to send them the details now.");
-    expect(mock.rest("facilitators", "POST").map((r) => r.body)).toEqual([{ email: "hari.helper@example.org", name: "Hari Helper", phone: "+44 7700 900009" }]);
-    const link = mock.rest("circle_cofacilitators", "POST")[0].body;
-    expect(link.circle_id).toBe("c02");
-    expect(link.facilitator_id).toBe(mock.db.facilitators.find((f) => f.email === "hari.helper@example.org").id);
-    await expect(co.locator(".cofac-row")).toContainText("Hari Helper · hari.helper@example.org · +44 7700 900009");
+    await co.getByRole("button", { name: "+ Add co-facilitator" }).click();
+    // The primary facilitator isn't offered.
+    await co.getByLabel("Choose a co-facilitator").fill("bram");
+    await expect(co.getByRole("option")).toHaveCount(0);
+    await co.getByLabel("Choose a co-facilitator").fill("farid");
+    await co.getByRole("option", { name: /Farid Dummy/ }).click();
+    await expect(toast(page)).toHaveText("Farid Dummy added. They'll get future emails; use Resend details email to send them the details now.");
+    expect(mock.rest("facilitators")).toEqual([]);
+    expect(mock.rest("circle_cofacilitators", "POST").map((r) => r.body)).toEqual([{ circle_id: "c02", facilitator_id: "fac-06" }]);
+    await expect(co.locator(".cofac-row")).toContainText("Farid Dummy");
 
     await page.keyboard.press("Escape");
     d = await openCircle(page, NAMES.c01);
-    const co1 = section(d, "Co-facilitators");
-    await expect(co1.locator(".cofac-row")).toContainText("Esha Specimen · esha.specimen@example.org");
-    await co1.getByRole("button", { name: "Remove" }).click();
+    const co1 = await section(d, "Facilitators");
+    await expect(co1.locator(".cofac-row")).toContainText("Esha Specimen");
+    await co1.locator(".cofac-row").getByRole("button", { name: "Remove" }).click();
     await expect(toast(page)).toHaveText("Esha Specimen removed from this circle");
-    expect(dialogs.messages).toEqual(["Remove Esha Specimen from this circle? They keep their other circles."]);
+    expect(dialogs.messages).toEqual(["Remove Esha Specimen from this circle? They stay in the system and keep their other circles."]);
     expect(mock.rest("circle_cofacilitators", "DELETE").map((r) => r.query)).toEqual([{ circle_id: "eq.c01", facilitator_id: "eq.fac-05" }]);
     await expect(co1.locator(".cofac-row")).toHaveCount(0);
   });
 
-  test("adding the main facilitator as a co-facilitator is refused", async ({ page, mock }) => {
+  test("changing the primary facilitator: straight away when not live, a handover when live", async ({ page, mock, dialogs }) => {
     await signIn(page, { hash: "/Circles" });
-    const co = section(await openCircle(page, NAMES.c02), "Co-facilitators");
-    await co.getByRole("button", { name: "Add co-facilitator" }).click();
-    await co.getByLabel("Email").fill("bram.sample@example.org");
-    await co.getByRole("button", { name: "Add", exact: true }).click();
-    await expect(page.locator(".toast.error")).toHaveText("That's already the main facilitator.");
-    expect(mock.rest("circle_cofacilitators")).toHaveLength(0);
+    let team = await section(await openCircle(page, NAMES.c03), "Facilitators");
+    await team.locator(".team-role").first().getByRole("button", { name: "Change" }).click();
+    await team.getByLabel("Choose the primary facilitator").fill("farid");
+    await team.getByRole("option", { name: /Farid Dummy/ }).click();
+    await expect(toast(page)).toHaveText("Farid Dummy is now the primary facilitator.");
+    expect(dialogs.messages.at(-1)).toBe(`Make Farid Dummy the primary facilitator of "${NAMES.c03}"?`);
+    expect(mock.rest("circles", "PATCH").map((r) => [r.query.id, r.body])).toEqual([["eq.c03", { facilitator_id: "fac-06" }]]);
+
+    await page.keyboard.press("Escape");
+    // Live: Esha co-facilitates c01; making her primary hands over (email) and takes her off the co-facilitator list.
+    team = await section(await openCircle(page, NAMES.c01), "Facilitators");
+    await team.locator(".team-role").first().getByRole("button", { name: "Change" }).click();
+    await team.getByLabel("Choose the primary facilitator").fill("esha");
+    await team.getByRole("option", { name: /Esha Specimen/ }).click();
+    await expect(toast(page)).toHaveText("Handed over to Esha Specimen. Email sent to esha.specimen@example.org.");
+    expect(dialogs.messages.at(-1)).toContain(`Hand "${NAMES.c01}" over to Esha Specimen?`);
+    expect(mock.rest("circle_cofacilitators", "DELETE").map((r) => r.query)).toEqual([{ circle_id: "eq.c01", facilitator_id: "eq.fac-05" }]);
+    expect(mock.fn("provision-circle", "handover")).toEqual([{ action: "handover", circle_id: "c01", facilitator: { name: "Esha Specimen", email: "esha.specimen@example.org" } }]);
+  });
+
+  test("Profile opens the person on the Facilitators page", async ({ page }) => {
+    await signIn(page, { hash: "/Circles" });
+    const team = await section(await openCircle(page, NAMES.c02), "Facilitators");
+    await team.locator(".team-role").first().getByRole("button", { name: "Profile" }).click();
+    await expect(page).toHaveURL(/#\/Facilitators\/fac-02$/);
+    await expect(page.locator("aside.fac-drawer h2")).toHaveText("Bram Sample");
+  });
+
+  test("sections collapse and remember it", async ({ page }) => {
+    await signIn(page, { hash: "/Circles" });
+    let d = await openCircle(page, NAMES.c02);
+    const manage = d.locator("section.sec", { has: page.locator(".sec-head .section-title", { hasText: /^Manage$/ }) });
+    await expect(manage.locator(".sec-toggle")).toHaveAttribute("aria-expanded", "false");
+    await expect(manage.locator(".sec-summary")).toHaveText("Move licence, set end date");
+    await expect(manage.getByLabel("Move to another licence")).toHaveCount(0);
+    await manage.locator(".sec-toggle").click();
+    await expect(manage.getByLabel("Move to another licence")).toBeVisible();
+    const team = d.locator("section.sec.team");
+    await team.locator(".sec-toggle").click();
+    await expect(team.locator(".sec-summary")).toHaveText("Bram Sample");
+    await page.keyboard.press("Escape");
+    d = await openCircle(page, NAMES.c02);
+    await expect(d.locator("section.sec.team .sec-toggle")).toHaveAttribute("aria-expanded", "false");
+    await expect(d.locator("section.sec", { has: page.locator(".sec-head .section-title", { hasText: /^Manage$/ }) }).locator(".sec-toggle")).toHaveAttribute("aria-expanded", "true");
   });
 
   test("website section: checklist, field validation and save", async ({ page, mock }) => {
     await signIn(page, { hash: "/Circles" });
     const d = await openCircle(page, NAMES.c03);
-    const web = section(d, "Website");
+    const web = await section(d, "Website");
     await expect(web).toContainText("Not listed on the ThinkGita website (kept as a draft). Switch it on to advertise it before it's approved.");
     await expect(web.locator(".wf-ready > p")).toHaveText("Not ready for the website. Before it can be shown, set: photo, WhatsApp group link, website order.");
     await expect(web.locator(".wf-checklist li")).toHaveCount(9);
@@ -293,7 +386,7 @@ test.describe("Circle panel", () => {
 
   test("undo puts the website fields back", async ({ page }) => {
     await signIn(page, { hash: "/Circles" });
-    const form = section(await openCircle(page, NAMES.c08), "Website").locator("form.wf-form");
+    const form = (await section(await openCircle(page, NAMES.c08), "Website")).locator("form.wf-form");
     await form.getByLabel("Website order").fill("9");
     await form.getByRole("button", { name: "Undo" }).click();
     await expect(form.getByLabel("Website order")).toHaveValue("4");
@@ -302,7 +395,7 @@ test.describe("Circle panel", () => {
 
   test("a switched-on circle held back for missing details shows the readiness note, not an error", async ({ page }) => {
     await signIn(page, { hash: "/Circles" });
-    const web = section(await openCircle(page, NAMES.c05), "Website");
+    const web = await section(await openCircle(page, NAMES.c05), "Website");
     await expect(web.locator("p.muted.small").first()).toHaveText("Listed on the ThinkGita website. Kept hidden until the missing details below are set.");
     await expect(web.getByText("Last website update failed")).toHaveCount(0);
     await expect(web.locator(".wf-ready > p")).toHaveText("Not ready for the website. It stays hidden until: website order.");
@@ -312,7 +405,7 @@ test.describe("Circle panel", () => {
   test("a real website error is shown in the panel", async ({ page, mock }) => {
     mock.db.circles.find((c) => c.id === "c02").framer_error = "Framer rejected the image";
     await signIn(page, { hash: "/Circles" });
-    const web = section(await openCircle(page, NAMES.c02), "Website");
+    const web = await section(await openCircle(page, NAMES.c02), "Website");
     await expect(web.locator(".warn-text")).toHaveText("Last website update failed: Framer rejected the image");
   });
 
@@ -331,5 +424,50 @@ test.describe("Circle panel", () => {
     const d = await openCircle(page, NAMES.c01);
     await expect(d.locator(".drawer-foot")).toBeVisible();
     await expect(d.locator(".drawer-foot").getByRole("button", { name: "Delete circle" })).toHaveCount(0);
+  });
+});
+
+test.describe("Co-host from the form", () => {
+  const cohost = { email: "priya.sample@example.org", first_name: "Priya", last_name: "Sample", initiated_name: "Radha", phone: "+44 7700 900123" };
+
+  test("a waiting co-host shows in the Queue, the approve dialog and the panel, and can be removed", async ({ page, mock, dialogs }) => {
+    mock.db.circles.find((c) => c.id === "c03").pending_cohost = cohost;
+    await signIn(page, { hash: "/Queue" });
+    const row = page.locator(".list .row", { has: page.locator(".row-title", { hasText: NAMES.c03 }) });
+    await expect(row).toContainText("Co-host: Radha (Priya Sample), added when approved");
+    await row.getByRole("button", { name: "Approve + create Zoom" }).click();
+    await expect(page.locator("form.approve-modal")).toContainText("emails Chitra Placeholder, Radha (Priya Sample) their details and a sign-in invite.");
+    await expect(page.locator("form.approve-modal")).toContainText("Email all 2 facilitators their details and a sign-in invite");
+    await page.locator("form.approve-modal").getByRole("button", { name: "Cancel" }).click();
+
+    await row.locator(".row-main").click();
+    const co = await section(drawer(page), "Facilitators");
+    await expect(co.locator(".cofac-pending .person-name")).toHaveText("Radha (Priya Sample)");
+    await expect(co.locator(".cofac-pending")).toContainText("priya.sample@example.org · +44 7700 900123");
+    await expect(co.locator(".cofac-pending")).toContainText("Added as a co-facilitator when this circle is approved, and emailed with the host.");
+    await expect(co).not.toContainText("None. Co-facilitators");
+    await expect(co.getByRole("button", { name: "Add now" })).toHaveCount(0);
+    await co.getByRole("button", { name: "Remove" }).click();
+    await expect(toast(page)).toHaveText("Radha (Priya Sample) won't be added");
+    expect(dialogs.messages).toEqual(["Don't add Radha (Priya Sample) as a co-host?"]);
+    expect(mock.rest("circles", "PATCH").map((r) => [r.query.id, r.body])).toEqual([["eq.c03", { pending_cohost: null }]]);
+    // Nothing was created for them.
+    expect(mock.rest("facilitators")).toHaveLength(0);
+  });
+
+  test("on a live circle a co-host that wasn't added can be added now", async ({ page, mock }) => {
+    mock.db.circles.find((c) => c.id === "c02").pending_cohost = cohost;
+    await signIn(page, { hash: "/Circles" });
+    const co = await section(await openCircle(page, NAMES.c02), "Facilitators");
+    await expect(co.locator(".cofac-pending")).toContainText("Co-host from the form, not added yet.");
+    await co.getByRole("button", { name: "Add now" }).click();
+    await expect(toast(page)).toHaveText("Radha (Priya Sample) added. They'll get future emails; use Resend details email to send them the details now.");
+    expect(mock.rest("facilitators", "POST").map((r) => r.body)).toEqual([{
+      email: "priya.sample@example.org", name: "Radha (Priya Sample)", phone: "+44 7700 900123", first_name: "Priya", last_name: "Sample", initiated_name: "Radha",
+    }]);
+    expect(mock.rest("circle_cofacilitators", "POST")[0].body.circle_id).toBe("c02");
+    expect(mock.rest("circles", "PATCH").map((r) => [r.query.id, r.body])).toEqual([["eq.c02", { pending_cohost: null }]]);
+    await expect(co.locator(".cofac-pending")).toHaveCount(0);
+    await expect(co.locator(".cofac-row")).toContainText("priya.sample@example.org");
   });
 });

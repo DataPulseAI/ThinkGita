@@ -208,9 +208,16 @@ describe("buildRows, filterRows, sortRows", () => {
     expect(row("f1").status).toBe("well");
     expect(row("f2").status).toBe("check");
     expect(row("f2").circleFlags).toEqual(["No session in 3 weeks"]);
-    expect(row("f3").status).toBe("starting");
+    expect(row("f3").status).toBe("none"); // only a form waiting for approval
     expect(row("f4").status).toBe("none"); // only an ended circle
     expect(row("f5").status).toBe("well"); // co-facilitates c1
+  });
+  it("starting soon means approved with the first session still to come", () => {
+    const f = { id: "s1", name: "Soon", email: "s@x.org" };
+    const [r] = fp.buildRows([f], [circle({ id: "s", facilitator: f, starts_on: "2026-11-02" })], [], NOW);
+    expect(r.status).toBe("starting");
+    const [p] = fp.buildRows([f], [circle({ id: "p", status: "pending", facilitator: f })], [], NOW);
+    expect(p.status).toBe("none");
   });
   it("counts circles by status and role", () => {
     expect(row("f2").counts).toEqual({ live: 1, awaiting: 0, paused: 1, co: 0 });
@@ -272,5 +279,16 @@ describe("circle labels on the week strips", () => {
     const sessions = mondays("08-17", "08-24", "08-31", "09-07", "09-14", "09-21", "09-28", "10-05").map((s) => ({ ...s, circle_id: "a" }));
     const [row] = fp.buildRows([f], [a, b], sessions, NOW);
     expect(row.circleFlags).toEqual(["Bhakti, Spanish Thu 6pm CDMX: No sessions on record"]);
+  });
+});
+
+describe("verification", () => {
+  it("rows flag unverified people as a detail, and verifiedText says when and how", () => {
+    const [a, b] = fp.buildRows([{ id: "a", name: "A", email: "a@x.org", verified_at: "2026-10-11T10:00:00Z", verified_by: "approval" }, { id: "b", name: "B", email: "b@x.org" }], [], [], NOW);
+    expect(a.details.map((d) => d.key)).not.toContain("unverified");
+    expect(b.details[0]).toEqual({ key: "unverified", label: "Unverified" });
+    expect(fp.verifiedText(a.fac)).toBe("Verified on 11 Oct 2026 (when a circle they run was approved)");
+    expect(fp.verifiedText({ verified_at: "2026-10-11T10:00:00Z", verified_by: "admin@x.org" })).toBe("Verified on 11 Oct 2026 (by admin@x.org)");
+    expect(fp.verifiedText({})).toBe("");
   });
 });

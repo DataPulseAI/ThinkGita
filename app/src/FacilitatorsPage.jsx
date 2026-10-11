@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase, adminAction, STATUS_LABEL, ukWhen, localWhen, isUk, UK_TZ, DAYS, timeLabel, zoneLabel } from "./lib.js";
 import { CopyButton, Hover } from "./ui.jsx";
+import { NewFacilitator } from "./People.jsx";
 import "./facilitators.css";
 
 export const WEEKS = 8;
@@ -195,9 +196,9 @@ export function detailFlags(f) {
 export const STATUS = {
   check: { label: "Needs a check", hint: "A live circle missed sessions recently" },
   well: { label: "Running well", hint: "Every live circle has met regularly" },
-  starting: { label: "Starting soon", hint: "Awaiting approval, or live with a start date still to come" },
+  starting: { label: "Starting soon", hint: "Approved, with the first session still to come" },
   paused: { label: "Paused", hint: "Only paused circles" },
-  none: { label: "No active circles", hint: "Not on any current circle" },
+  none: { label: "No active circles", hint: "Not running a circle yet: only forms waiting for approval, or nothing current" },
 };
 
 // One row per facilitator: their current circles (lead and co-facilitated), consistency and flags.
@@ -223,14 +224,17 @@ export function buildRows(facilitators, circles, sessions, now) {
     let status = "none";
     if (circleFlags.length) status = "check";
     else if (running.length) status = "well";
-    else if (all.some((x) => AWAITING.includes(x.c.status) || x.c.status === "live")) status = "starting";
+    // Starting soon: approved, with the first session still to come. A form still waiting in the Queue isn't a circle yet.
+    else if (all.some((x) => x.c.status === "live" || x.c.status === "approved")) status = "starting";
     else if (all.some((x) => x.c.status === "paused")) status = "paused";
     const lastSession = Math.max(0, ...all.map((x) => x.h.lastSession ?? 0)) || null;
     const avgs = running.map((x) => x.h.avg).filter((v) => v != null);
     const count = (role, sts) => all.filter((x) => x.role === role && sts.includes(x.c.status)).length;
     const names = facilitatorNames(fac);
     return {
-      id: fac.id, fac, names, circles: all, status, circleFlags, details: detailFlags(fac), lastSession,
+      id: fac.id, fac, names, circles: all, status, circleFlags, lastSession,
+      // Unverified sits with the details so it can be filtered on like them.
+      details: [...(fac.verified_at ? [] : [{ key: "unverified", label: "Unverified" }]), ...detailFlags(fac)],
       avg: avgs.length ? avgs.reduce((a, b) => a + b, 0) / avgs.length : null,
       counts: { live: count("lead", ["live"]), awaiting: count("lead", AWAITING), paused: count("lead", ["paused"]), co: all.filter((x) => x.role === "co").length },
       active: all.length,
@@ -383,7 +387,7 @@ function RowStrips({ r }) {
   );
 }
 
-export function FacilitatorsPage({ data, run, onSelect }) {
+export function FacilitatorsPage({ data, run, onSelect, onNewCircle, initial }) {
   const [facs, setFacs] = useState(null);
   const [sessions, setSessions] = useState(null);
   const [loadErr, setLoadErr] = useState("");
@@ -392,7 +396,8 @@ export function FacilitatorsPage({ data, run, onSelect }) {
   const [status, setStatus] = useState("all");
   const [detail, setDetail] = useState(null);
   const [sort, setSort] = useState("attention");
-  const [openId, setOpenId] = useState(null);
+  const [openId, setOpenId] = useState(initial ?? null);
+  const [adding, setAdding] = useState(false);
 
   // Facilitators reload whenever the dashboard data reloads (after any save).
   useEffect(() => {
@@ -445,8 +450,24 @@ export function FacilitatorsPage({ data, run, onSelect }) {
           <select value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort">
             {Object.entries(SORTS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
           </select>
+          <button type="button" className="primary" onClick={() => setAdding(true)}>New facilitator</button>
         </div>
       </div>
+      {adding && (
+        <div className="drawer-bg" onClick={() => setAdding(false)}>
+          <aside className="drawer new-fac-drawer" onClick={(e) => e.stopPropagation()} aria-label="New facilitator">
+            <div className="drawer-head">
+              <h2>New facilitator</h2>
+              <button className="ghost" onClick={() => setAdding(false)} aria-label="Close">✕</button>
+            </div>
+            <p className="muted small">Add them once. Their profile opens next, where you can assign them to a circle or start a new one.</p>
+            <NewFacilitator facilitators={facs}
+              onCreated={(row) => run(async () => row, `${facilitatorNames(row).title} added. Assign them to a circle, or start a new one, from their profile.`).then(() => { setAdding(false); setOpenId(row.id); })}
+              onUseExisting={(row) => { setAdding(false); setOpenId(row.id); }}
+              onCancel={() => setAdding(false)} cancelLabel="Cancel" standalone />
+          </aside>
+        </div>
+      )}
       <p className="card-sub">
         Weekly consistency of each live circle over the last {WEEKS} weeks, from Zoom attendance. A week counts as missed when no
         session took place within 3.5 days of the scheduled time. {sessions === null && "Loading attendance…"}
@@ -460,10 +481,10 @@ export function FacilitatorsPage({ data, run, onSelect }) {
           </button>
         ) : null)}
       </div>
-      {(counts["d:photo"] || counts["d:name"] || counts["d:phone"] || detail) && (
+      {(counts["d:unverified"] || counts["d:photo"] || counts["d:name"] || counts["d:phone"] || detail) && (
         <div className="web-filter" role="group" aria-label="Details">
           <span className="web-filter-label">Details</span>
-          {[["photo", "No photo"], ["name", "Name is an email"], ["phone", "No phone"]].map(([k, label]) => (counts[`d:${k}`] || detail === k) ? (
+          {[["unverified", "Unverified"], ["photo", "No photo"], ["name", "Name is an email"], ["phone", "No phone"]].map(([k, label]) => (counts[`d:${k}`] || detail === k) ? (
             <button key={k} type="button" className={`web-chip ${detail === k ? "on" : ""}`} aria-pressed={detail === k} onClick={() => setDetail(detail === k ? null : k)}>
               {label} <span className="ws-n">{counts[`d:${k}`] ?? 0}</span>
             </button>
@@ -486,7 +507,7 @@ export function FacilitatorsPage({ data, run, onSelect }) {
             <span className="fac-person" role="cell">
               <Avatar fac={r.fac} />
               <span className="fac-names">
-                <span className="fac-name">{r.names.title}</span>
+                <span className="fac-name">{r.names.title}{!fac_verified(r) && <span className="tag unverified">Unverified</span>}</span>
                 {r.names.sub && <span className="muted small">{r.names.sub}</span>}
                 {(r.circleFlags.length > 0 || r.details.some((d) => d.key === "name")) && (
                   <span className="fac-flags small">
@@ -518,7 +539,8 @@ export function FacilitatorsPage({ data, run, onSelect }) {
         {!shown.length && <p className="muted fac-empty">No facilitators match.</p>}
       </div>
 
-      {open && <FacilitatorPanel key={open.id} r={open} now={now} run={run} onSelect={onSelect} onClose={() => setOpenId(null)} />}
+      {open && <FacilitatorPanel key={open.id} r={open} now={now} run={run} onSelect={onSelect} circles={data.circles} onNewCircle={onNewCircle}
+        onClose={() => setOpenId(null)} />}
     </section>
   );
 }
@@ -550,7 +572,101 @@ export function formProblems(form) {
   return p;
 }
 
-function FacilitatorPanel({ r, now, run, onSelect, onClose }) {
+const fac_verified = (r) => Boolean(r.fac.verified_at);
+const VERIFIED_HOW = { approval: "when a circle they run was approved", "existing circle": "already running circles when verification began",
+  "added to a running circle": "when they were added to a running circle", "circle change": "when they took over a running circle" };
+// "Verified on 11 Oct (when a circle they run was approved)", or by which admin.
+export function verifiedText(fac) {
+  if (!fac?.verified_at) return "";
+  const when = new Date(fac.verified_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: UK_TZ });
+  const how = VERIFIED_HOW[fac.verified_by] ?? (fac.verified_by ? `by ${fac.verified_by}` : "");
+  return `Verified on ${when}${how ? ` (${how})` : ""}`;
+}
+// Verified status, and verifying someone directly without approving a circle (or taking it back).
+function Verification({ fac, run }) {
+  const [busy, setBusy] = useState(false);
+  const verified = Boolean(fac.verified_at);
+  const set = async (to) => {
+    if (!to && !confirm(`Remove verification from ${facilitatorNames(fac).title}? Their circles that aren't running yet can't go on the website until they're verified again.`)) return;
+    setBusy(true);
+    await run(async () => {
+      const { error } = await supabase.rpc("set_facilitator_verified", { p_facilitator: fac.id, p_verified: to });
+      if (error) throw error;
+    }, to ? `${facilitatorNames(fac).title} is verified.` : `${facilitatorNames(fac).title} is no longer verified.`);
+    setBusy(false);
+  };
+  return (
+    <div className={`fac-verify ${verified ? "ok" : "warn"}`}>
+      <div>
+        <div className="fac-verify-title">{verified ? "Verified" : "Not verified yet"}</div>
+        <div className="small muted">{verified ? verifiedText(fac) : "Approving a circle they run verifies them. Or verify them here once you've checked who they are."}</div>
+      </div>
+      {verified
+        ? <button type="button" className="link small" disabled={busy} onClick={() => set(false)}>Remove verification</button>
+        : <button type="button" className="primary" disabled={busy} onClick={() => set(true)}>{busy ? "Verifying…" : "Verify"}</button>}
+    </div>
+  );
+}
+
+// Puts this person on an existing circle: as co-facilitator, or as the primary facilitator (a handover if it's live).
+const ASSIGNABLE = ["pending", "conflict", "approved", "live", "paused"];
+function AssignCircle({ fac, circles, run, onDone }) {
+  const [q, setQ] = useState("");
+  const [role, setRole] = useState("co");
+  const [busy, setBusy] = useState(false);
+  const on = (c) => c.facilitator_id === fac.id || (c.cofacilitators ?? []).some((x) => x.facilitator?.id === fac.id);
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const list = circles.filter((c) => ASSIGNABLE.includes(c.status) && !on(c)
+    && words.every((w) => [c.name, c.facilitator?.name, c.language].filter(Boolean).join(" ").toLowerCase().includes(w)));
+  const who = facilitatorNames(fac).title;
+  async function pick(c) {
+    const live = c.status === "live";
+    if (role === "primary" && !confirm(live
+      ? `Hand "${c.name}" over to ${who}?\n\nThey get a sign-in invite and the circle's details by email. ${c.facilitator ? `${facilitatorNames(c.facilitator).title} is no longer its facilitator.` : ""}`
+      : `Make ${who} the primary facilitator of "${c.name}"?${c.facilitator ? ` ${facilitatorNames(c.facilitator).title} is no longer its facilitator.` : ""}`)) return;
+    setBusy(true);
+    const ok = await run(async () => {
+      if (role === "co") {
+        const { error } = await supabase.from("circle_cofacilitators").insert({ circle_id: c.id, facilitator_id: fac.id });
+        if (error) throw /duplicate/.test(error.message) ? new Error("They're already on this circle.") : error;
+        return {};
+      }
+      if (live) return adminAction("handover", c.id, { facilitator: { name: fac.name, email: fac.email } });
+      const { error } = await supabase.from("circles").update({ facilitator_id: fac.id }).eq("id", c.id);
+      if (error) throw error;
+      return {};
+    }, role === "co"
+      ? `${who} added to ${c.name}.${live ? " Use Resend details email on the circle to send them the details now." : ""}`
+      : live ? `${c.name} handed over to ${who}.` : `${who} is now the primary facilitator of ${c.name}.`);
+    setBusy(false);
+    if (ok) onDone();
+  }
+  return (
+    <div className="picker assign-circle" role="group" aria-label="Assign to a circle">
+      <div className="assign-role" role="radiogroup" aria-label="Role">
+        {[["co", "As co-facilitator"], ["primary", "As primary facilitator"]].map(([k, label]) => (
+          <button key={k} type="button" role="radio" aria-checked={role === k} className={`web-chip ${role === k ? "on" : ""}`} onClick={() => setRole(k)}>{label}</button>
+        ))}
+      </div>
+      <input type="search" autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search circles by name, host or language" aria-label="Search circles" disabled={busy} />
+      <div className="picker-list" role="listbox" aria-label="Circles">
+        {list.slice(0, 8).map((c) => (
+          <button key={c.id} type="button" role="option" aria-selected="false" className="picker-option" disabled={busy} onClick={() => pick(c)}>
+            <span className="person-text">
+              <span className="person-name">{shortCircle(c.name)}</span>
+              <span className="muted small">{STATUS_LABEL[c.status]} · {ukWhen(c)} UK{c.facilitator ? ` · ${facilitatorNames(c.facilitator).title}` : ""}</span>
+            </span>
+          </button>
+        ))}
+        {!list.length && <p className="muted small picker-empty">No circles match.</p>}
+        {list.length > 8 && <p className="muted small picker-empty">{list.length - 8} more: keep typing to narrow it down.</p>}
+      </div>
+      <div className="picker-foot"><span /><button type="button" className="ghost small" onClick={onDone}>Cancel</button></div>
+    </div>
+  );
+}
+
+function FacilitatorPanel({ r, now, run, onSelect, onClose, circles = [], onNewCircle }) {
   const fac = r.fac;
   useEffect(() => {
     // Escape closes this panel, unless a circle panel is open on top of it (that one closes first).
@@ -560,6 +676,7 @@ function FacilitatorPanel({ r, now, run, onSelect, onClose }) {
   }, [onClose]);
   const initial = () => Object.fromEntries(FIELDS.map((k) => [k, fac[k] ?? ""]));
   const [f, setF] = useState(initial);
+  const [assigning, setAssigning] = useState(false);
   const [busy, setBusy] = useState(false);
   const [uploadErr, setUploadErr] = useState("");
   const [photoBroken, setPhotoBroken] = useState(false);
@@ -648,11 +765,21 @@ function FacilitatorPanel({ r, now, run, onSelect, onClose }) {
         <div className="pills">
           <span className={`pill fac-status fs-${r.status}`}>{STATUS[r.status].label}</span>
           {r.circleFlags.map((x) => <span key={x} className="pill fac-flag">{x}</span>)}
-          {r.details.map((d) => <span key={d.key} className="pill fac-detail">{d.label}</span>)}
+          {r.details.filter((d) => d.key !== "unverified").map((d) => <span key={d.key} className="pill fac-detail">{d.label}</span>)}
         </div>
+        <Verification fac={fac} run={run} />
 
-        <h3 className="section-title">Circles ({r.circles.length})</h3>
-        {!r.circles.length && <p className="muted small">Not on any current circle.</p>}
+        <div className="fac-circles-head">
+          <h3 className="section-title">Circles ({r.circles.length})</h3>
+          {!assigning && (
+            <span className="row-actions">
+              <button type="button" className="small" onClick={() => setAssigning(true)}>Assign to a circle</button>
+              {onNewCircle && <button type="button" className="small primary" onClick={() => onNewCircle(fac.id)}>New circle</button>}
+            </span>
+          )}
+        </div>
+        {assigning && <AssignCircle fac={fac} circles={circles} run={run} onDone={() => setAssigning(false)} />}
+        {!r.circles.length && !assigning && <p className="muted small">Not on any current circle yet. Assign them to one, or start a new circle with them as host.</p>}
         <div className="fac-circle-list">
           {r.circles.map(({ c, role, h }) => (
             <div key={c.id} className="fac-circle">

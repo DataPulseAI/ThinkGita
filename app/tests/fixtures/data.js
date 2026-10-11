@@ -94,11 +94,11 @@ export function buildFixtures() {
   ];
 
   const facilitators = [
-    { id: FAC.asha, name: "Asha Example", initiated_name: "Kirtana", email: "asha.example@example.org", phone: "+44 7700 900001", photo_url: IMG("asha") },
-    { id: FAC.bram, name: "Bram Sample", email: "bram.sample@example.org", phone: "+44 7700 900002", photo_url: null },
+    { id: FAC.asha, name: "Asha Example", initiated_name: "Kirtana", email: "asha.example@example.org", phone: "+44 7700 900001", photo_url: IMG("asha"), verified_at: ago(20000), verified_by: "existing circle" },
+    { id: FAC.bram, name: "Bram Sample", email: "bram.sample@example.org", phone: "+44 7700 900002", photo_url: null, verified_at: ago(20000), verified_by: "existing circle" },
     { id: FAC.chitra, name: "Chitra Placeholder", email: "chitra.placeholder@example.org", phone: "+1 555 0100", photo_url: null },
-    { id: FAC.dev, name: "Dev Fictional", initiated_name: "Devi", email: "dev.fictional@example.org", phone: "+91 90000 00004", photo_url: IMG("dev") },
-    { id: FAC.esha, name: "Esha Specimen", email: FACILITATOR_EMAIL, phone: "+44 7700 900005", photo_url: null },
+    { id: FAC.dev, name: "Dev Fictional", initiated_name: "Devi", email: "dev.fictional@example.org", phone: "+91 90000 00004", photo_url: IMG("dev"), verified_at: ago(20000), verified_by: "existing circle" },
+    { id: FAC.esha, name: "Esha Specimen", email: FACILITATOR_EMAIL, phone: "+44 7700 900005", photo_url: null, verified_at: ago(20000), verified_by: "existing circle" },
     { id: FAC.farid, name: "Farid Dummy", email: "farid.dummy@example.org", phone: null, photo_url: null },
   ];
 

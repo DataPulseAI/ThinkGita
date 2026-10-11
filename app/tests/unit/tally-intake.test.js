@@ -285,3 +285,217 @@ describe("handler", () => {
     expect(db.tables.audit_log.at(-1)).toMatchObject({ action: "intake_failed", detail: { error: "boom" } });
   });
 });
+
+describe("co-host", () => {
+  const text = (f) => t.text(f);
+  const email = (label, v) => field(label, v, { type: "INPUT_EMAIL" });
+  const phone = (label, v) => field(label, v, { type: "INPUT_PHONE_NUMBER" });
+  const yesNo = (label, answer) => choice(label, answer);
+
+  it("splits labelled co-host fields from the host's", () => {
+    const fields = formFields({
+      gate: yesNo("Will you have a co-host?", "Yes"),
+      cf: field("Co-host first name", "Priya"), cl: field("Co-host last name", "Sample"),
+      ce: email("Co-host email", " Priya@Example.org "), cp: phone("Co-host phone number", "+44 7700 900123"),
+    });
+    const { host, cohost, gate } = t.splitCohost(fields);
+    expect(gate.label).toBe("Will you have a co-host?");
+    expect(cohost.map((f) => f.label)).toEqual(["Will you have a co-host?", "Co-host first name", "Co-host last name", "Co-host email", "Co-host phone number"]);
+    expect(host).toHaveLength(fields.length - 5);
+    expect(t.parseCohost(cohost, gate)).toEqual({
+      cohost: { email: "priya@example.org", first_name: "Priya", last_name: "Sample", initiated_name: null, phone: "+44 7700 900123" }, problem: null,
+    });
+  });
+
+  it("repeated host fields after a co-host question belong to the co-host", () => {
+    const fields = [
+      field("First Name", "Arjun"), email("Email Address", "arjun@example.org"), phone("Phone Number", "+44 1"),
+      choice("Day", "Monday"), field("Time", "19:00"),
+      yesNo("Do you have a co-facilitator?", "Yes"),
+      field("First Name", "Priya"), field("Last Name", "Sample"), field("Initiated Name (if applicable)", "Radha"),
+      email("Email Address", "priya@example.org"), phone("Phone Number", "+44 2"),
+      field("Language that you wish to facilitate in", "English"),
+    ];
+    const { host, cohost, gate } = t.splitCohost(fields);
+    expect(host.map((f) => f.label)).toEqual(["First Name", "Email Address", "Phone Number", "Day", "Time", "Language that you wish to facilitate in"]);
+    // Once a host field is repeated, every person field after the question is the co-host's (even ones the host lacks).
+    expect(cohost.map((f) => f.label)).toEqual(["Do you have a co-facilitator?", "First Name", "Last Name", "Initiated Name (if applicable)", "Email Address", "Phone Number"]);
+    expect(t.parseCohost(cohost, gate).cohost).toEqual({ email: "priya@example.org", first_name: "Priya", last_name: "Sample", initiated_name: "Radha", phone: "+44 2" });
+    // No repeat after the question: person fields there stay the host's.
+    const late = [email("Email Address", "arjun@example.org"), yesNo("Co-host?", "No"), field("Last Name", "Example")];
+    expect(t.splitCohost(late).host.map((f) => f.label)).toEqual(["Email Address", "Last Name"]);
+  });
+
+  it("without a co-host question, a second set of person fields is still the co-host", () => {
+    const fields = [
+      field("First Name", "Arjun"), field("Last Name", "Example"), email("Email Address", "arjun@example.org"), phone("Phone Number", "+44 1"),
+      choice("Day", "Monday"), field("Time", "19:00"),
+      field("First Name", "Priya"), email("Email Address", "priya@example.org"), field("Language", "English"),
+    ];
+    const { host, cohost, gate } = t.splitCohost(fields);
+    expect(gate).toBeUndefined();
+    expect(host.map((f) => text(f))).toEqual(["Arjun", "Example", "arjun@example.org", "+44 1", "Monday", "19:00", "English"]);
+    expect(t.parseCohost(cohost, gate).cohost).toMatchObject({ email: "priya@example.org", first_name: "Priya" });
+    // One set only: nothing moves.
+    expect(t.splitCohost(fields.slice(0, 6)).cohost).toEqual([]);
+  });
+
+  it("the live form: question before the host's phone, labelled co-facilitator fields after it", () => {
+    const fields = [
+      field("First Name", "Host"), field("Last Name", "Person"), field("Initiated Name ( if applicable) ", "Hostini"),
+      email("Email Address", "host@example.org"),
+      { key: "q", label: "Will you be co-facilitating?", type: "CHECKBOXES", value: ["y"], options: [{ id: "y", text: "Yes" }] },
+      { key: "q2", label: "Will you be co-facilitating? (Yes)", type: "CHECKBOXES", value: true },
+      phone("Phone Number", "+44 1111"),
+      field("Co-Facilitator First Name", "Co"), field("Co-Facilitator Last Name", "Host"),
+      field("Co-Facilitator Initiated Name - If applicable", "Coini"),
+      email("Co-Facilitator Email Address", "co@example.org"), phone("Co-Facilitator Phone Number", "+44 2222"),
+      choice("Do you wish to facilitate a", "Think Gita Circle"), choice("Day ", "Thursday"), field("Time", "02:00", { type: "INPUT_TIME" }),
+    ];
+    const { host, cohost, gate } = t.splitCohost(fields);
+    expect(host.map((f) => text(f))).toEqual(["Host", "Person", "Hostini", "host@example.org", "+44 1111", "Think Gita Circle", "Thursday", "02:00"]);
+    expect(t.parseCohost(cohost, gate)).toEqual({
+      cohost: { email: "co@example.org", first_name: "Co", last_name: "Host", initiated_name: "Coini", phone: "+44 2222" }, problem: null,
+    });
+  });
+
+  it("no, empty or missing co-host answers give no co-host", () => {
+    expect(t.splitCohost(formFields()).cohost).toEqual([]);
+    const no = t.splitCohost(formFields({ gate: yesNo("Co-host?", "No"), ce: email("Co-host email", "priya@example.org") }));
+    expect(t.parseCohost(no.cohost, no.gate)).toEqual({ cohost: null, problem: null });
+    const blank = t.splitCohost(formFields({ ce: email("Co-host email", null), cn: field("Co-host name", "") }));
+    expect(t.parseCohost(blank.cohost, blank.gate)).toEqual({ cohost: null, problem: null });
+  });
+
+  it("a full name is split, a free-text answer still gives the email, and a missing email is a problem", () => {
+    const one = t.splitCohost(formFields({ cn: field("Co-host name", "Priya Devi Sample"), ce: email("Co-host email", "priya@example.org") }));
+    expect(t.parseCohost(one.cohost, one.gate).cohost).toMatchObject({ first_name: "Priya", last_name: "Devi Sample" });
+    const free = t.splitCohost(formFields({ cn: field("Co-facilitator name and email", "Priya, Priya@Example.org") }));
+    expect(t.parseCohost(free.cohost, free.gate).cohost).toMatchObject({ email: "priya@example.org" });
+    const none = t.splitCohost(formFields({ cn: field("Co-host name", "Priya Sample") }));
+    expect(t.parseCohost(none.cohost, none.gate)).toEqual({ cohost: null, problem: "Co-host Priya Sample but no email: add them by hand." });
+    const bad = t.splitCohost(formFields({ ce: email("Co-host email", "priya at example") }));
+    expect(t.parseCohost(bad.cohost, bad.gate).problem).toBe('Co-host given but "priya at example" is not a valid email: add them by hand.');
+  });
+
+  it("the handler stores the co-host on the circle for approval, and notes it", async () => {
+    setup();
+    await post(payload(formFields({
+      gate: yesNo("Will you have a co-host?", "Yes"), cf: field("Co-host first name", "Priya"), ci: field("Co-host initiated name", "Radha"),
+      ce: email("Co-host email", "priya@example.org"),
+    })));
+    const [c] = db.tables.circles;
+    expect(db.tables.facilitators).toHaveLength(1); // only the host until approval
+    expect(db.tables.facilitators[0].email).toBe("arjun@example.org");
+    expect(c.pending_cohost).toEqual({ email: "priya@example.org", first_name: "Priya", last_name: null, initiated_name: "Radha", phone: null });
+    expect(c.notes).toBe("Co-host: Radha (Priya), priya@example.org. Added as a co-facilitator when the circle is approved.");
+    expect(db.tables.audit_log.at(-1).detail.cohost).toBe("priya@example.org");
+  });
+
+  it("the handler ignores a co-host with the host's own email, and notes a missing email", async () => {
+    setup();
+    await post(payload(formFields({ ce: email("Co-host email", "ARJUN@example.org") })));
+    expect(db.tables.circles[0].pending_cohost).toBeNull();
+    expect(db.tables.circles[0].notes).toBe("Co-host email is the same as the host's, so no co-host was added.");
+    setup();
+    await post(payload(formFields({ cn: field("Co-host name", "Priya Sample") })));
+    expect(db.tables.circles[0].pending_cohost).toBeNull();
+    expect(db.tables.circles[0].notes).toBe("Co-host Priya Sample but no email: add them by hand.");
+  });
+});
+
+describe("photo from the form", () => {
+  const upload = (url, extra = {}) => ({ key: "pic", label: "Please upload a non-devotional picture of yourself", type: "FILE_UPLOAD",
+    value: [{ id: "f1", url, name: "me.jpg", mimeType: "image/jpeg", size: 92100, ...extra }] });
+  let realFetch;
+  const serve = (status = 200, type = "image/jpeg", bytes = 1000) => {
+    globalThis.fetch = async (url) => {
+      serve.urls.push(String(url));
+      return new Response(new Uint8Array(bytes), { status, headers: { "content-type": type } });
+    };
+    serve.urls = [];
+  };
+  beforeAll(() => { realFetch = globalThis.fetch; });
+  afterAll(() => { globalThis.fetch = realFetch; });
+
+  it("photoFile finds the host's picture upload and ignores signatures", () => {
+    expect(t.photoFile([upload("https://storage.tally.so/private/me.jpg?sig=1")])).toMatchObject({ name: "me.jpg" });
+    expect(t.photoFile([{ key: "s", label: "Acknowledgement", type: "SIGNATURE", value: [{ url: "https://x/s.png" }] }])).toBeNull();
+    expect(t.photoFile([{ ...upload("x"), value: [] }])).toBeNull();
+  });
+
+  it("copies the photo into the facilitator's folder and sets it on a new facilitator", async () => {
+    setup();
+    serve();
+    await post(payload(formFields({ pic: upload("https://storage.tally.so/private/me.jpg?sig=1") })));
+    const [fac] = db.tables.facilitators;
+    expect(serve.urls).toEqual(["https://storage.tally.so/private/me.jpg?sig=1"]);
+    expect(db.uploads).toHaveLength(1);
+    expect(db.uploads[0]).toMatchObject({ bucket: "facilitator-photos", contentType: "image/jpeg", size: 1000 });
+    expect(db.uploads[0].path).toMatch(new RegExp(`^${fac.id}/\\d+\\.jpg$`));
+    expect(fac.photo_url).toBe(`https://fake.supabase.co/storage/v1/object/public/facilitator-photos/${db.uploads[0].path}`);
+    expect(db.tables.circles[0].notes).toBeNull();
+  });
+
+  it("never replaces a photo already on file", async () => {
+    setup({ facilitators: [{ id: "f1", email: "arjun@example.org", name: "Arjun", photo_url: "https://kept/photo.jpg" }] });
+    serve();
+    await post(payload(formFields({ pic: upload("https://storage.tally.so/private/me.jpg") })));
+    expect(serve.urls).toEqual([]);
+    expect(db.tables.facilitators[0].photo_url).toBe("https://kept/photo.jpg");
+  });
+
+  it("a photo that can't be used is noted on the circle and never blocks the form", async () => {
+    setup();
+    serve();
+    const r = await post(payload(formFields({ pic: upload("https://storage.tally.so/private/me.heic", { name: "me.heic", mimeType: "image/heic" }) })));
+    expect(r.body.ok).toBe(true);
+    expect(serve.urls).toEqual([]);
+    expect(db.tables.facilitators[0].photo_url).toBeUndefined();
+    expect(db.tables.circles[0].notes).toBe('"me.heic" from the form is HEIC; only JPEG, PNG or WebP can be shown. Add a photo by hand.');
+    setup();
+    serve(403);
+    await post(payload(formFields({ pic: upload("https://storage.tally.so/private/me.jpg") })));
+    expect(db.tables.circles[0].notes).toBe('"me.jpg" from the form couldn\'t be downloaded (403). Add a photo by hand.');
+    setup();
+    serve(200, "text/html");
+    await post(payload(formFields({ pic: upload("https://storage.tally.so/private/me.jpg") })));
+    expect(db.tables.circles[0].notes).toBe('"me.jpg" from the form isn\'t a JPEG, PNG or WebP image. Add a photo by hand.');
+    setup();
+    serve();
+    db.failNext("storage", "upload", "bucket full");
+    await post(payload(formFields({ pic: upload("https://storage.tally.so/private/me.jpg") })));
+    expect(db.tables.circles[0].notes).toBe('"me.jpg" from the form couldn\'t be saved: bucket full');
+  });
+
+  it("a co-host's photo is copied and kept with their details until approval", async () => {
+    setup();
+    serve(200, "image/png");
+    await post(payload(formFields({
+      gate: choice("Will you be co-facilitating?", "Yes"), ce: field("Co-Facilitator Email Address", "co@example.org", { type: "INPUT_EMAIL" }),
+      cpic: { ...upload("https://storage.tally.so/private/co.png"), label: "Co-Facilitator picture" },
+    })));
+    expect(db.uploads.map((u) => u.path)[0]).toMatch(/^cohost-resp-1\/\d+\.png$/);
+    expect(db.tables.circles[0].pending_cohost.photo_url).toMatch(/facilitator-photos\/cohost-resp-1\/\d+\.png$/);
+    expect(db.tables.facilitators[0].photo_url).toBeUndefined(); // the host's own upload wasn't given
+  });
+
+  it("copy_photos (cron secret) copies photos from earlier forms", async () => {
+    setup({
+      facilitators: [{ id: "f1", email: "a@example.org", photo_url: null }, { id: "f2", email: "b@example.org", photo_url: "https://kept" }],
+      circles: [
+        { id: "c1", source: "tally", facilitator_id: "f1", facilitator: { id: "f1", photo_url: null }, raw_submission: { data: { fields: [upload("https://storage.tally.so/private/a.jpg")] } } },
+        { id: "c2", source: "tally", facilitator_id: "f2", facilitator: { id: "f2", photo_url: "https://kept" }, raw_submission: { data: { fields: [upload("https://storage.tally.so/private/b.jpg")] } } },
+      ],
+    });
+    db.rpcResults.framer_cron_ok = async ({ s }) => ({ data: s === "right", error: null });
+    serve();
+    const call = (secret) => handler(new Request("http://localhost/", { method: "POST", body: JSON.stringify({ action: "copy_photos" }), headers: { "x-cron-secret": secret } }));
+    expect((await call("wrong")).status).toBe(403);
+    const res = await (await call("right")).json();
+    expect(res.results).toEqual([{ circle_id: "c1", result: "copied" }]);
+    expect(serve.urls).toEqual(["https://storage.tally.so/private/a.jpg"]);
+    expect(db.row("facilitators", "f1").photo_url).toMatch(/facilitator-photos\/f1\/\d+\.jpg$/);
+    expect(db.tables.audit_log.at(-1)).toMatchObject({ action: "form_photos" });
+  });
+});
