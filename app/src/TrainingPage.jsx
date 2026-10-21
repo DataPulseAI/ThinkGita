@@ -242,6 +242,9 @@ export function daysAgo(iso, now = Date.now()) {
 }
 const hhmm = (ms) => new Date(ms).toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" });
 
+// Nobody assesses their own training record (the database refuses it too).
+export const isSelf = (t, email) => Boolean(email) && (String(t?.email ?? "").toLowerCase() === email || (t?.other_emails ?? []).includes(email));
+
 // Who a trainee can be assigned to: admins (super admins included) and assessors, each email once, admins first.
 export function assigneeOptions(admins = [], assessors = []) {
   const seen = new Set();
@@ -365,7 +368,8 @@ export function TrainingPage({ data, run, initial }) {
     if (ids.length > 1 && !confirm(`Assign ${ids.length} trainees to ${who}?`)) return;
     await run(async () => {
       const { error } = await supabase.from("trainees").update({ assigned_to: to || null }).in("id", ids);
-      if (error) throw new Error(/bad_assignee/.test(error.message) ? "Assign to an admin or an assessor." : error.message);
+      if (error) throw new Error(/bad_assignee/.test(error.message) ? "Assign to an admin or an assessor."
+        : /self_assign/.test(error.message) ? "Someone can't assess their own training. Pick someone else." : error.message);
     }, to ? `${ids.length === 1 ? "Trainee" : `${ids.length} trainees`} assigned to ${who}.` : `${ids.length === 1 ? "Trainee" : `${ids.length} trainees`} unassigned.`);
     reload();
   }
@@ -437,7 +441,7 @@ export function TrainingPage({ data, run, initial }) {
                     aria-label={`Assessor for ${traineeNames(r.t).title}`} onChange={(e) => assign([r.id], e.target.value || null)}>
                     <option value="">Unassigned</option>
                     {r.t.assigned_to && !options.some((o) => o.email === r.t.assigned_to) && <option value={r.t.assigned_to}>{r.t.assigned_to}</option>}
-                    {options.map((o) => <option key={o.email} value={o.email}>{o.name} ({o.kind.toLowerCase()})</option>)}
+                    {options.map((o) => <option key={o.email} value={o.email} disabled={isSelf(r.t, o.email)}>{o.name} ({o.kind.toLowerCase()}){isSelf(r.t, o.email) ? ": their own record" : ""}</option>)}
                   </select>
                 </span>
               </div>
@@ -814,7 +818,7 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
           <label className="small tr-assign">Assessor
             <select value={t.assigned_to ?? ""} onChange={(e) => onAssign?.(e.target.value || null)} aria-label="Assigned to">
               <option value="">Unassigned</option>
-              {options.map((o) => <option key={o.email} value={o.email}>{o.name} ({o.kind.toLowerCase()})</option>)}
+              {options.map((o) => <option key={o.email} value={o.email} disabled={isSelf(t, o.email)}>{o.name} ({o.kind.toLowerCase()}){isSelf(t, o.email) ? ": their own record" : ""}</option>)}
             </select>
             {t.assigned_at && <span className="muted">since {fmtDate(t.assigned_at)}</span>}
           </label>
@@ -1088,6 +1092,7 @@ export function AssessorPage({ email }) {
   const [state, setState] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [q, setQ] = useState("");
+  const [status, setStatus] = useState("all");
   const [openId, setOpenId] = useState(null);
   const [toast, setToast] = useState(null);
   const [tick, setTick] = useState(0);
@@ -1126,7 +1131,12 @@ export function AssessorPage({ email }) {
     const prog = progress(t, state.subs, state.forms);
     return { id: t.id, t, prog, status: traineeStatus(t, prog), done: prog.filter((p) => p.done).length };
   }) : []), [state]);
-  const shown = useMemo(() => filterTrainees(rows, { q }), [rows, q]);
+  const counts = useMemo(() => {
+    const n = { all: rows.length };
+    for (const r of rows) n[r.status] = (n[r.status] ?? 0) + 1;
+    return n;
+  }, [rows]);
+  const shown = useMemo(() => filterTrainees(rows, { status, q }), [rows, status, q]);
   const open = openId && rows.find((r) => r.id === openId);
   const data = useMemo(() => ({ me: { email: me }, settings: {} }), [me]);
 
@@ -1142,6 +1152,13 @@ export function AssessorPage({ email }) {
           </div>
           <p className="card-sub muted small">Open a trainee to see their application, their training forms and videos, and to record your assessment. Admins make the final decision.</p>
           {loadErr && <p className="hint warn">{loadErr}</p>}
+          <div className="web-filter" role="group" aria-label="Training status">
+            {FILTERS.map((k) => (
+              <button key={k} type="button" className={`web-chip ${status === k ? "on" : ""}`} aria-pressed={status === k} onClick={() => setStatus(k)}>
+                {k === "all" ? "All" : STATUS[k].label} <span className="ws-n">{counts[k] ?? 0}</span>
+              </button>
+            ))}
+          </div>
           <Legend />
           <div className="tr-list" role="table" aria-label="Trainees">
             <div className="tr-row tr-head" role="row">
@@ -1208,6 +1225,15 @@ export function AssessorsCard({ data, run }) {
   const problem = !clean2 ? "" : !EMAIL_OK.test(clean2) ? "Enter a valid email." : isAdmin ? "They're already an admin, so they can assess anyone." : exists ? "Already an assessor." : "";
   const inviteText = (o) => (o?.invite === "invited" ? "Sign-in invite sent." : o?.invite === "already has an account" ? "They already have a sign-in." : `Invite: ${o?.invite ?? "not sent"}.`);
   const invite = (e) => run(() => trainingAction("invite_assessor", { email: e }), (o) => `${e}: ${inviteText(o)}`);
+  // Removing an assessor ends their access; the trainees they had become unassigned (database trigger).
+  const remove = (a) => {
+    const n = counts[a.email] ?? 0;
+    if (!confirm(`Remove ${a.name || a.email} as an assessor?\n\nThey won't be able to see any trainees.${n ? ` Their ${n} assigned trainee${n === 1 ? "" : "s"} will become unassigned.` : ""}`)) return;
+    run(async () => {
+      const { error } = await supabase.from("assessors").delete().eq("email", a.email);
+      if (error) throw error;
+    }, `${a.name || a.email} removed as an assessor.`).then(() => setTick((x) => x + 1));
+  };
 
   async function add(ev) {
     ev.preventDefault();
@@ -1235,6 +1261,7 @@ export function AssessorsCard({ data, run }) {
               <div className="row-main"><b>{a.name || a.email}</b>{a.name && <span className="muted small"> · {a.email}</span>}</div>
               <span className="muted small nowrap">{counts[a.email] ?? 0} assigned</span>
               <button type="button" className="link small nowrap" onClick={() => invite(a.email)} aria-label={`Send invite to ${a.email}`}>Send invite</button>
+              <button type="button" className="link small nowrap danger-text" onClick={() => remove(a)} aria-label={`Remove ${a.email} as an assessor`}>Remove</button>
             </div>
           ))}
           {!list.length && <p className="muted small">No assessors yet.</p>}

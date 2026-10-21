@@ -122,3 +122,4 @@
 .tr-assign-select { width: 100%; max-width: 220px; font-size: 13px; padding: 4px 6px; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--ink); cursor: pointer; }
 .tr-assign-select.unassigned { color: var(--muted); }
 .tr-assign-select:hover, .tr-assign-select:focus { border-color: var(--line); background: var(--surface); }
+.danger-text { color: var(--warn); }

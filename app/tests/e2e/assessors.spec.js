@@ -1,7 +1,7 @@
 // Assessors and the Cancelled / Revoked outcomes: an assessor sees only the trainees assigned to them; admins assign
 // trainees (one at a time or in bulk), add assessors in Settings, and record Cancelled or Revoked. Made-up people only.
 import { test, expect, signIn, navTo, toast } from "./support/test.js";
-import { ASSESSOR_EMAIL } from "../fixtures/data.js";
+import { ASSESSOR_EMAIL, ADMIN_EMAIL } from "../fixtures/data.js";
 
 const row = (page, name) => page.locator(".tr-row", { hasText: name });
 const panel = (page) => page.locator("aside.tr-drawer");
@@ -71,6 +71,37 @@ test.describe("Assessors", () => {
     expect(patch.body).toEqual({ assigned_to: ASSESSOR_EMAIL });
     expect(patch.query.id).toBe("in.(gauri.trainee)");
     await expect(page.locator("aside.drawer")).toHaveCount(0);
+  });
+
+  test("the assessor view has the same status filters", async ({ page }) => {
+    await signIn(page, { role: "assessor", email: ASSESSOR_EMAIL });
+    const list = page.getByRole("region", { name: "Trainees assigned to you" });
+    const chips = list.getByRole("group", { name: "Training status" });
+    await expect(chips.getByRole("button", { name: /^All\s*1$/ })).toBeVisible();
+    await chips.getByRole("button", { name: /^Applied/ }).click();
+    await expect(list.locator(".tr-row:not(.tr-head)")).toHaveCount(0);
+    await chips.getByRole("button", { name: /^Ready to assess/ }).click();
+    await expect(list.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
+  });
+
+  test("removing an assessor asks first, and says their trainees become unassigned", async ({ page, mock, dialogs }) => {
+    await signIn(page);
+    await navTo(page, "Setup", "Settings");
+    const card = page.getByRole("region", { name: "Assessors" });
+    await card.getByRole("button", { name: `Remove ${ASSESSOR_EMAIL} as an assessor` }).click();
+    expect(dialogs.messages.at(-1)).toMatch(/Their 1 assigned trainee will become unassigned\./);
+    await expect(toast(page)).toContainText("removed as an assessor");
+    expect(mock.rest("assessors", "DELETE")).toHaveLength(1);
+  });
+
+  test("an admin who also hosts a circle can switch to the facilitator portal and back", async ({ page, mock }) => {
+    mock.db.facilitators.push({ id: "fac-admin", name: "Admin Host", email: ADMIN_EMAIL, verified_at: "2026-10-01T00:00:00Z" });
+    await signIn(page);
+    await page.getByRole("button", { name: "Facilitator portal" }).click();
+    await expect(page.locator(".topbar .role")).toHaveText("Facilitator");
+    await page.getByRole("button", { name: "Admin view" }).click();
+    await expect(page.locator(".topbar .role")).toHaveText("Admin");
+    await expect(page.locator("nav.tabs")).toBeVisible();
   });
 
   test("revoke asks first and sends the revoked email", async ({ page, mock, dialogs }) => {

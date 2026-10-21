@@ -221,3 +221,14 @@ describe("assignment and outcomes", () => {
     expect(traineeStatus({ status: "cancelled" }, [{ done: false }])).toBe("cancelled");
   });
 });
+
+describe("isSelf", () => {
+  it("someone's own record, by main or other email", async () => {
+    const { isSelf } = await import("../../src/TrainingPage.jsx");
+    const t = { email: "Ana@Example.org", other_emails: ["ana.work@example.org"] };
+    expect(isSelf(t, "ana@example.org")).toBe(true);
+    expect(isSelf(t, "ana.work@example.org")).toBe(true);
+    expect(isSelf(t, "bo@example.org")).toBe(false);
+    expect(isSelf(t, "")).toBe(false);
+  });
+});

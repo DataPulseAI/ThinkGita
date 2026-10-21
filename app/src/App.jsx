@@ -13,6 +13,7 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(null);
   const [assessor, setAssessor] = useState(null); // false, or { fac: has a facilitator profile too }
   const [asFacilitator, setAsFacilitator] = useState(false);
+  const [adminFac, setAdminFac] = useState(false); // an admin who also hosts or co-hosts circles
   // "setup" when someone arrives from an invite or password-reset email: ask them to choose a password.
   const [pwOpen, setPwOpen] = useState(window.__authLinkType ? "setup" : false);
 
@@ -25,14 +26,20 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Role: admin, else assessor (trainees assigned to them), else facilitator. An assessor who also facilitates can
-  // switch to their facilitator portal.
+  // Role: admin, else assessor (trainees assigned to them), else facilitator. An admin or assessor who also
+  // facilitates can switch to their facilitator portal.
   useEffect(() => {
     if (!session) { setIsAdmin(null); setAssessor(null); return; }
     const email = session.user.email.toLowerCase();
     (async () => {
       const { data } = await supabase.from("admin_emails").select("email").eq("email", email).maybeSingle();
-      if (data) { setAssessor(false); setIsAdmin(true); return; }
+      if (data) {
+        const { data: f } = await supabase.from("facilitators").select("id").eq("email", email).maybeSingle();
+        setAdminFac(Boolean(f));
+        setAssessor(false);
+        setIsAdmin(true);
+        return;
+      }
       // The assessor check: the RPC, or their own row in assessors (readable by them), whichever answers.
       const [{ data: rpcSays }, { data: own }] = await Promise.all([
         supabase.rpc("is_assessor"),
@@ -58,19 +65,24 @@ export default function App() {
         <div className="brand">
           <img src={LOGO_WHITE} alt="ThinkGita" />
           <span className="product">Circles</span>
-          <span className="role">{isAdmin ? "Admin" : assessor && !asFacilitator ? "Assessor" : "Facilitator"}</span>
+          <span className="role">{asFacilitator ? "Facilitator" : isAdmin ? "Admin" : assessor ? "Assessor" : "Facilitator"}</span>
         </div>
         <div className="who">
           <span className="email">{session.user.email}</span>
-          {assessor?.fac && (
-            <button className="ghost subtle" onClick={() => setAsFacilitator((v) => !v)}>{asFacilitator ? "Assessor view" : "Facilitator portal"}</button>
+          {(assessor?.fac || (isAdmin && adminFac)) && (
+            <button className="ghost subtle" onClick={() => setAsFacilitator((v) => !v)}>
+              {asFacilitator ? (isAdmin ? "Admin view" : "Assessor view") : "Facilitator portal"}
+            </button>
           )}
           <ThemeToggle />
           <button className="ghost subtle" onClick={() => setPwOpen(true)}>Change password</button>
           <button className="ghost" onClick={() => supabase.auth.signOut()}>Sign out</button>
         </div>
       </header>
-      {isAdmin ? <Admin /> : assessor && !asFacilitator ? <AssessorPage email={session.user.email} /> : <Facilitator email={session.user.email} />}
+      {asFacilitator ? <Facilitator email={session.user.email} />
+        : isAdmin ? <Admin />
+        : assessor ? <AssessorPage email={session.user.email} />
+        : <Facilitator email={session.user.email} />}
       {pwOpen && <PasswordModal setup={pwOpen === "setup"} onClose={() => { window.__authLinkType = null; setPwOpen(false); }} />}
     </div>
   );
