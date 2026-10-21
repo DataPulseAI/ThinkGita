@@ -28,6 +28,11 @@ export const PLACEHOLDERS = [
   { key: "dashboard_link", label: "Circles dashboard link", group: "Links" },
   { key: "support_contact", label: "Support contact", group: "Team" },
   { key: "sender_name", label: "Sender (the admin sending it)", group: "Team" },
+  // Facilitator training emails only (Training page), not the circle emails.
+  { key: "feedback", label: "Your feedback from the assessment", group: "Training" },
+  { key: "circle_request_link", label: "Request a Circle form link", group: "Training" },
+  { key: "form_name", label: "Training form name", group: "Training" },
+  { key: "form_link", label: "Their personal form link", group: "Training" },
 ];
 const KNOWN = new Set(PLACEHOLDERS.map((p) => p.key));
 const AUTO = new Set(PLACEHOLDERS.filter((p) => p.auto).map((p) => p.key));
@@ -141,6 +146,23 @@ export function buildVars({ circle = {}, facilitator = {}, licence = {}, setting
     dashboard_link: pick(appUrl),
     support_contact: pick(settings?.support_contact),
     sender_name: pick(sender, settings?.sender_name, "The Think Gita team"),
+  };
+}
+
+// Training emails (Certified / Not certified): the trainee's names, the admin's feedback and the Request a Circle link.
+// form: { label, link } for the next form email.
+export function buildTrainingVars({ trainee = {}, settings = {}, sender = "", feedback, form } = {}) {
+  const full = [trainee?.first_name, trainee?.last_name].map((v) => String(v ?? "").trim()).filter(Boolean).join(" ");
+  const ini = String(trainee?.initiated_name ?? "").trim();
+  return {
+    first_name: pick(trainee?.first_name, ini, firstWord(full)),
+    facilitator_name: pick(ini && full ? `${ini} (${full})` : "", ini, full, trainee?.email),
+    feedback: pick(feedback ?? trainee?.feedback),
+    circle_request_link: pick(settings?.circle_request_link),
+    support_contact: pick(settings?.support_contact),
+    sender_name: pick(sender, settings?.sender_name, "The Think Gita team"),
+    form_name: pick(form?.label),
+    form_link: pick(form?.link),
   };
 }
 
@@ -292,6 +314,61 @@ Host key: {{host_key}}
 If the meeting link has changed, please share the new one in your WhatsApp group: {{whatsapp_group_link}}
 
 If anything looks wrong, reply to this email or contact {{support_contact}}.
+
+Warm regards,
+{{sender_name}}
+Think Gita Circles Team`,
+  },
+  training_certified: {
+    subject: "You're a certified Think Gita facilitator, {{first_name}}",
+    body: `Dear {{first_name}},
+
+Thank you for completing the Think Gita facilitator training, and for the time and care you put into it. We're delighted to let you know that you are now a certified Think Gita facilitator.
+
+FEEDBACK
+{{feedback}}
+
+NEXT STEP: REQUEST YOUR CIRCLE
+When you're ready to start, request your Think Gita Circle here:
+{{circle_request_link}}
+
+Once we have your request, we'll set up your Circle and send you everything you need to run it.
+
+If you have any questions, reply to this email or contact {{support_contact}}.
+
+Warm regards,
+{{sender_name}}
+Think Gita Circles Team`,
+  },
+  training_form: {
+    subject: "Your next Think Gita training form: {{form_name}}",
+    body: `Dear {{first_name}},
+
+Thank you for your progress on the Think Gita facilitator training. Your next step is the {{form_name}}.
+
+Please fill it in here:
+{{form_link}}
+
+This link is personal to you, so please don't share it.
+
+If you have any questions, reply to this email or contact {{support_contact}}.
+
+Warm regards,
+{{sender_name}}
+Think Gita Circles Team`,
+  },
+  training_not_certified: {
+    subject: "Your Think Gita facilitator training, {{first_name}}",
+    body: `Dear {{first_name}},
+
+Thank you for taking part in the Think Gita facilitator training, and for the time and care you put into it.
+
+We've reviewed your reflections and your video assessment. We're not able to certify you as a facilitator at this stage, but we'd love to support you to get there.
+
+FEEDBACK
+{{feedback}}
+
+If you'd like to talk this through, or to join a future training, reply to this email or contact {{support_contact}}.
 
 Warm regards,
 {{sender_name}}

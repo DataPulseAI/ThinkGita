@@ -74,7 +74,7 @@ test.describe("Email templates", () => {
     await links.getByRole("button", { name: "Save" }).click();
     await expect(toast(page)).toHaveText("Links and contacts saved");
     expect(mock.rest("settings", "PATCH").map((r) => [r.query.id, r.body])).toEqual([
-      ["eq.1", { drive_folder_link: "https://drive.example.org/shared-folder", support_contact: "help@example.org", youtube_playlist_link: null }],
+      ["eq.1", { drive_folder_link: "https://drive.example.org/shared-folder", support_contact: "help@example.org", youtube_playlist_link: null, circle_request_link: "https://tally.example.org/r/request" }],
     ]);
   });
 });

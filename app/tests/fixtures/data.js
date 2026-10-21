@@ -161,6 +161,7 @@ export function buildFixtures() {
     id: 1, buffer_minutes: BUFFER, default_duration_min: 75, default_timezone: "Europe/London", term_start: null, term_end: null,
     drive_folder_link: "https://drive.example.org/shared-folder", support_contact: "circles@example.org", youtube_playlist_link: null,
     participant_signup_link: "https://signup.example.org/?circle={circle_code}",
+    circle_request_link: "https://tally.example.org/r/request",
     framer_auto_publish: true, framer_publish_pending: false, framer_publish_error: null, framer_publish_tried_at: null,
     framer_published_at: ago(120), framer_fail_count: 0, framer_last_error: null, framer_failed_at: null,
   };
@@ -269,7 +270,53 @@ export function buildFixtures() {
     card("c08", "pending", false, ["photo"], { author: "Esha Specimen", order: 4 }),
   ];
 
+  // Facilitator training: four made-up trainees at different stages, and one form nobody could be matched to.
+  const training_forms = [
+    { key: "application", label: "Application", sort: 0, url: "https://forms.example.org/apply", form_id: "app01", name_match: "applica", required: false },
+    { key: "agreement", label: "Agreement form", sort: 3, url: "https://tally.example.org/r/agree", form_id: "agree1", name_match: "agreement", required: true },
+    { key: "scene", label: "Setting the Scene reflections", sort: 4, url: "https://forms.example.org/scene?lang=en", form_id: null, name_match: "setting the scene", required: true },
+    { key: "empowerment", label: "Empowerment reflections", sort: 5, url: "https://tally.example.org/r/empower", form_id: "emp01", name_match: "empowerment", required: true },
+    { key: "wisdom", label: "Wisdom reflections", sort: 6, url: "https://tally.example.org/r/wisdom", form_id: "wis01", name_match: "wisdom", required: true },
+    { key: "video", label: "Video assessment", sort: 7, url: "https://tally.example.org/r/video", form_id: "vid01", name_match: "video assessment", required: true },
+  ];
+  const trainee = (id, o) => ({
+    id, created_at: ago(20000), updated_at: ago(100), email: `${id}@example.org`, first_name: null, last_name: null, initiated_name: null, phone: null,
+    photo_url: null, status: "in_training", application_response_id: `app-${id}`, application_submitted_at: ago(20000),
+    application: [{ label: "Why do you want to facilitate?", type: "TEXTAREA", value: "To share the Gita with friends." }],
+    intro_attended_at: null, intro_marked_by: null, closing_attended_at: null, closing_marked_by: null,
+    assessment: {}, feedback: null, decided_at: null, decided_by: null, final_email_at: null, final_email_status: null, notes: null, facilitator_id: null, other_emails: [], ...o,
+  });
+  const trainees = [
+    trainee("gauri.trainee", { first_name: "Gauri", last_name: "Testperson", phone: "+44 7700 900111", intro_attended_at: ago(15000), intro_marked_by: ADMIN_EMAIL }),
+    trainee("hari.trainee", { first_name: "Hari", last_name: "Sample", initiated_name: "Haridas", intro_attended_at: ago(15000), closing_attended_at: ago(2000), intro_marked_by: ADMIN_EMAIL, closing_marked_by: ADMIN_EMAIL }),
+    trainee("isha.trainee", { first_name: "Isha", last_name: "Placeholder", status: "applied" }),
+    trainee("jay.trainee", { first_name: "Jay", last_name: "Fictional", status: "certified", decided_at: ago(1000), decided_by: ADMIN_EMAIL, final_email_at: ago(1000), final_email_status: "sent" }),
+  ];
+  const sub = (id, trainee_id, form_key, mins, fields = []) => ({ id, created_at: ago(mins), trainee_id, form_key, response_id: `r-${id}`, submitted_at: ago(mins),
+    email: trainee_id ? `${trainee_id}@example.org` : "unknown.person@example.org", name: null, matched_by: trainee_id ? "tid" : null, fields });
+  const training_submissions = [
+    sub("ts-g1", "gauri.trainee", "agreement", 14000, [{ label: "I agree to the facilitator guidelines", type: "CHECKBOXES", value: "Yes" }]),
+    sub("ts-g2", "gauri.trainee", "scene", 9000, [{ label: "What stood out for you?", type: "TEXTAREA", value: "Arjuna's doubt felt familiar." }]),
+    ...["agreement", "scene", "empowerment", "wisdom"].map((k, i) => sub(`ts-h${i}`, "hari.trainee", k, 12000 - i * 1000)),
+    sub("ts-h9", "hari.trainee", "video", 3000, [{ label: "Upload your practice session", type: "FILE_UPLOAD", value: "practice.mp4", files: [{ url: "https://storage.example.org/practice.mp4", name: "practice.mp4" }] }]),
+    ...["agreement", "scene", "empowerment", "wisdom", "video"].map((k, i) => sub(`ts-j${i}`, "jay.trainee", k, 9000 - i * 500)),
+    { ...sub("ts-u1", null, "wisdom", 500), name: "Kiran Unknown" },
+    // Isha sent two forms from another email: Needs matching suggests her by name.
+    { ...sub("ts-u2", null, "agreement", 400), email: "ishaplaceholder108@example.org", name: "Isha Placeholder" },
+    { ...sub("ts-u3", null, "scene", 300), email: "ishaplaceholder108@example.org", name: "Isha Placeholder" },
+  ];
+  // Next form emails: Gauri was sent Empowerment 8 days ago and hasn't done it (to chase); Isha's Agreement email failed.
+  const send = (id, trainee_id, form_key, mins, status = "sent") => ({ id, created_at: ago(mins), trainee_id, form_key, to_email: `${trainee_id}@example.org`,
+    sent_by: ADMIN_EMAIL, status, error: status === "failed" ? "Mailbox unavailable" : null });
+  const training_sends = [
+    send("snd-g1", "gauri.trainee", "empowerment", 8 * 1440),
+    send("snd-i1", "isha.trainee", "agreement", 3000, "failed"),
+  ];
+  trainees[3].intro_attended_at = ago(15000);
+  trainees[3].closing_attended_at = ago(2000);
+
   return {
+    trainees, training_submissions, training_forms, training_sends,
     licences, facilitators, circles, circle_cofacilitators, settings: [settings], change_requests, admin_emails,
     audit_log, email_log, email_templates: [], attendance_sessions, attendance, framer_items, framer_preview,
   };

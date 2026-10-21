@@ -8,6 +8,7 @@ import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
 import { WebsiteReadiness, WebsiteFields, isReadinessNote, websiteMissing } from "./WebsiteFields.jsx";
 import { WebsitePage } from "./WebsitePage.jsx";
 import { FacilitatorsPage, facilitatorNames } from "./FacilitatorsPage.jsx";
+import { TrainingPage, TallyResync } from "./TrainingPage.jsx";
 import { FacilitatorPicker, PersonLine, UnverifiedTag, isVerified } from "./People.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders, sampleChanges } from "./emailTemplate.js";
 
@@ -17,6 +18,7 @@ const NAV = [
   { label: "Overview", tabs: [["Overview", "Overview"]] },
   { label: "Queue", tabs: [["Queue", "Queue"]] },
   { label: "Circles", tabs: [["Circles", "All circles"], ["Facilitators", "Facilitators"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
+  { label: "Training", tabs: [["Training", "Trainees"]] },
   { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance"], ["Insights", "Attendance insights"]] },
   { label: "Setup", tabs: [["Website", "Website"], ["Emails", "Email templates"], ["EmailLog", "Sent emails"], ["Settings", "Settings"]] },
 ];
@@ -351,6 +353,7 @@ export default function Admin() {
         {tab === "Facilitators" && <FacilitatorsPage key={sub ?? ""} initial={sub} data={data} run={run} onSelect={select}
           onNewCircle={(facId) => setSelected({ new: true, facilitator_id: facId })} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
+        {tab === "Training" && <TrainingPage key={sub ?? ""} initial={sub} data={data} run={run} />}
       </main>
       {selected && (
         <CircleDrawer
@@ -2419,6 +2422,8 @@ function Settings({ data, run }) {
         </div>}
       </section>
 
+      <TallyResync data={data} run={run} />
+
       {demoCount > 0 && (
         <section className="card">
           <div className="card-head"><h2>Demo data</h2></div>
@@ -2466,6 +2471,7 @@ const LINK_SETTINGS = [
   ["drive_folder_link", "Google Drive folder", "https://drive.google.com/…"],
   ["support_contact", "Support contact", "e.g. circles@thinkgita.org"],
   ["youtube_playlist_link", "Default YouTube playlist (optional)", "Used if a circle has none of its own"],
+  ["circle_request_link", "Request a Circle form (in the Certified training email)", "https://tally.so/r/…"],
 ];
 
 function Emails({ data, run }) {
@@ -2523,7 +2529,8 @@ function Emails({ data, run }) {
     setSending(false);
   }
 
-  const groups = [...new Set(PLACEHOLDERS.map((p) => p.group))];
+  // Training placeholders belong to the training emails (Training page), not the circle emails.
+  const groups = [...new Set(PLACEHOLDERS.filter((p) => p.group !== "Training").map((p) => p.group))];
 
   return (
     <>

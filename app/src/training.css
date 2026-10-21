@@ -1,0 +1,104 @@
+/* Training page (TrainingPage.jsx). Uses the tokens and base classes from styles.css. */
+.tr-page .filters input[type="search"] { width: 260px; }
+.tr-page .card-sub { margin: 0 0 10px; max-width: 760px; }
+.tr-note { margin: 0 0 10px; }
+
+/* Step dots: filled blue when done, a pale ring when not. */
+.tr-dot { display: inline-block; width: 11px; height: 11px; border-radius: 99px; flex: none; box-sizing: border-box;
+  background: var(--surface); border: 1.5px solid var(--line); }
+.tr-dot.done { background: var(--pending); border-color: var(--pending); }
+:root[data-theme="dark"] .tr-dot.done { background: #6fa3e6; border-color: #6fa3e6; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .tr-dot.done { background: #6fa3e6; border-color: #6fa3e6; } }
+.tr-dots { display: inline-flex; gap: 4px; align-items: center; }
+.tr-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 8px; }
+.tr-legend span { display: inline-flex; align-items: center; gap: 5px; }
+
+/* List: a table on wide screens, cards on phones. */
+.tr-list { display: grid; }
+.tr-row { display: grid; align-items: center; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(200px, 1.6fr) minmax(180px, 1.3fr) minmax(120px, .8fr) minmax(200px, 1.3fr); }
+.tr-row:not(.tr-head) { cursor: pointer; }
+.tr-row:not(.tr-head):hover { background: var(--surface-2); }
+.tr-row:not(.tr-head):focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.tr-head { font-size: 12px; color: var(--muted); font-weight: 600; padding-top: 4px; padding-bottom: 6px; }
+.tr-person { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tr-names { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.tr-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tr-progress { display: flex; align-items: center; gap: 8px; }
+.tr-empty { padding: 16px 8px; }
+
+.tr-status { font-size: 11.5px; }
+.ts-applied { background: var(--surface-2); border-color: var(--line); color: var(--muted); }
+.ts-training { background: var(--pending-soft); border-color: var(--pending); color: var(--pending); }
+.ts-ready { background: var(--accent-soft); border-color: var(--accent-text); color: var(--accent-text); }
+.ts-certified { background: var(--live-soft); border-color: var(--live); color: var(--live); }
+.ts-not { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.ts-rejected { background: var(--surface-2); border-color: var(--line); color: var(--muted); text-decoration: line-through; }
+
+/* Needs matching */
+.tr-match-list { display: grid; gap: 6px; }
+.tr-match-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.2fr); gap: 10px; align-items: center;
+  padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+
+/* Drawer */
+.tr-status-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.tr-status-select { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.tr-checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.tr-checklist li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.tr-step { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tr-step-label { font-weight: 600; flex: 1 1 180px; }
+.tr-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.tr-answers { margin: 8px 0 4px 21px; display: grid; gap: 8px; }
+.tr-answer dt { font-size: 12px; color: var(--muted); }
+.tr-answer dd { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 8px; }
+.tr-links { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; }
+.tr-links li { display: grid; grid-template-columns: minmax(140px, auto) 1fr auto; gap: 8px; align-items: center; }
+.tr-link { overflow-wrap: anywhere; background: var(--surface-2); padding: 3px 6px; border-radius: 6px; }
+.tr-link-label { font-weight: 600; font-size: 13px; }
+.tr-criteria { display: grid; gap: 10px; margin-bottom: 10px; }
+.tr-criterion { display: grid; gap: 6px; }
+.tr-criterion-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.tr-criterion-head > span { font-weight: 600; }
+.tr-feedback { display: grid; gap: 4px; }
+.tr-decision { width: max-content; margin: 4px 0 10px; }
+.tr-composer { display: grid; gap: 10px; }
+.tr-decided { margin: 0 0 8px; }
+.tr-emails .seg button.active { background: var(--primary); color: var(--primary-ink); }
+
+@media (max-width: 720px) {
+  .tr-row { grid-template-columns: 1fr auto; }
+  .tr-head { display: none; }
+  .tr-email { grid-column: 1 / -1; }
+  .tr-progress { grid-column: 1 / -1; }
+  .tr-match-row { grid-template-columns: 1fr; }
+  .tr-links li { grid-template-columns: 1fr auto; }
+  .tr-link-label { grid-column: 1 / -1; }
+  .tr-page .filters input[type="search"] { width: 100%; }
+}
+
+/* Video answers: a Play button, then an inline player (link refreshed from Tally on Play). */
+.tr-video-start { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tr-video { display: grid; gap: 4px; width: 100%; }
+.tr-video video { width: 100%; max-height: 360px; border-radius: 8px; background: #000; }
+
+/* View switch, sync line, next steps and the drawer's send section. */
+.tr-views { margin-bottom: 6px; }
+.tr-views .count { margin-left: 6px; }
+.tr-sync { margin: 0 0 12px; }
+.tr-sync .link { padding: 0; }
+.tr-next-group { margin-top: 14px; }
+.tr-next-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.tr-next-row { display: grid; grid-template-columns: minmax(140px, 1.2fr) minmax(160px, 1.4fr) auto auto auto; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.tr-next-name { text-align: left; padding: 0; font-weight: 600; }
+.tr-send-pick { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin: 6px 0; }
+.tr-send-history { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 2px; }
+@media (max-width: 640px) {
+  .tr-next-row { grid-template-columns: 1fr auto; }
+  .tr-next-row .tr-email { grid-column: 1 / -1; }
+}
+
+/* Needs matching: one row per email, with the forms it sent, and a suggested trainee or a picker. */
+.tr-match-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.tr-match-from { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.tr-match-hint { display: grid; gap: 6px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line); overflow-wrap: anywhere; }
+.tr-other-emails { display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; }

@@ -220,6 +220,31 @@ export async function mockBackend(page, overrides = {}) {
         default: return {};
       }
     }
+    if (name === "training") {
+      if (a === "probe") return { has_key: true, forms: [] };
+      if (a === "sync") return { forms: { agreement: { found: 3, new: 1, unmatched: 0 } }, problems: [] };
+      if (a === "send_form") {
+        const results = (body.emails ?? []).map((e) => {
+          const t = db.trainees.find((x) => x.id === e.trainee_id);
+          const status = t ? "sent" : "failed";
+          (db.training_sends ??= []).push({ id: `snd-${(db.training_sends.length + 1)}-${e.trainee_id}`, created_at: new Date().toISOString(), trainee_id: e.trainee_id,
+            form_key: e.form_key, to_email: t?.email ?? "", sent_by: mock.user.email, status, error: t ? null : "unknown trainee" });
+          return { trainee_id: e.trainee_id, form_key: e.form_key, status, ...(t ? {} : { error: "unknown trainee" }) };
+        });
+        return { results };
+      }
+      if (a === "file") {
+        const sub = db.training_submissions.find((x) => x.response_id === body.response_id);
+        // Tally hands out a fresh link each time: mark it so tests can tell.
+        return { answers: (sub?.fields ?? []).map((f) => (f.files ? { ...f, files: f.files.map((x) => ({ ...x, url: `${x.url}?fresh=1` })) } : f)) };
+      }
+      if (a === "decide") {
+        const t = db.trainees.find((x) => x.id === body.trainee_id);
+        if (t) Object.assign(t, { status: body.decision, decided_at: new Date().toISOString(), decided_by: mock.user.email, final_email_status: body.send ? "sent" : "not sent", final_email_at: body.send ? new Date().toISOString() : null });
+        return { trainee: t, email: body.send ? "sent" : "not sent" };
+      }
+      return {};
+    }
     mock.unhandled.push(`fn ${name}`);
     return {};
   }

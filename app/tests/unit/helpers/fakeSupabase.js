@@ -17,7 +17,7 @@ export function createFakeDb(seed = {}) {
 
   class Query {
     constructor(table) { this.table = table; this.op = null; this.filters = []; this.mode = null; this.returning = false; }
-    select(cols) { if (this.op) this.returning = true; else { this.op = "select"; this.cols = cols; } return this; }
+    select(cols, opts = {}) { if (this.op) this.returning = true; else { this.op = "select"; this.cols = cols; this.countOpt = opts.count; this.head = opts.head; } return this; }
     insert(rows) { this.op = "insert"; this.payload = rows; return this; }
     upsert(rows) { this.op = "insert"; this.payload = rows; return this; }
     update(patch) { this.op = "update"; this.payload = patch; return this; }
@@ -30,6 +30,7 @@ export function createFakeDb(seed = {}) {
     lte(c, v) { this.filters.push(["lte", c, v]); return this; }
     in(c, v) { this.filters.push(["in", c, v]); return this; }
     is(c, v) { this.filters.push(["is", c, v]); return this; }
+    contains(c, v) { this.filters.push(["contains", c, v]); return this; }
     not(c, op, v) { this.filters.push(["not", c, op, v]); return this; }
     or() { return this; }
     order() { return this; }
@@ -49,6 +50,7 @@ export function createFakeDb(seed = {}) {
           case "lte": return v <= a;
           case "in": return a.includes(v);
           case "is": return (v ?? null) === a;
+          case "contains": return Array.isArray(v) && a.every((x) => v.includes(x));
           case "not": {
             if (a === "is") return (v ?? null) !== b;
             if (a === "in") return !String(b).replace(/[()]/g, "").split(",").includes(String(v));
@@ -82,6 +84,7 @@ export function createFakeDb(seed = {}) {
         tables[this.table] = rows.filter((r) => !out.includes(r));
       }
       const data = this.op === "select" || this.returning ? out.map(clone) : null;
+      if (this.op === "select" && this.countOpt) return { data: this.head ? null : data, count: data.length, error: null };
       if (this.mode === "single") {
         if (!data || data.length !== 1) return { data: null, error: { message: `expected one row from ${this.table}, got ${data?.length ?? 0}`, code: "PGRST116" } };
         return { data: data[0], error: null };

@@ -54,6 +54,20 @@ export async function adminAction(action, circle_id, extra = {}) {
   return data;
 }
 
+// Calls the training edge function (Tally sync, Certified / Not certified) with the signed-in admin's token.
+export async function trainingAction(action, extra = {}) {
+  const { data, error } = await supabase.functions.invoke("training", { body: { action, ...extra } });
+  if (error) {
+    let msg = error.message;
+    try {
+      const body = await error.context.json();
+      msg = body.error ?? msg;
+    } catch (_) { /* keep generic message */ }
+    throw new Error(msg);
+  }
+  return data;
+}
+
 export const STATUS_LABEL = {
   pending: "Awaiting approval",
   conflict: "Clash: no licence",
