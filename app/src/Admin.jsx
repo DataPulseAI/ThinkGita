@@ -8,7 +8,7 @@ import { Icon, IconButton, CopyButton, Hover } from "./ui.jsx";
 import { WebsiteReadiness, WebsiteFields, isReadinessNote, websiteMissing } from "./WebsiteFields.jsx";
 import { WebsitePage } from "./WebsitePage.jsx";
 import { FacilitatorsPage, facilitatorNames } from "./FacilitatorsPage.jsx";
-import { TrainingPage, TallyResync } from "./TrainingPage.jsx";
+import { TrainingPage, TallyResync, AssessorsCard } from "./TrainingPage.jsx";
 import { FacilitatorPicker, PersonLine, UnverifiedTag, isVerified } from "./People.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders, sampleChanges } from "./emailTemplate.js";
 
@@ -2421,6 +2421,8 @@ function Settings({ data, run }) {
             : `Admin added, but the invite didn't send (${o?.invite ?? "unknown"}). They can use Forgot password on the sign-in page.`)}>Add admin</button>
         </div>}
       </section>
+
+      <AssessorsCard data={data} run={run} />
 
       <TallyResync data={data} run={run} />
 

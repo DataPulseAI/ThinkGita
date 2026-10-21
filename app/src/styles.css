@@ -669,6 +669,7 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .person-match-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .tag.new { background: var(--live-soft); color: var(--live); border-color: transparent; }
 .tag.unverified { background: var(--warn-soft); color: var(--warn); }
+.tag.revoked { background: var(--warn); color: var(--surface); border-color: transparent; }
 .new-person-photo { display: flex; align-items: center; gap: 14px; }
 .new-person-photo-actions { display: grid; gap: 4px; justify-items: start; }
 .new-person-photo-actions button.link { font-size: 12px; }

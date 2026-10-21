@@ -56,7 +56,9 @@ export function newPersonCheck(p, facilitators) {
 
 // Verified: an admin has vouched for them (approved a circle they run, or verified them on their profile).
 export const isVerified = (f) => Boolean(f?.verified_at);
+export const isRevoked = (f) => Boolean(f?.revoked_at);
 export function UnverifiedTag({ fac, label = "Unverified" }) {
+  if (isRevoked(fac)) return <span className="tag revoked" title="Revoked in training: they can't be verified or shown on the website">Revoked</span>;
   if (!fac || isVerified(fac)) return null;
   return <span className="tag unverified" title="Not verified yet: approve a circle they run, or verify them on their profile">{label}</span>;
 }

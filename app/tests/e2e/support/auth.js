@@ -19,7 +19,7 @@ export function fakeSession(email) {
 }
 
 /**
- * Signs in as an admin ("admin"), a super admin ("super") or a facilitator, then opens the app.
+ * Signs in as an admin ("admin"), a super admin ("super"), a facilitator or an assessor (pass their email), then opens the app.
  * `hash` opens a page directly, e.g. "/Circles" or "/Website". Call after mockBackend (the test fixture does that).
  */
 export async function signIn(page, { role = "super", hash = "", email } = {}) {
@@ -40,5 +40,6 @@ export async function signIn(page, { role = "super", hash = "", email } = {}) {
   }, [STORAGE_KEY, JSON.stringify(session)]);
   await page.goto(hash ? `./#${hash}` : "./");
   if (role === "facilitator") await page.getByRole("heading", { name: "Your circles" }).waitFor();
+  else if (role === "assessor") await page.getByRole("heading", { name: /^Trainees assigned to you/ }).waitFor();
   else await page.locator("nav.tabs").waitFor();
 }

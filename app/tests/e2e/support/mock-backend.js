@@ -153,9 +153,9 @@ export async function mockBackend(page, overrides = {}) {
     }
     if (method === "POST") {
       const dbDefaults = table === "change_requests" ? { status: "open", requested_by: mock.user.email } : {};
-      const items = (Array.isArray(body) ? body : [body]).map((b) => ({ ...(table === "email_templates" || table === "admin_emails" ? {} : { id: `${table}-${++seq}` }), created_at: new Date().toISOString(), ...dbDefaults, ...b }));
+      const items = (Array.isArray(body) ? body : [body]).map((b) => ({ ...(table === "email_templates" || table === "admin_emails" || table === "assessors" ? {} : { id: `${table}-${++seq}` }), created_at: new Date().toISOString(), ...dbDefaults, ...b }));
       for (const it of items) {
-        const key = table === "email_templates" ? "key" : table === "admin_emails" ? "email" : "id";
+        const key = table === "email_templates" ? "key" : table === "admin_emails" || table === "assessors" ? "email" : "id";
         const i = rows.findIndex((r) => r[key] === it[key]);
         if (i >= 0) rows[i] = { ...rows[i], ...it }; else rows.push(it);
       }
@@ -188,6 +188,14 @@ export async function mockBackend(page, overrides = {}) {
       case "suggest_slots": case "slot_holders": case "free_licences_for_circle": return [];
       case "recheck_conflicts": return 0;
       case "save_settings": return null;
+      case "is_assessor": return (db.assessors ?? []).some((a) => a.email === mock.user.email);
+      case "save_assessment": {
+        const t = db.trainees.find((x) => x.id === body.p_trainee);
+        const admin = db.admin_emails.some((a) => a.email === mock.user.email);
+        if (!t || (!admin && t.assigned_to !== mock.user.email)) return reply(400, { code: "P0001", message: "not_allowed: this trainee is not assigned to you" });
+        Object.assign(t, { assessment: body.p_assessment ?? {}, feedback: body.p_feedback });
+        return t;
+      }
       default: mock.unhandled.push(`rpc ${name}`); return null;
     }
   }
@@ -238,6 +246,7 @@ export async function mockBackend(page, overrides = {}) {
         // Tally hands out a fresh link each time: mark it so tests can tell.
         return { answers: (sub?.fields ?? []).map((f) => (f.files ? { ...f, files: f.files.map((x) => ({ ...x, url: `${x.url}?fresh=1` })) } : f)) };
       }
+      if (a === "invite_assessor") return { invite: (db.assessors ?? []).some((x) => x.email === body.email) ? "invited" : "invite failed: not an assessor" };
       if (a === "decide") {
         const t = db.trainees.find((x) => x.id === body.trainee_id);
         if (t) Object.assign(t, { status: body.decision, decided_at: new Date().toISOString(), decided_by: mock.user.email, final_email_status: body.send ? "sent" : "not sent", final_email_at: body.send ? new Date().toISOString() : null });

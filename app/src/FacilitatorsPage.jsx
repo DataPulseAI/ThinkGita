@@ -507,7 +507,7 @@ export function FacilitatorsPage({ data, run, onSelect, onNewCircle, initial }) 
             <span className="fac-person" role="cell">
               <Avatar fac={r.fac} />
               <span className="fac-names">
-                <span className="fac-name">{r.names.title}{!fac_verified(r) && <span className="tag unverified">Unverified</span>}</span>
+                <span className="fac-name">{r.names.title}{r.fac.revoked_at ? <span className="tag revoked">Revoked</span> : !fac_verified(r) && <span className="tag unverified">Unverified</span>}</span>
                 {r.names.sub && <span className="muted small">{r.names.sub}</span>}
                 {(r.circleFlags.length > 0 || r.details.some((d) => d.key === "name")) && (
                   <span className="fac-flags small">
@@ -586,6 +586,16 @@ export function verifiedText(fac) {
 function Verification({ fac, run }) {
   const [busy, setBusy] = useState(false);
   const verified = Boolean(fac.verified_at);
+  if (fac.revoked_at) {
+    return (
+      <div className="fac-verify warn revoked">
+        <div>
+          <div className="fac-verify-title">Revoked</div>
+          <div className="small muted">Revoked on {new Date(fac.revoked_at).toLocaleDateString("en-GB", { timeZone: "Europe/London", day: "numeric", month: "short", year: "numeric" })} in training. They can't be verified again or shown on the website.</div>
+        </div>
+      </div>
+    );
+  }
   const set = async (to) => {
     if (!to && !confirm(`Remove verification from ${facilitatorNames(fac).title}? Their circles that aren't running yet can't go on the website until they're verified again.`)) return;
     setBusy(true);

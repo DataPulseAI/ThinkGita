@@ -131,9 +131,10 @@ test.describe("Training", () => {
     await p.getByRole("textbox", { name: /Overall feedback/ }).fill("Warm and clear.");
     await p.getByRole("button", { name: "Save assessment" }).click();
     await expect(toast(page)).toContainText("Assessment saved");
-    expect(mock.rest("trainees", "PATCH").at(-1).body).toEqual({
-      assessment: { delivery: { rating: "meets" }, technical: { rating: "partly", note: "Audio dipped at times" } },
-      feedback: "Warm and clear.",
+    expect(mock.rpc("save_assessment").at(-1)).toEqual({
+      p_trainee: "gauri.trainee",
+      p_assessment: { delivery: { rating: "meets" }, technical: { rating: "partly", note: "Audio dipped at times" } },
+      p_feedback: "Warm and clear.",
     });
   });
 

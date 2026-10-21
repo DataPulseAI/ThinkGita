@@ -107,12 +107,23 @@ export const STATUS = {
   ready: { label: "Ready to assess", cls: "ts-ready" },
   certified: { label: "Certified", cls: "ts-certified" },
   not_certified: { label: "Not certified", cls: "ts-not" },
+  cancelled: { label: "Cancelled", cls: "ts-cancelled" },
+  revoked: { label: "Revoked", cls: "ts-revoked" },
   rejected: { label: "Rejected", cls: "ts-rejected" },
 };
-const FILTERS = ["all", "applied", "in_training", "ready", "certified", "not_certified"];
+const FILTERS = ["all", "applied", "in_training", "ready", "certified", "not_certified", "cancelled", "revoked"];
+// Final outcomes. Cancelled: training stopped, nothing against them. Revoked: permanent (see migration 034).
+export const DECIDED = ["certified", "not_certified", "cancelled", "revoked"];
+export const OUTCOMES = [
+  ["certified", "Certified", "Training passed. The email includes the link to request a Think Gita Circle."],
+  ["not_certified", "Not certified", "Not ready this time. They can train again."],
+  ["cancelled", "Cancelled", "Training stopped. Nothing against them; they can apply again."],
+  ["revoked", "Revoked", "Permanent. Their future applications are marked revoked, and if they facilitate, they are unverified and their circles come off the website (circles keep running until you end them)."],
+];
 
 const clean = (v) => String(v ?? "").trim();
-const TEMPLATE_KEYS = [["training_form", "Next form"], ["training_certified", "Certified"], ["training_not_certified", "Not certified"]];
+const TEMPLATE_KEYS = [["training_form", "Next form"], ["training_certified", "Certified"], ["training_not_certified", "Not certified"],
+  ["training_cancelled", "Cancelled"], ["training_revoked", "Revoked"]];
 const DAY_MS = 86400e3;
 // A full Tally sync can run once every 15 minutes (the server refuses sooner; new forms arrive by webhook anyway).
 export const SYNC_COOLDOWN_MS = 15 * 60e3;
@@ -149,7 +160,7 @@ export function progress(trainee, submissions = [], forms = []) {
 
 // Status for the list: decided and rejected trainees keep theirs; everyone with all seven steps done is ready to assess.
 export function traineeStatus(trainee, prog) {
-  if (["certified", "not_certified", "rejected"].includes(trainee.status)) return trainee.status;
+  if ([...DECIDED, "rejected"].includes(trainee.status)) return trainee.status;
   if (prog.every((p) => p.done)) return "ready";
   return trainee.status === "in_training" || prog.some((p) => p.done) ? "in_training" : "applied";
 }
@@ -231,9 +242,31 @@ export function daysAgo(iso, now = Date.now()) {
 }
 const hhmm = (ms) => new Date(ms).toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" });
 
-export function filterTrainees(rows, { status = "all", q = "" } = {}) {
+// Who a trainee can be assigned to: admins (super admins included) and assessors, each email once, admins first.
+export function assigneeOptions(admins = [], assessors = []) {
+  const seen = new Set();
+  const out = [];
+  const add = (a, kind) => {
+    const email = clean(a?.email).toLowerCase();
+    if (!email || seen.has(email)) return;
+    seen.add(email);
+    out.push({ email, name: clean(a.name) || email, kind });
+  };
+  for (const a of admins) add(a, a.is_super ? "Super admin" : "Admin");
+  for (const a of assessors) add(a, "Assessor");
+  const rank = (o) => (o.kind === "Assessor" ? 1 : 0);
+  return out.sort((x, y) => rank(x) - rank(y) || x.name.localeCompare(y.name));
+}
+export function assigneeLabel(email, options = []) {
+  if (!email) return "Unassigned";
+  return options.find((o) => o.email === email)?.name ?? email;
+}
+
+// assignee: "all", "none" (unassigned) or an email.
+export function filterTrainees(rows, { status = "all", q = "", assignee = "all" } = {}) {
   const words = clean(q).toLowerCase().split(/\s+/).filter(Boolean);
   return rows.filter((r) => (status === "all" || r.status === status)
+    && (assignee === "all" || (assignee === "none" ? !r.t.assigned_to : r.t.assigned_to === assignee))
     && words.every((w) => [r.t.first_name, r.t.last_name, r.t.initiated_name, r.t.email, r.t.phone].join(" ").toLowerCase().includes(w)));
 }
 
@@ -284,6 +317,7 @@ export function TrainingPage({ data, run, initial }) {
   const [loadErr, setLoadErr] = useState("");
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
+  const [assignee, setAssignee] = useState("all");
   const [openId, setOpenId] = useState(initial ?? null);
   const [view, setView] = useState("list");
   const [now, setNow] = useState(() => Date.now());
@@ -294,17 +328,18 @@ export function TrainingPage({ data, run, initial }) {
   useEffect(() => {
     let live = true;
     (async () => {
-      const [t, s, f, e, x] = await Promise.all([
+      const [t, s, f, e, x, a] = await Promise.all([
         supabase.from("trainees").select("*").order("created_at", { ascending: false }),
         fetchAll(() => supabase.from("training_submissions").select("*").order("submitted_at", { ascending: false }).order("id")),
         supabase.from("training_forms").select("*").order("sort"),
         supabase.from("email_templates").select("*").in("key", TEMPLATE_KEYS.map(([k]) => k)),
         fetchAll(() => supabase.from("training_sends").select("*").order("created_at", { ascending: false }).order("id")),
+        supabase.from("assessors").select("*").order("name"),
       ]);
       if (!live) return;
-      const err = [t, s, f, e, x].find((r) => r.error);
+      const err = [t, s, f, e, x, a].find((r) => r.error);
       setLoadErr(err ? err.error.message : "");
-      setState({ trainees: t.data ?? [], subs: s.data ?? [], forms: f.data ?? [], sends: x.data ?? [],
+      setState({ trainees: t.data ?? [], subs: s.data ?? [], forms: f.data ?? [], sends: x.data ?? [], assessors: a.data ?? [],
         templates: Object.fromEntries((e.data ?? []).map((r) => [r.key, r])) });
     })();
     return () => { live = false; };
@@ -318,10 +353,23 @@ export function TrainingPage({ data, run, initial }) {
     for (const r of rows) n[r.status] = (n[r.status] ?? 0) + 1;
     return n;
   }, [rows]);
-  const shown = useMemo(() => filterTrainees(rows, { status, q }), [rows, status, q]);
+  const options = useMemo(() => assigneeOptions(data.admins ?? [], state?.assessors ?? []), [data.admins, state]);
+  const me = (data.me?.email ?? "").toLowerCase();
+  const shown = useMemo(() => filterTrainees(rows, { status, q, assignee: assignee === "me" ? me : assignee }), [rows, status, q, assignee, me]);
   const unmatched = useMemo(() => needsMatching(state?.subs, state?.trainees), [state]);
   const open = openId && rows.find((r) => r.id === openId);
   const steps = useMemo(() => (state ? nextSteps(state.trainees, state.subs, state.forms, state.sends, now) : { toSend: [], chase: [] }), [state, now]);
+  async function assign(ids, to) {
+    if (!ids.length) return;
+    const who = to ? assigneeLabel(to, options) : "nobody";
+    if (ids.length > 1 && !confirm(`Assign ${ids.length} trainees to ${who}?`)) return;
+    await run(async () => {
+      const { error } = await supabase.from("trainees").update({ assigned_to: to || null }).in("id", ids);
+      if (error) throw new Error(/bad_assignee/.test(error.message) ? "Assign to an admin or an assessor." : error.message);
+    }, to ? `${ids.length === 1 ? "Trainee" : `${ids.length} trainees`} assigned to ${who}.` : `${ids.length === 1 ? "Trainee" : `${ids.length} trainees`} unassigned.`);
+    reload();
+  }
+
   if (!state) return <section className="card"><p className="muted">Loading trainees…</p></section>;
   const todo = steps.toSend.length + steps.chase.length;
   const toMatch = groupByEmail(unmatched.recent).length;
@@ -344,6 +392,12 @@ export function TrainingPage({ data, run, initial }) {
           <h2>Trainees <span className="muted">({shown.length})</span></h2>
           <div className="filters">
             <input type="search" placeholder="Search name, email, phone" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search trainees" />
+            <select value={assignee} onChange={(e) => setAssignee(e.target.value)} aria-label="Assessor filter">
+              <option value="all">Everyone</option>
+              <option value="none">Unassigned</option>
+              <option value="me">Assigned to me</option>
+              {options.map((o) => <option key={o.email} value={o.email}>{o.name} ({o.kind.toLowerCase()})</option>)}
+            </select>
           </div>
         </div>
         <p className="card-sub muted small">
@@ -359,17 +413,18 @@ export function TrainingPage({ data, run, initial }) {
           ))}
         </div>
         <Legend />
-        <div className="tr-list" role="table" aria-label="Trainees">
+        <div className="tr-list tr-list-admin" role="table" aria-label="Trainees">
           <div className="tr-row tr-head" role="row">
             <span role="columnheader">Trainee</span>
             <span role="columnheader">Email</span>
             <span role="columnheader">Status</span>
             <span role="columnheader">Training</span>
+            <span role="columnheader">Assessor</span>
           </div>
           {shown.map((r) => {
             const n = traineeNames(r.t);
             return (
-              <div key={r.id} className="tr-row" role="row" tabIndex={0} onClick={() => setOpenId(r.id)} onKeyDown={(e) => e.key === "Enter" && setOpenId(r.id)}>
+              <div key={r.id} className="tr-row" role="row" tabIndex={0} onClick={() => setOpenId(r.id)} onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && setOpenId(r.id)}>
                 <span className="tr-person" role="cell">
                   <Avatar fac={asFac(r.t)} size={32} />
                   <span className="tr-names"><b>{n.title}</b>{n.sub && <span className="muted small">{n.sub}</span>}</span>
@@ -377,6 +432,14 @@ export function TrainingPage({ data, run, initial }) {
                 <span className="tr-email small" role="cell">{r.t.email}</span>
                 <span role="cell"><span className={`pill tr-status ${STATUS[r.status].cls}`}>{STATUS[r.status].label}</span></span>
                 <span className="tr-progress" role="cell"><Dots prog={r.prog} /> <span className="muted small">{r.done} of {STEPS.length}</span></span>
+                <span className="small tr-assignee" role="cell" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                  <select className={`tr-assign-select ${r.t.assigned_to ? "" : "unassigned"}`} value={r.t.assigned_to ?? ""}
+                    aria-label={`Assessor for ${traineeNames(r.t).title}`} onChange={(e) => assign([r.id], e.target.value || null)}>
+                    <option value="">Unassigned</option>
+                    {r.t.assigned_to && !options.some((o) => o.email === r.t.assigned_to) && <option value={r.t.assigned_to}>{r.t.assigned_to}</option>}
+                    {options.map((o) => <option key={o.email} value={o.email}>{o.name} ({o.kind.toLowerCase()})</option>)}
+                  </select>
+                </span>
               </div>
             );
           })}
@@ -392,7 +455,7 @@ export function TrainingPage({ data, run, initial }) {
 
       {open && (
         <TraineeDrawer key={open.id} row={open} subs={state.subs} forms={state.forms} sends={state.sends} now={now} templates={state.templates} data={data} run={run}
-          onChanged={reload} onClose={() => setOpenId(null)} />
+          options={options} onAssign={(to) => assign([open.id], to)} onChanged={reload} onClose={() => setOpenId(null)} />
       )}
     </>
   );
@@ -673,8 +736,10 @@ function Answers({ fields, responseId }) {
   );
 }
 
-function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templates, data, run, onChanged, onClose }) {
+// mode "assessor": the assessor's view of a trainee assigned to them. Answers, videos and the assessment only.
+function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templates, data, run, onChanged, onClose, options = [], onAssign, mode = "admin" }) {
   const t = row.t;
+  const admin = mode === "admin";
   const n = traineeNames(t);
   const me = data.me?.email ?? "";
   useEffect(() => {
@@ -687,7 +752,7 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
   const [feedback, setFeedback] = useState(t.feedback ?? "");
   const [busy, setBusy] = useState(false);
   const dirty = JSON.stringify(assessment) !== JSON.stringify(t.assessment ?? {}) || feedback !== (t.feedback ?? "");
-  const decided = ["certified", "not_certified"].includes(t.status);
+  const decided = DECIDED.includes(t.status);
 
   const update = (patch, msg) => run(async () => {
     const { error } = await supabase.from("trainees").update(patch).eq("id", t.id);
@@ -700,6 +765,10 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
   const setRating = (k, rating) => setAssessment((a) => ({ ...a, [k]: { ...(a[k] ?? {}), rating } }));
   const setNote = (k, note) => setAssessment((a) => ({ ...a, [k]: { ...(a[k] ?? {}), note } }));
   const rated = CRITERIA.filter(([k]) => assessment[k]?.rating).length;
+  const saveAssessment = () => run(async () => {
+    const { error } = await supabase.rpc("save_assessment", { p_trainee: t.id, p_assessment: assessment, p_feedback: feedback });
+    if (error) throw new Error(/not_allowed/.test(error.message) ? "This trainee is no longer assigned to you." : error.message);
+  }, "Assessment saved").then(onChanged);
   const linkForms = STEPS.filter((s) => !s.session).map((s) => forms.find((f) => f.key === s.key)).filter((f) => f?.url);
 
   return (
@@ -714,7 +783,7 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
           <div className="fac-id-text">
             {n.sub && <div>{n.sub}</div>}
             <div className="fac-email"><span className="fac-email-text">{t.email}</span><CopyButton text={t.email} label="Copy" className="fac-copy" /></div>
-            {(t.other_emails ?? []).length > 0 && (
+            {admin && (t.other_emails ?? []).length > 0 && (
               <div className="small tr-other-emails">
                 <span className="muted">Also uses: </span>
                 {t.other_emails.map((e) => (
@@ -731,7 +800,7 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
         <div className="tr-status-line">
           <span className={`pill tr-status ${STATUS[row.status].cls}`}>{STATUS[row.status].label}</span>
           <span className="muted small">Training {row.done === STEPS.length ? "complete" : `${row.done} of ${STEPS.length} done`}</span>
-          {!decided && (
+          {admin && !decided && (
             <label className="small tr-status-select">Status
               <select value={t.status} onChange={(e) => update({ status: e.target.value }, "Status saved")}>
                 <option value="applied">Applied</option>
@@ -741,6 +810,15 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
             </label>
           )}
         </div>
+        {admin && (
+          <label className="small tr-assign">Assessor
+            <select value={t.assigned_to ?? ""} onChange={(e) => onAssign?.(e.target.value || null)} aria-label="Assigned to">
+              <option value="">Unassigned</option>
+              {options.map((o) => <option key={o.email} value={o.email}>{o.name} ({o.kind.toLowerCase()})</option>)}
+            </select>
+            {t.assigned_at && <span className="muted">since {fmtDate(t.assigned_at)}</span>}
+          </label>
+        )}
 
         <Fold title="Training" summary={`${row.done} of ${STEPS.length} done`}>
           <ul className="tr-checklist">
@@ -749,7 +827,9 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
                 <div className="tr-step">
                   <i className={`tr-dot ${p.done ? "done" : ""}`} />
                   <span className="tr-step-label">{p.label}</span>
-                  {p.session ? (
+                  {p.session && !admin ? (
+                    <span className="muted small">{p.done ? `Attended${p.at ? `, ${fmtDate(p.at)}` : ""}` : "Not marked yet"}</span>
+                  ) : p.session ? (
                     <label className="tr-toggle small">
                       <input type="checkbox" checked={p.done} onChange={(e) => toggleSession(p.key, e.target.checked)} aria-label={`${p.label} attended`} />
                       {p.done ? `Attended${p.at ? `, marked ${fmtDate(p.at)}` : ""}` : "Not marked"}
@@ -767,7 +847,7 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
           <p className="muted small">Videos and files load a fresh link from Tally when opened.</p>
         </Fold>
 
-        {["applied", "in_training"].includes(t.status) && (
+        {admin && ["applied", "in_training"].includes(t.status) && (
           <SendForm t={t} subs={subs} forms={forms} sends={sends} now={now} templates={templates} data={data} run={run} onChanged={onChanged} />
         )}
 
@@ -777,7 +857,7 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
           </Fold>
         )}
 
-        <Fold title="Personal form links" summary="Send these so their forms are matched to them" defaultOpen={!decided}>
+        {admin && <Fold title="Personal form links" summary="Send these so their forms are matched to them" defaultOpen={!decided}>
           <ul className="tr-links">
             {linkForms.map((f) => (
               <li key={f.key}>
@@ -788,7 +868,7 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
             ))}
           </ul>
           <CopyButton text={linksText(t, forms)} label="Copy all links" />
-        </Fold>
+        </Fold>}
 
         <Fold title="Assessment" summary={`${rated} of ${CRITERIA.length} rated`}>
           <div className="tr-criteria">
@@ -806,15 +886,19 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
               </div>
             ))}
           </div>
-          <label className="tr-feedback">Overall feedback (goes into the email)
+          <label className="tr-feedback">{admin ? "Overall feedback (goes into the email)" : "Overall feedback (admins use it in the final email)"}
             <textarea rows="5" value={feedback} onChange={(e) => setFeedback(e.target.value)} />
           </label>
           <div className="actions">
-            <button className="primary" disabled={!dirty || busy} onClick={() => update({ assessment, feedback }, "Assessment saved")}>{dirty ? "Save assessment" : "Saved"}</button>
+            <button className="primary" disabled={!dirty || busy} onClick={saveAssessment}>{dirty ? "Save assessment" : "Saved"}</button>
           </div>
         </Fold>
 
-        <Outcome t={t} row={row} templates={templates} data={data} run={run} assessment={assessment} feedback={feedback} busy={busy} setBusy={setBusy} onChanged={onChanged} />
+        {admin
+          ? <Outcome t={t} row={row} templates={templates} data={data} run={run} assessment={assessment} feedback={feedback} busy={busy} setBusy={setBusy} onChanged={onChanged} />
+          : decided && (
+            <p className="small tr-decided">Outcome: <b>{STATUS[t.status].label}</b>{t.decided_at ? ` on ${fmtDate(t.decided_at)}` : ""}.</p>
+          )}
       </aside>
     </div>
   );
@@ -824,10 +908,10 @@ function Outcome({ t, row, templates, data, run, assessment, feedback, busy, set
   const [decision, setDecision] = useState(null);
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
-  const decided = ["certified", "not_certified"].includes(t.status);
+  const decided = DECIDED.includes(t.status);
 
   function choose(d) {
-    const key = d === "certified" ? "training_certified" : "training_not_certified";
+    const key = `training_${d}`;
     const tpl = templates[key] ?? DEFAULT_TEMPLATES[key];
     const vars = buildTrainingVars({ trainee: t, settings: data.settings, sender: data.me?.name, feedback });
     const r = render(tpl, vars, { missing: "" });
@@ -839,9 +923,12 @@ function Outcome({ t, row, templates, data, run, assessment, feedback, busy, set
   const leftover = /\{\{\s*[a-z_]+\s*\}\}/.test(subject + body);
 
   async function decide(send) {
-    if (row.done < STEPS.length && !confirm(`Only ${row.done} of ${STEPS.length} training steps are done. Record the outcome anyway?`)) return;
+    const label = OUTCOMES.find(([k]) => k === decision)?.[1] ?? decision;
+    if (decision === "revoked") {
+      if (!confirm(`Revoke ${traineeNames(t).title}? This is permanent: their future applications are marked revoked, and if they facilitate, they are unverified and their circles come off the website.`)) return;
+    } else if (["certified", "not_certified"].includes(decision) && row.done < STEPS.length
+      && !confirm(`Only ${row.done} of ${STEPS.length} training steps are done. Record the outcome anyway?`)) return;
     setBusy(true);
-    const label = decision === "certified" ? "Certified" : "Not certified";
     await run(() => trainingAction("decide", {
       trainee_id: t.id, decision, send, feedback, assessment,
       ...(send ? { subject, text: preview.text, html: preview.html } : {}),
@@ -864,10 +951,11 @@ function Outcome({ t, row, templates, data, run, assessment, feedback, busy, set
         </p>
       )}
       <div className="seg tr-decision" role="radiogroup" aria-label="Outcome">
-        {[["certified", "Certified"], ["not_certified", "Not certified"]].map(([k, label]) => (
-          <button key={k} type="button" role="radio" aria-checked={decision === k} className={decision === k ? "on" : ""} disabled={busy} onClick={() => choose(k)}>{label}</button>
+        {OUTCOMES.map(([k, label]) => (
+          <button key={k} type="button" role="radio" aria-checked={decision === k} className={`${decision === k ? "on" : ""} ${k === "revoked" ? "tr-revoke" : ""}`} disabled={busy} onClick={() => choose(k)}>{label}</button>
         ))}
       </div>
+      {decision && <p className={`small tr-outcome-note ${decision === "revoked" ? "warn-text" : "muted"}`}>{OUTCOMES.find(([k]) => k === decision)[2]}</p>}
       {decision && (
         <div className="tr-composer form">
           <p className="muted small">The email is filled in from the wording below the list and your feedback. Edit it here before sending.</p>
@@ -990,6 +1078,174 @@ export function TallyResync({ data, run }) {
           ? <span className="muted small">Available again after {hhmm(syncAfter)}.</span>
           : <button type="button" disabled={syncing || hasKey === false} onClick={sync}>{syncing ? "Syncing…" : "Resync from Tally"}</button>}
       </div>
+    </section>
+  );
+}
+
+// The assessor's whole dashboard: the trainees assigned to them (the database only returns those), their answers and
+// videos, and the assessment. No sending, links or outcomes: admins make the final decision.
+export function AssessorPage({ email }) {
+  const [state, setState] = useState(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [q, setQ] = useState("");
+  const [openId, setOpenId] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [tick, setTick] = useState(0);
+  const reload = () => setTick((n) => n + 1);
+  const me = String(email ?? "").toLowerCase();
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const [t, s, f] = await Promise.all([
+        supabase.from("trainees").select("*").eq("assigned_to", me).order("created_at", { ascending: false }),
+        fetchAll(() => supabase.from("training_submissions").select("*").order("submitted_at", { ascending: false }).order("id")),
+        supabase.from("training_forms").select("*").order("sort"),
+      ]);
+      if (!live) return;
+      const err = [t, s, f].find((r) => r.error);
+      setLoadErr(err ? err.error.message : "");
+      setState({ trainees: t.data ?? [], subs: s.data ?? [], forms: f.data ?? [] });
+    })();
+    return () => { live = false; };
+  }, [me, tick]);
+
+  const notify = (kind, text) => { setToast({ kind, text }); setTimeout(() => setToast(null), 6000); };
+  const run = async (fn, okText) => {
+    try {
+      const out = await fn();
+      if (okText) notify("ok", typeof okText === "function" ? okText(out) : okText);
+      return out ?? true;
+    } catch (e) {
+      notify("error", e?.message ?? String(e));
+      return null;
+    }
+  };
+
+  const rows = useMemo(() => (state ? state.trainees.map((t) => {
+    const prog = progress(t, state.subs, state.forms);
+    return { id: t.id, t, prog, status: traineeStatus(t, prog), done: prog.filter((p) => p.done).length };
+  }) : []), [state]);
+  const shown = useMemo(() => filterTrainees(rows, { q }), [rows, q]);
+  const open = openId && rows.find((r) => r.id === openId);
+  const data = useMemo(() => ({ me: { email: me }, settings: {} }), [me]);
+
+  return (
+    <main className="content assessor">
+      {!state ? <section className="card"><p className="muted">Loading trainees…</p></section> : (
+        <section className="card tr-page" aria-label="Trainees assigned to you">
+          <div className="card-head">
+            <h2>Trainees assigned to you <span className="muted">({shown.length})</span></h2>
+            <div className="filters">
+              <input type="search" placeholder="Search name, email, phone" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search trainees" />
+            </div>
+          </div>
+          <p className="card-sub muted small">Open a trainee to see their application, their training forms and videos, and to record your assessment. Admins make the final decision.</p>
+          {loadErr && <p className="hint warn">{loadErr}</p>}
+          <Legend />
+          <div className="tr-list" role="table" aria-label="Trainees">
+            <div className="tr-row tr-head" role="row">
+              <span role="columnheader">Trainee</span>
+              <span role="columnheader">Email</span>
+              <span role="columnheader">Status</span>
+              <span role="columnheader">Training</span>
+            </div>
+            {shown.map((r) => {
+              const n = traineeNames(r.t);
+              return (
+                <div key={r.id} className="tr-row" role="row" tabIndex={0} onClick={() => setOpenId(r.id)} onKeyDown={(e) => e.key === "Enter" && setOpenId(r.id)}>
+                  <span className="tr-person" role="cell">
+                    <Avatar fac={asFac(r.t)} size={32} />
+                    <span className="tr-names"><b>{n.title}</b>{n.sub && <span className="muted small">{n.sub}</span>}</span>
+                  </span>
+                  <span className="tr-email small" role="cell">{r.t.email}</span>
+                  <span role="cell"><span className={`pill tr-status ${STATUS[r.status].cls}`}>{STATUS[r.status].label}</span></span>
+                  <span className="tr-progress" role="cell"><Dots prog={r.prog} /> <span className="muted small">{r.done} of {STEPS.length}</span></span>
+                </div>
+              );
+            })}
+            {!shown.length && <p className="muted tr-empty">{rows.length ? "Nobody matches." : "Nobody is assigned to you yet. An admin will assign trainees to you."}</p>}
+          </div>
+        </section>
+      )}
+      {open && (
+        <TraineeDrawer key={open.id} row={open} subs={state.subs} forms={state.forms} templates={{}} data={data} run={run}
+          mode="assessor" onChanged={reload} onClose={() => setOpenId(null)} />
+      )}
+      <div aria-live="polite" role="status">
+        {toast && <div className={`toast ${toast.kind}`} onClick={() => setToast(null)}>{toast.text}</div>}
+      </div>
+    </main>
+  );
+}
+
+const EMAIL_OK = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Settings > Assessors: people who assess trainees assigned to them. Added here, then sent a sign-in invite.
+export function AssessorsCard({ data, run }) {
+  const [list, setList] = useState(null);
+  const [counts, setCounts] = useState({});
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let live = true;
+    Promise.all([
+      supabase.from("assessors").select("*").order("name"),
+      fetchAll(() => supabase.from("trainees").select("id, assigned_to").not("assigned_to", "is", null).order("id")),
+    ]).then(([a, t]) => {
+      if (!live) return;
+      setList(a.data ?? []);
+      const n = {};
+      for (const r of t.data ?? []) n[r.assigned_to] = (n[r.assigned_to] ?? 0) + 1;
+      setCounts(n);
+    });
+    return () => { live = false; };
+  }, [data, tick]);
+  const clean2 = clean(email).toLowerCase();
+  const isAdmin = (data.admins ?? []).some((a) => a.email === clean2);
+  const exists = (list ?? []).some((a) => a.email === clean2);
+  const problem = !clean2 ? "" : !EMAIL_OK.test(clean2) ? "Enter a valid email." : isAdmin ? "They're already an admin, so they can assess anyone." : exists ? "Already an assessor." : "";
+  const inviteText = (o) => (o?.invite === "invited" ? "Sign-in invite sent." : o?.invite === "already has an account" ? "They already have a sign-in." : `Invite: ${o?.invite ?? "not sent"}.`);
+  const invite = (e) => run(() => trainingAction("invite_assessor", { email: e }), (o) => `${e}: ${inviteText(o)}`);
+
+  async function add(ev) {
+    ev.preventDefault();
+    if (!clean2 || problem || busy) return;
+    setBusy(true);
+    await run(async () => {
+      const { error } = await supabase.from("assessors").insert({ email: clean2, name: clean(name) || null, created_by: data.me?.email ?? null });
+      if (error) throw new Error(error.code === "23505" ? "Already an assessor." : error.message);
+      return trainingAction("invite_assessor", { email: clean2 }).catch((e) => ({ invite: `invite failed: ${e.message}` }));
+    }, (o) => `${clean(name) || clean2} added as an assessor. ${inviteText(o)}`);
+    setBusy(false);
+    setName("");
+    setEmail("");
+    setTick((n) => n + 1);
+  }
+
+  return (
+    <section className="card" aria-label="Assessors">
+      <div className="card-head"><h2>Assessors</h2></div>
+      <p className="muted small">Assessors sign in to see only the trainees assigned to them (Training page), with their forms and videos, and record the assessment. Admins make the final decision.</p>
+      {list === null ? <p className="muted small">Loading…</p> : (
+        <div className="list">
+          {list.map((a) => (
+            <div key={a.email} className="row">
+              <div className="row-main"><b>{a.name || a.email}</b>{a.name && <span className="muted small"> · {a.email}</span>}</div>
+              <span className="muted small nowrap">{counts[a.email] ?? 0} assigned</span>
+              <button type="button" className="link small nowrap" onClick={() => invite(a.email)} aria-label={`Send invite to ${a.email}`}>Send invite</button>
+            </div>
+          ))}
+          {!list.length && <p className="muted small">No assessors yet.</p>}
+        </div>
+      )}
+      <form className="form grid2 tr-add-assessor" onSubmit={add} aria-label="Add an assessor">
+        <label>Name<input value={name} onChange={(e) => setName(e.target.value)} disabled={busy} /></label>
+        <label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} disabled={busy} /></label>
+        {problem && <p className="error small">{problem}</p>}
+        <div className="actions"><button className="primary" disabled={!clean2 || Boolean(problem) || busy}>{busy ? "Adding…" : "Add and invite"}</button></div>
+      </form>
     </section>
   );
 }

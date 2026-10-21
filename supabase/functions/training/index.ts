@@ -3,13 +3,15 @@
 //   Application form: creates or updates the trainee (and copies their photo).
 //   Training forms: linked to the trainee by the hidden field `tid` (the trainee id, added to each form link), else by
 //   email; anything else waits under "Needs matching" on the Training page.
-// POST from the dashboard (signed-in admin) or with the cron secret:
+// POST from the dashboard (signed-in admin) or with the cron secret. Assessors may only use "file", for trainees
+// assigned to them:
 //   { action: "probe" }                        is the Tally API key set, and which forms can it see
 //   { action: "sync", form_key? }              backfill every submission from the Tally API (TALLY_API_KEY)
 //   { action: "file", response_id }            fresh answers (and so fresh file links) for one submission, e.g. to play a video
 //   { action: "send_form", emails: [{ trainee_id, form_key, subject, text, html }] }
 //                                              send trainees a training form (their next one), up to 50 at a time
-//   { action: "decide", trainee_id, decision: "certified" | "not_certified", send, subject?, text?, html? }
+//   { action: "invite_assessor", email }      sign-in invite for an assessor already added in Settings
+//   { action: "decide", trainee_id, decision: "certified" | "not_certified" | "cancelled" | "revoked", send, subject?, text?, html? }
 //                                              record the outcome and (optionally) send the email the admin wrote
 //                                              (rendered on the dashboard with emailTemplate.js render())
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -20,6 +22,7 @@ const TALLY_API_KEY = (Deno.env.get("TALLY_API_KEY") ?? "").trim();
 const GMAIL_USER = Deno.env.get("GMAIL_USER") ?? "";
 const GMAIL_APP_PASSWORD = (Deno.env.get("GMAIL_APP_PASSWORD") ?? "").replace(/\s+/g, "");
 const EMAIL_FROM_NAME = Deno.env.get("EMAIL_FROM_NAME") ?? "Think Gita Circles";
+const APP_URL = Deno.env.get("APP_URL") ?? "";
 const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
 
 const cors = {
@@ -343,10 +346,14 @@ async function sync(onlyKey?: string) {
 
 // Tally's file links expire. Fetches one submission again (the single-submission endpoint, else the form's list) and
 // stores its answers with fresh links. Returns the answers.
-async function refreshFile(responseId: string) {
+async function refreshFile(responseId: string, assessor?: string) {
   if (!responseId) throw new Error("Which submission?");
   const { data: sub } = await db.from("training_submissions").select("id, form_key, trainee_id").eq("response_id", responseId).maybeSingle();
   if (!sub) throw new Error("Submission not found.");
+  if (assessor) {
+    const { data: ok } = await db.rpc("can_assess", { p_trainee: sub.trainee_id, p_email: assessor });
+    if (!ok) throw new Error("This trainee is not assigned to you.");
+  }
   const { data: form } = await db.from("training_forms").select("form_id").eq("key", sub.form_key).maybeSingle();
   if (!form?.form_id) throw new Error("This form isn't linked to Tally yet.");
   let answers: Answer[] | null = null;
@@ -438,9 +445,10 @@ async function sendForms(actor: string, body: any) {
 
 /* ---------------- Outcome ---------------- */
 
+const DECISIONS = ["certified", "not_certified", "cancelled", "revoked"];
 async function decide(actor: string, body: any) {
   const decision = body?.decision;
-  if (!["certified", "not_certified"].includes(decision)) throw new Error("Choose Certified or Not certified.");
+  if (!DECISIONS.includes(decision)) throw new Error("Choose Certified, Not certified, Cancelled or Revoked.");
   const { data: t } = await db.from("trainees").select("*").eq("id", body?.trainee_id).maybeSingle();
   if (!t) throw new Error("Trainee not found.");
   const now = new Date().toISOString();
@@ -458,7 +466,7 @@ async function decide(actor: string, body: any) {
     if (!GMAIL_USER || !GMAIL_APP_PASSWORD) throw new Error("Email isn't set up yet (GMAIL_USER / GMAIL_APP_PASSWORD).");
     const r = { subject: subject.replace(/[\r\n]+/g, " "), text, html };
     mailer ??= nodemailer.createTransport({ host: "smtp.gmail.com", port: 465, secure: true, auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD } });
-    const log = { kind: decision === "certified" ? "training_certified" : "training_not_certified", to_email: t.email, subject: r.subject,
+    const log = { kind: `training_${decision}`, to_email: t.email, subject: r.subject,
       sent_by: actor, trainee_id: t.id, from_address: `${EMAIL_FROM_NAME} <${GMAIL_USER}>`, body_html: r.html, body_text: r.text };
     try {
       const info = await mailer.sendMail({ from: { name: EMAIL_FROM_NAME, address: GMAIL_USER }, to: t.email, subject: r.subject, html: r.html, text: r.text });
@@ -477,6 +485,20 @@ async function decide(actor: string, body: any) {
   await db.from("audit_log").insert({ actor, action: `training_${decision}`, circle_id: null,
     detail: { trainee_id: t.id, email: t.email, email_result: email } });
   return { trainee: saved, email };
+}
+
+// Assessors are added in Settings first; this sends their sign-in invite (Supabase Auth email).
+async function inviteAssessor(actor: string, email: string) {
+  const e = String(email ?? "").trim().toLowerCase();
+  const { data: row } = await db.from("assessors").select("email").eq("email", e).maybeSingle();
+  if (!row) throw new Error("Add them as an assessor first.");
+  const { error } = await db.auth.admin.inviteUserByEmail(e, APP_URL ? { redirectTo: APP_URL } : undefined);
+  const invite = !error ? "invited" : /already/i.test(error.message) ? "already has an account" : `invite failed: ${error.message}`;
+  if (invite !== "already has an account") {
+    await db.from("email_log").insert({ kind: "invite", to_email: e, subject: "Sign-in invite", sent_by: actor, status: error ? "failed" : "sent", error: error?.message ?? null });
+  }
+  await db.from("audit_log").insert({ actor, action: "invite_assessor", circle_id: null, detail: { email: e, result: invite } });
+  return { invite };
 }
 
 /* ---------------- Entry ---------------- */
@@ -520,7 +542,18 @@ Deno.serve(async (req) => {
     const email = userData?.user?.email?.toLowerCase();
     if (!email) return json({ error: "Not signed in" }, 401);
     const { data: admin } = await db.from("admin_emails").select("email").eq("email", email).maybeSingle();
-    if (!admin) return json({ error: "Admins only" }, 403);
+    if (!admin) {
+      // Assessors: only fresh file links for their own trainees.
+      const { data: assessor } = await db.from("assessors").select("email").eq("email", email).maybeSingle();
+      let body: any = {};
+      try { body = raw ? JSON.parse(raw) : {}; } catch { /* handled below */ }
+      if (!assessor || body?.action !== "file") return json({ error: "Admins only" }, 403);
+      try {
+        return json(await refreshFile(String(body.response_id ?? ""), email));
+      } catch (e) {
+        return json({ error: e instanceof Error ? e.message : String(e) }, 400);
+      }
+    }
     actor = email;
   }
   try {
@@ -532,6 +565,9 @@ Deno.serve(async (req) => {
       case "send_form":
         if (actor === "cron") return json({ error: "Admins only" }, 403);
         return json(await sendForms(actor, body));
+      case "invite_assessor":
+        if (actor === "cron") return json({ error: "Admins only" }, 403);
+        return json(await inviteAssessor(actor, body.email));
       case "decide":
         if (actor === "cron") return json({ error: "Admins only" }, 403);
         return json(await decide(actor, body));

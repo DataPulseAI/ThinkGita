@@ -247,3 +247,38 @@ describe("send_form pacing and limits", () => {
     expect(fake.tables.training_sends).toHaveLength(1);
   });
 });
+
+describe("assessors and the new outcomes", () => {
+  const call = async (body) => {
+    const res = await handler(new Request("https://x", { method: "POST", body: JSON.stringify(body), headers: { Authorization: "Bearer x" } }));
+    return { status: res.status, body: await res.json() };
+  };
+  it("an assessor can only refresh files for their own trainees, and nothing else", async () => {
+    const fake = attachFake(t.db, {
+      admin_emails: [], assessors: [{ email: "admin@example.org" }],
+      training_forms: [{ key: "video", form_id: "ODzYRA" }],
+      training_submissions: [{ id: "s-v", response_id: "resp-v", form_key: "video", trainee_id: TID, fields: [] }],
+    });
+    fake.rpcResults.can_assess = () => ({ data: false, error: null });
+    expect((await call({ action: "file", response_id: "resp-v" })).body.error).toMatch(/not assigned to you/);
+    expect((await call({ action: "decide", trainee_id: TID, decision: "certified" })).status).toBe(403);
+    expect((await call({ action: "send_form", emails: [] })).status).toBe(403);
+    expect(fake.rpcCalls[0]).toEqual({ name: "can_assess", args: { p_trainee: TID, p_email: "admin@example.org" } });
+  });
+  it("revoked and cancelled are outcomes, with their own email kinds", async () => {
+    sent.length = 0;
+    const fake = attachFake(t.db, { admin_emails: [{ email: "admin@example.org" }], trainees: [{ id: TID, email: "ana@example.org", status: "in_training" }], email_log: [], audit_log: [] });
+    const r = await call({ action: "decide", trainee_id: TID, decision: "revoked", send: true, subject: "About your training", text: "Dear Ana" });
+    expect(r.body.email).toBe("sent");
+    expect(fake.row("trainees", TID).status).toBe("revoked");
+    expect(fake.tables.email_log[0].kind).toBe("training_revoked");
+    await call({ action: "decide", trainee_id: TID, decision: "cancelled", send: false });
+    expect(fake.row("trainees", TID).status).toBe("cancelled");
+  });
+  it("invites an assessor only once they are on the list", async () => {
+    const fake = attachFake(t.db, { admin_emails: [{ email: "admin@example.org" }], assessors: [{ email: "asha@example.org" }], email_log: [], audit_log: [] });
+    expect((await call({ action: "invite_assessor", email: "nobody@example.org" })).status).toBe(400);
+    expect((await call({ action: "invite_assessor", email: " Asha@Example.org " })).body).toEqual({ invite: "invited" });
+    expect(fake.tables.audit_log.at(-1)).toMatchObject({ action: "invite_assessor", detail: { email: "asha@example.org", result: "invited" } });
+  });
+});

@@ -374,4 +374,36 @@ Warm regards,
 {{sender_name}}
 Think Gita Circles Team`,
   },
+  training_cancelled: {
+    subject: "Your Think Gita facilitator training, {{first_name}}",
+    body: `Dear {{first_name}},
+
+Thank you for the time and care you have given to the Think Gita facilitator training.
+
+We have closed your place on this round of the training for now. This is not a reflection on you, and you are very welcome to apply again for a future training whenever the time is right for you.
+
+FEEDBACK
+{{feedback}}
+
+If you have any questions, reply to this email or contact {{support_contact}}.
+
+Warm regards,
+{{sender_name}}
+Think Gita Circles Team`,
+  },
+  training_revoked: {
+    subject: "Your Think Gita facilitator status, {{first_name}}",
+    body: `Dear {{first_name}},
+
+We are writing to let you know that, after careful review, your Think Gita facilitator status has been revoked. This means you will not be able to facilitate Think Gita Circles, now or in future.
+
+FEEDBACK
+{{feedback}}
+
+If you have any questions about this decision, please contact {{support_contact}}.
+
+Kind regards,
+{{sender_name}}
+Think Gita Circles Team`,
+  },
 };

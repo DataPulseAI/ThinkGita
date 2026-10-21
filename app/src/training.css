@@ -33,6 +33,8 @@
 .ts-ready { background: var(--accent-soft); border-color: var(--accent-text); color: var(--accent-text); }
 .ts-certified { background: var(--live-soft); border-color: var(--live); color: var(--live); }
 .ts-not { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+.ts-cancelled { background: var(--surface-2); border-color: var(--line); color: var(--muted); }
+.ts-revoked { background: var(--warn); border-color: var(--warn); color: var(--surface); }
 .ts-rejected { background: var(--surface-2); border-color: var(--line); color: var(--muted); text-decoration: line-through; }
 
 /* Needs matching */
@@ -102,3 +104,21 @@
 .tr-match-from { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .tr-match-hint { display: grid; gap: 6px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--line); overflow-wrap: anywhere; }
 .tr-other-emails { display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; }
+
+/* Assignment: row checkboxes, the bulk bar and the assessor column (admins only). */
+.tr-list-admin .tr-row { grid-template-columns: minmax(190px, 1.6fr) minmax(170px, 1.2fr) minmax(110px, .8fr) minmax(190px, 1.2fr) minmax(110px, .8fr); }
+.tr-assignee { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tr-assign { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.tr-assign select { max-width: 280px; }
+.tr-outcome-note { margin: 6px 0 0; }
+.tr-decision .tr-revoke.on { background: var(--warn); border-color: var(--warn); color: var(--surface); }
+.assessor { padding-top: 16px; }
+@media (max-width: 720px) {
+  .tr-list-admin .tr-row { grid-template-columns: 1fr auto; }
+  .tr-list-admin .tr-email, .tr-list-admin .tr-progress, .tr-list-admin .tr-assignee { grid-column: 1 / -1; }
+}
+
+/* Assessor column: assign straight from the list. */
+.tr-assign-select { width: 100%; max-width: 220px; font-size: 13px; padding: 4px 6px; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--ink); cursor: pointer; }
+.tr-assign-select.unassigned { color: var(--muted); }
+.tr-assign-select:hover, .tr-assign-select:focus { border-color: var(--line); background: var(--surface); }

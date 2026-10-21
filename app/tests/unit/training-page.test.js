@@ -192,3 +192,32 @@ describe("suggestMatch and groupByEmail", () => {
     expect(g.map((x) => [x.key, x.name, x.subs.map((s) => s.id)])).toEqual([["a@x.org", "Ana", ["2", "1"]], ["id:3", "Bo", ["3"]]]);
   });
 });
+
+describe("assignment and outcomes", () => {
+  it("assignee options: admins (super admins marked) then assessors, each email once", async () => {
+    const { assigneeOptions, assigneeLabel } = await import("../../src/TrainingPage.jsx");
+    const opts = assigneeOptions(
+      [{ email: "zed@example.org", name: "Zed", is_super: true }, { email: "amy@example.org", name: "" }],
+      [{ email: "Asha@example.org", name: "Asha" }, { email: "amy@example.org", name: "Amy again" }],
+    );
+    expect(opts).toEqual([
+      { email: "amy@example.org", name: "amy@example.org", kind: "Admin" },
+      { email: "zed@example.org", name: "Zed", kind: "Super admin" },
+      { email: "asha@example.org", name: "Asha", kind: "Assessor" },
+    ]);
+    expect(assigneeLabel("asha@example.org", opts)).toBe("Asha");
+    expect(assigneeLabel(null, opts)).toBe("Unassigned");
+    expect(assigneeLabel("gone@example.org", opts)).toBe("gone@example.org");
+  });
+  it("filters by assignee, and cancelled and revoked are final statuses", async () => {
+    const { filterTrainees, traineeStatus, DECIDED } = await import("../../src/TrainingPage.jsx");
+    const rows = [{ t: { assigned_to: "a@example.org" }, status: "in_training" }, { t: { assigned_to: null }, status: "applied" }];
+    expect(filterTrainees(rows, { assignee: "none" })).toEqual([rows[1]]);
+    expect(filterTrainees(rows, { assignee: "a@example.org" })).toEqual([rows[0]]);
+    expect(filterTrainees(rows, {})).toHaveLength(2);
+    expect(DECIDED).toEqual(["certified", "not_certified", "cancelled", "revoked"]);
+    const allDone = [{ done: true }];
+    expect(traineeStatus({ status: "revoked" }, allDone)).toBe("revoked");
+    expect(traineeStatus({ status: "cancelled" }, [{ done: false }])).toBe("cancelled");
+  });
+});

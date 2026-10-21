@@ -9,6 +9,7 @@ const ago = (mins) => new Date(Date.parse(NOW) - mins * 60000).toISOString();
 export const ADMIN_EMAIL = "admin@example.org";
 export const OTHER_ADMIN_EMAIL = "helper@example.org";
 export const FACILITATOR_EMAIL = "esha.specimen@example.org";
+export const ASSESSOR_EMAIL = "asha.assessor@example.org";
 export const BUFFER = 15;
 
 export const LIC = { z1: "lic-01", z2: "lic-02", z3: "lic-03", z4: "lic-04" };
@@ -284,11 +285,14 @@ export function buildFixtures() {
     photo_url: null, status: "in_training", application_response_id: `app-${id}`, application_submitted_at: ago(20000),
     application: [{ label: "Why do you want to facilitate?", type: "TEXTAREA", value: "To share the Gita with friends." }],
     intro_attended_at: null, intro_marked_by: null, closing_attended_at: null, closing_marked_by: null,
-    assessment: {}, feedback: null, decided_at: null, decided_by: null, final_email_at: null, final_email_status: null, notes: null, facilitator_id: null, other_emails: [], ...o,
+    assessment: {}, feedback: null, decided_at: null, decided_by: null, final_email_at: null, final_email_status: null, notes: null, facilitator_id: null, other_emails: [],
+    assigned_to: null, assigned_at: null, assigned_by: null, ...o,
   });
   const trainees = [
     trainee("gauri.trainee", { first_name: "Gauri", last_name: "Testperson", phone: "+44 7700 900111", intro_attended_at: ago(15000), intro_marked_by: ADMIN_EMAIL }),
-    trainee("hari.trainee", { first_name: "Hari", last_name: "Sample", initiated_name: "Haridas", intro_attended_at: ago(15000), closing_attended_at: ago(2000), intro_marked_by: ADMIN_EMAIL, closing_marked_by: ADMIN_EMAIL }),
+    // Hari is assigned to the assessor.
+    trainee("hari.trainee", { first_name: "Hari", last_name: "Sample", initiated_name: "Haridas", intro_attended_at: ago(15000), closing_attended_at: ago(2000), intro_marked_by: ADMIN_EMAIL, closing_marked_by: ADMIN_EMAIL,
+      assigned_to: ASSESSOR_EMAIL, assigned_at: ago(1000), assigned_by: ADMIN_EMAIL }),
     trainee("isha.trainee", { first_name: "Isha", last_name: "Placeholder", status: "applied" }),
     trainee("jay.trainee", { first_name: "Jay", last_name: "Fictional", status: "certified", decided_at: ago(1000), decided_by: ADMIN_EMAIL, final_email_at: ago(1000), final_email_status: "sent" }),
   ];
@@ -315,8 +319,10 @@ export function buildFixtures() {
   trainees[3].intro_attended_at = ago(15000);
   trainees[3].closing_attended_at = ago(2000);
 
+  const assessors = [{ email: ASSESSOR_EMAIL, name: "Asha Assessor", created_at: ago(5000), created_by: ADMIN_EMAIL }];
+
   return {
-    trainees, training_submissions, training_forms, training_sends,
+    trainees, training_submissions, training_forms, training_sends, assessors,
     licences, facilitators, circles, circle_cofacilitators, settings: [settings], change_requests, admin_emails,
     audit_log, email_log, email_templates: [], attendance_sessions, attendance, framer_items, framer_preview,
   };
