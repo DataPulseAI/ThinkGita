@@ -1,0 +1,116 @@
+export const facilitatorGuides = [
+  {
+    id: "fac-start-meeting",
+    section: "Your circle",
+    audience: ["facilitator"],
+    icon: "video",
+    title: "Find your circle's link and host key, and start the meeting",
+    summary: "Where to find your join link, meeting ID, passcode and host key, what to share with your group, and how to claim host in Zoom.",
+    related: ["fac-request-change", "tour-facilitator"],
+    steps: [
+      {
+        title: "Open your circle",
+        body: "Sign in and you land on **Your circles**. Each card shows the circle's name and when it runs, for example \"Every Monday, 19:00 to 20:15 (London time)\".",
+        shot: "portal-1-portal",
+        alt: "Your circles",
+      },
+      {
+        title: "Find your details",
+        body: "Once the team has approved your circle you will see your **Join link**, **Meeting ID** and **Passcode**, each with a **Copy** button. Until then the card says your Zoom link will appear when the team approves the circle, and you will get an email.",
+        shot: "portal-2-details",
+        alt: "Join link, meeting ID and passcode with copy buttons",
+      },
+      {
+        title: "Show your host key",
+        body: "Your **Host key** is hidden. Click **Show** to reveal it, and **Copy** to copy it. It is private to you. Never share it or post it in the group.",
+        shot: "portal-3-hostkey",
+        alt: "The host key with a Show button",
+        note: "The host key works for every meeting on your Zoom licence. If a circle is handed over or ends, the team can give the licence a new key.",
+      },
+      {
+        title: "Share with your group",
+        body: "Click **Copy for my group** and paste it into your WhatsApp group. It leaves out your host key, so it is safe to share. **Copy all my details** is for you only because it includes the host key.",
+        shot: "portal-4-copy",
+        alt: "Copy all my details and Copy for my group",
+      },
+      {
+        title: "Start your circle",
+        body: "A few minutes before the start:\n\n1. Open the join link.\n2. In Zoom, open **Participants** and choose **Claim host**.\n3. Enter the host key. You now have host controls.\n\nThe link is the same every week for the whole term, so pin it in your group.",
+        shot: "portal-5-steps",
+        alt: "The three steps to claim host",
+      },
+      {
+        title: "Other links",
+        body: "Below your details, **Links** can show your **WhatsApp group**, the **Participant sign-up link** (share this exact one so sign-ups are linked to your circle), the **YouTube playlist** and the **Google Drive folder**. A link only appears once the team has added it.",
+        shot: "portal-6-links",
+        alt: "The Links section",
+      },
+    ],
+  },
+  {
+    id: "fac-request-change",
+    section: "Your circle",
+    audience: ["facilitator"],
+    icon: "edit",
+    title: "Ask for a change to your circle",
+    summary: "Ask the team to change your day or time, start date, hand your circle over, pause or stop it, and follow what happens.",
+    related: ["fac-start-meeting", "fac-details"],
+    steps: [
+      {
+        title: "Open the request form",
+        body: "At the bottom of your circle, click **Need to change something?** A short form opens.",
+        shot: "facreq-1-link",
+        alt: "The Need to change something link",
+      },
+      {
+        title: "Choose what you need",
+        body: "Under **What do you need?** pick one: **Change day or time**, **Change start date**, **Pause for a few weeks**, **Hand over to another facilitator**, **Stop the circle** or **Something else**.",
+        shot: "facreq-2-type",
+        alt: "The request type list",
+      },
+      {
+        title: "Fill in the details",
+        body: "The form asks for what that request needs, for example a **New day**, a **New start time** and the date it should start from. For a hand-over, enter the other facilitator's name and email. A line at the bottom, \"We'll send: ...\", shows exactly what will be sent. You can add a note under **Anything else?**",
+        shot: "facreq-3-details",
+        alt: "A change day or time request filled in",
+      },
+      {
+        title: "Send it and follow it",
+        body: "Click **Send request**. The team gets it straight away. Under **Your requests** on your circle you will see it as **Waiting for the team** until it is **Done** or **Closed**. If your time changes, your Zoom link stays the same and you are emailed the new details.",
+        shot: "facreq-4-history",
+        alt: "Your requests with their status",
+      },
+    ],
+  },
+  {
+    id: "fac-details",
+    section: "Your circle",
+    audience: ["facilitator"],
+    icon: "user",
+    title: "Update your details and photo",
+    summary: "Keep your name, phone and photo up to date. They are used in emails and on the website.",
+    related: ["fac-request-change", "sign-in"],
+    steps: [
+      {
+        title: "Open Edit my details",
+        body: "On **Your circles**, click **Edit my details**. A form opens with your current information.",
+        shot: "facdet-1-button",
+        alt: "The Edit my details button",
+      },
+      {
+        title: "Change what you need",
+        body: "You can change your **Initiated name** (if you have one), **First name**, **Last name** and **Phone** (with country code). Your email is how you sign in, so to change it, ask the team.",
+        shot: "facdet-2-form",
+        alt: "The details form",
+      },
+      {
+        title: "Add or replace your photo",
+        body: "Use **Upload a photo** to choose a picture, or **Remove** to take it away. A clear head and shoulders photo works best. If your circle is listed on the website, this is the picture visitors see.",
+      },
+      {
+        title: "Save",
+        body: "Click **Save**. The button is greyed out until something has changed. **Cancel** closes the form without saving.",
+      },
+    ],
+  },
+];
