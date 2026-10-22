@@ -4,6 +4,7 @@ import Admin from "./Admin.jsx";
 import Facilitator from "./Facilitator.jsx";
 import { AssessorPage } from "./TrainingPage.jsx";
 import { ThemeToggle, getTheme } from "./ui.jsx";
+import { HelpPage, HelpButton, useHelpRoute } from "./HelpPage.jsx";
 
 const LOGO_WHITE = `${import.meta.env.BASE_URL}logo-white.png`;
 const LOGO_TEAL = `${import.meta.env.BASE_URL}logo-teal.png`;
@@ -14,6 +15,8 @@ export default function App() {
   const [assessor, setAssessor] = useState(null); // false, or { fac: has a facilitator profile too }
   const [asFacilitator, setAsFacilitator] = useState(false);
   const [adminFac, setAdminFac] = useState(false); // an admin who also hosts or co-hosts circles
+  const [isSuper, setIsSuper] = useState(false);
+  const help = useHelpRoute();
   // "setup" when someone arrives from an invite or password-reset email: ask them to choose a password.
   const [pwOpen, setPwOpen] = useState(window.__authLinkType ? "setup" : false);
 
@@ -32,10 +35,11 @@ export default function App() {
     if (!session) { setIsAdmin(null); setAssessor(null); return; }
     const email = session.user.email.toLowerCase();
     (async () => {
-      const { data } = await supabase.from("admin_emails").select("email").eq("email", email).maybeSingle();
+      const { data } = await supabase.from("admin_emails").select("email, is_super").eq("email", email).maybeSingle();
       if (data) {
         const { data: f } = await supabase.from("facilitators").select("id").eq("email", email).maybeSingle();
         setAdminFac(Boolean(f));
+        setIsSuper(Boolean(data.is_super));
         setAssessor(false);
         setIsAdmin(true);
         return;
@@ -59,6 +63,12 @@ export default function App() {
   if (session === undefined || (session && (isAdmin === null || assessor === null))) return <div className="center muted">Loading…</div>;
   if (!session) return <Login />;
 
+  // What this person can do decides which guides they see: admins (and super admins), assessors, facilitators.
+  const audiences = asFacilitator || (!isAdmin && !assessor)
+    ? { keys: ["facilitator"], label: "a facilitator" }
+    : isAdmin ? { keys: isSuper ? ["admin", "super"] : ["admin"], label: isSuper ? "a super admin" : "an admin" }
+    : { keys: ["assessor"], label: "a candidate assessor" };
+
   return (
     <div className="shell">
       <header className="topbar">
@@ -74,12 +84,14 @@ export default function App() {
               {asFacilitator ? (isAdmin ? "Admin view" : "Assessor view") : "Facilitator portal"}
             </button>
           )}
+          <HelpButton />
           <ThemeToggle />
           <button className="ghost subtle" onClick={() => setPwOpen(true)}>Change password</button>
           <button className="ghost" onClick={() => supabase.auth.signOut()}>Sign out</button>
         </div>
       </header>
-      {asFacilitator ? <Facilitator email={session.user.email} />
+      {help.open ? <HelpPage id={help.id} audiences={audiences} />
+        : asFacilitator ? <Facilitator email={session.user.email} />
         : isAdmin ? <Admin />
         : assessor ? <AssessorPage email={session.user.email} />
         : <Facilitator email={session.user.email} />}

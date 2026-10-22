@@ -27,21 +27,7 @@ test.describe("Overview", () => {
     await expect(page.getByRole("heading", { name: "Queue" })).toBeVisible();
   });
 
-  test("the setup checklist lists what is left before going live", async ({ page }) => {
-    await signIn(page);
-    const list = page.locator("section.card", { has: page.getByRole("heading", { name: "Before going live" }) });
-    await expect(list).toContainText("2 of 4 done");
-    await expect(list.locator("li:not(.done)")).toHaveCount(2);
-    await expect(list.locator("li:not(.done)").first()).toContainText("Connect Zoom licences (2 of 3 have a Zoom user and host key)");
-    await expect(list.locator("li.done", { hasText: "Turn off mock licences" })).toBeVisible();
-    await expect(list.locator("li:not(.done)", { hasText: "Set the term dates" })).toBeVisible();
-    await list.getByRole("button", { name: "Go to Settings" }).click();
-    await expect(page.getByRole("heading", { name: "Scheduling rules" })).toBeVisible();
-  });
-
-  test("the checklist is hidden once everything is done", async ({ page, mock }) => {
-    mock.db.licences.find((l) => l.label === "Zoom 03").host_key = "333333";
-    Object.assign(mock.db.settings[0], { term_start: "2026-09-01", term_end: "2027-07-31" });
+  test("there is no \"Before going live\" box on the overview", async ({ page }) => {
     await signIn(page);
     await expect(page.getByRole("heading", { name: "Week at a glance" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Before going live" })).toHaveCount(0);

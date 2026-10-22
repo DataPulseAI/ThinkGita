@@ -421,7 +421,6 @@ function Overview({ data, onDay, onTab, go }) {
           <button className="link" onClick={() => (go ? go("EmailLog", "failed") : onTab("EmailLog"))}>See which</button>
         </div>
       )}
-      <SetupChecklist data={data} onTab={onTab} />
 
       <section className="card">
         <div className="card-head">
@@ -571,61 +570,6 @@ function HourGrid({ circles, licences, onDay }) {
         </tbody>
       </table>
     </div>
-  );
-}
-
-// "Before going live" checklist. Hidden once everything is done.
-function SetupChecklist({ data, onTab }) {
-  const { licences, circles, settings } = data;
-  const active = licences.filter((l) => l.active);
-  const real = active.filter((l) => !l.is_mock);
-  const connected = real.filter((l) => l.zoom_user_email && l.host_key).length;
-  const items = [
-    {
-      done: real.length > 0 && connected === real.length,
-      what: `Connect Zoom licences (${connected} of ${real.length} have a Zoom user and host key)`,
-      how: "Zoom, Licences: Sync from Zoom, then Set key on each licence that will host circles.",
-      tab: "Licences",
-    },
-    {
-      done: !active.some((l) => l.is_mock),
-      what: "Turn off mock licences",
-      how: "Mock licences create fake Zoom links. Untick Mock under Zoom, Licences before going live.",
-      tab: "Licences",
-    },
-    {
-      done: Boolean(settings.term_start && settings.term_end),
-      what: "Set the term dates",
-      how: "Setup, Settings: meetings repeat weekly between these dates.",
-      tab: "Settings",
-    },
-    {
-      done: !circles.some((c) => c.is_demo),
-      what: "Clear the demo data",
-      how: "Setup, Settings: Clear demo data.",
-      tab: "Settings",
-    },
-  ];
-  const left = items.filter((i) => !i.done).length;
-  if (!left) return null;
-  return (
-    <section className="card">
-      <div className="card-head">
-        <h2>Before going live</h2>
-        <span className="muted small">{items.length - left} of {items.length} done</span>
-      </div>
-      <ul className="checklist">
-        {items.map((i) => (
-          <li key={i.what} className={i.done ? "done" : ""}>
-            <span className="tick">{i.done ? "✓" : ""}</span>
-            <span>
-              <span className="what">{i.what}</span>
-              {!i.done && <span className="how">{i.how} <button className="link small" onClick={() => onTab(i.tab)}>Go to {i.tab}</button></span>}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </section>
   );
 }
 
