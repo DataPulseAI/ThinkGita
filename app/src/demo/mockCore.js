@@ -1,0 +1,281 @@
+// The fake Supabase backend's logic, shared by the end-to-end tests (tests/e2e/support/mock-backend.js answers Playwright
+// routes with it) and the demo build (src/demo/install.js answers the page's own fetch calls with it). It works on an
+// in-memory copy of tests/fixtures/data.js: nothing ever reaches the real database, Zoom, email, Tally or Framer.
+// Browser-safe: no Node APIs here.
+
+export const REPLY = Symbol("reply");
+export const reply = (status, body, headers = {}) => ({ [REPLY]: true, status, body, headers });
+// An error in the shape both PostgREST (message) and the edge functions (error) use.
+export const fail = (message, status = 400) => reply(status, { message, error: message, code: "P0001", details: null, hint: null });
+
+const RESERVED = new Set(["select", "order", "limit", "offset", "on_conflict", "columns"]);
+
+// PostgREST filters used by the app: eq, neq, is, in, not.in, like, gt/gte/lt/lte.
+function matches(row, query) {
+  for (const [col, raw] of Object.entries(query)) {
+    if (RESERVED.has(col)) continue;
+    const v = row[col];
+    const s = v == null ? null : String(v);
+    let m;
+    if ((m = raw.match(/^not\.in\.\((.*)\)$/))) { if (m[1].split(",").includes(s)) return false; }
+    else if ((m = raw.match(/^in\.\((.*)\)$/))) { if (!m[1].split(",").includes(s)) return false; }
+    else if ((m = raw.match(/^eq\.(.*)$/s))) { if (s !== m[1]) return false; }
+    else if ((m = raw.match(/^neq\.(.*)$/s))) { if (s === m[1]) return false; }
+    else if ((m = raw.match(/^is\.(.*)$/))) { if (m[1] === "null" ? v != null : String(v) !== m[1]) return false; }
+    else if ((m = raw.match(/^like\.(.*)$/))) {
+      const re = new RegExp(`^${m[1].replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/[*%]/g, ".*")}$`);
+      if (!re.test(s ?? "")) return false;
+    } else if ((m = raw.match(/^(gt|gte|lt|lte)\.(.*)$/))) {
+      if (s == null) return false;
+      const [a, b] = [s, m[2]];
+      if (m[1] === "gt" && !(a > b)) return false;
+      if (m[1] === "gte" && !(a >= b)) return false;
+      if (m[1] === "lt" && !(a < b)) return false;
+      if (m[1] === "lte" && !(a <= b)) return false;
+    }
+  }
+  return true;
+}
+
+function sortRows(rows, order) {
+  if (!order) return rows;
+  const keys = order.split(",").map((p) => { const [col, dir] = p.split("."); return { col, desc: dir === "desc" }; });
+  return [...rows].sort((a, b) => {
+    for (const { col, desc } of keys) {
+      const x = a[col], y = b[col];
+      if (x === y) continue;
+      if (x == null) return 1;
+      if (y == null) return -1;
+      const c = x < y ? -1 : 1;
+      return desc ? -c : c;
+    }
+    return 0;
+  });
+}
+
+// Parse one request to *.supabase.co into the shape the handlers use.
+export function parseRequest(urlString, method, rawBody, accept = "") {
+  const url = new URL(urlString);
+  let body = null;
+  try { body = rawBody ? JSON.parse(rawBody) : null; } catch { body = rawBody; }
+  const query = Object.fromEntries(url.searchParams.entries());
+  const p = url.pathname;
+  if (p.startsWith("/rest/v1/rpc/")) return { kind: "rpc", name: p.slice("/rest/v1/rpc/".length), method, query, body, url: urlString };
+  if (p.startsWith("/rest/v1/")) return { kind: "rest", table: p.slice("/rest/v1/".length), method, query, body, single: accept.includes("vnd.pgrst.object"), url: urlString };
+  if (p.startsWith("/functions/v1/")) return { kind: "fn", name: p.slice("/functions/v1/".length), method, body, url: urlString };
+  if (p.startsWith("/auth/v1/")) return { kind: "auth", name: p.slice("/auth/v1/".length), method, query, body, url: urlString };
+  if (p.startsWith("/storage/v1/object/")) return { kind: "storage", path: p.slice("/storage/v1/object/".length), method, url: urlString };
+  return { kind: "other", method, url: urlString, path: p };
+}
+
+// ctx: { db, user: { email }, handlers: Map, unhandled: [] }. handle(req, mockRef) returns { status, headers, body, image }.
+export function createMockCore(ctx) {
+  ctx.unhandled ??= [];
+  ctx.handlers ??= new Map();
+  const db = ctx.db;
+  let seq = 1000;
+
+  const lic = (id) => { const l = db.licences.find((x) => x.id === id); return l ? { label: l.label, is_mock: l.is_mock, host_key: l.host_key } : null; };
+  const fac = (id) => db.facilitators.find((f) => f.id === id) ?? null;
+  // The joins the app asks for in its selects.
+  function expand(table, rows, select = "") {
+    if (table === "circles" && /facilitator:/.test(select)) {
+      return rows.map((c) => ({
+        ...c,
+        facilitator: fac(c.facilitator_id),
+        cofacilitators: db.circle_cofacilitators.filter((x) => x.circle_id === c.id).map((x) => ({ facilitator: fac(x.facilitator_id) })),
+        licence: lic(c.licence_id),
+      }));
+    }
+    if (table === "change_requests" && /circle:/.test(select)) {
+      return rows.map((r) => ({ ...r, circle: { name: db.circles.find((c) => c.id === r.circle_id)?.name ?? null } }));
+    }
+    return rows;
+  }
+
+  function myCircles() {
+    const me = db.facilitators.find((f) => f.email === ctx.user.email);
+    const s = db.settings[0];
+    return sortRows(db.circles.filter((c) => me && (c.facilitator_id === me.id || db.circle_cofacilitators.some((x) => x.circle_id === c.id && x.facilitator_id === me.id))), "weekday.asc,start_time.asc")
+      .map((c) => ({
+        id: c.id, name: c.name, weekday: c.weekday, start_time: c.start_time, duration_min: c.duration_min, timezone: c.timezone, status: c.status,
+        join_url: c.join_url, zoom_meeting_id: c.zoom_meeting_id, passcode: c.passcode, host_key: c.status === "live" ? lic(c.licence_id)?.host_key ?? null : null,
+        starts_on: c.starts_on, ends_on: c.ends_on, whatsapp_group_link: c.whatsapp_group_link,
+        participant_signup_link: c.participant_signup_link ?? s.participant_signup_link?.replace("{circle_code}", c.id.slice(0, 8)) ?? null,
+        youtube_playlist_link: c.youtube_playlist_link ?? s.youtube_playlist_link, drive_folder_link: c.drive_folder_link ?? s.drive_folder_link,
+      }));
+  }
+
+  // Default answers for each kind of request.
+  function restDefault(req) {
+    const { method, table, query, body, single } = req;
+    if (!(table in db)) { ctx.unhandled.push(`${method} ${table}`); db[table] = []; }
+    const rows = db[table];
+    const hit = rows.filter((r) => matches(r, query));
+    const out = (list) => {
+      if (single) return list.length === 1 ? list[0] : reply(406, { code: "PGRST116", message: "JSON object requested, multiple (or no) rows returned" });
+      return query.select || method === "GET" ? list : reply(204, null);
+    };
+    if (method === "HEAD") return reply(200, null, { "content-range": hit.length ? `0-${hit.length - 1}/${hit.length}` : "*/0" });
+    if (method === "GET") {
+      let list = sortRows(hit, query.order);
+      const offset = Number(query.offset ?? 0);
+      if (query.limit) list = list.slice(offset, offset + Number(query.limit));
+      return out(expand(table, list, query.select));
+    }
+    if (method === "PATCH") {
+      for (const r of hit) Object.assign(r, body);
+      return out(expand(table, hit, query.select));
+    }
+    if (method === "DELETE") {
+      db[table] = rows.filter((r) => !hit.includes(r));
+      return out(hit);
+    }
+    if (method === "POST") {
+      const dbDefaults = table === "change_requests" ? { status: "open", requested_by: ctx.user.email } : {};
+      const items = (Array.isArray(body) ? body : [body]).map((b) => ({ ...(table === "email_templates" || table === "admin_emails" || table === "assessors" ? {} : { id: `${table}-${++seq}` }), created_at: new Date().toISOString(), ...dbDefaults, ...b }));
+      for (const it of items) {
+        const key = table === "email_templates" ? "key" : table === "admin_emails" || table === "assessors" ? "email" : "id";
+        const i = rows.findIndex((r) => r[key] === it[key]);
+        if (i >= 0) rows[i] = { ...rows[i], ...it }; else rows.push(it);
+      }
+      return out(items);
+    }
+    return reply(405, { message: `mock: ${method} not supported` });
+  }
+
+  function rpcDefault({ name, body }) {
+    switch (name) {
+      case "my_circles_v2": return myCircles();
+      case "set_facilitator_verified": {
+        const f = db.facilitators.find((x) => x.id === body.p_facilitator);
+        if (!f) return reply(400, { code: "P0001", message: "not_found: no such facilitator" });
+        Object.assign(f, body.p_verified ? { verified_at: f.verified_at ?? new Date().toISOString(), verified_by: f.verified_by ?? ctx.user.email } : { verified_at: null, verified_by: null });
+        return f;
+      }
+      case "update_my_profile": {
+        const me = db.facilitators.find((f) => f.email === ctx.user.email);
+        if (!me) return reply(400, { code: "P0001", message: "not_a_facilitator: no facilitator profile for this sign-in" });
+        const v = (x) => (String(x ?? "").trim() || null);
+        Object.assign(me, { initiated_name: v(body.p_initiated_name), first_name: v(body.p_first_name), last_name: v(body.p_last_name), phone: v(body.p_phone), photo_url: v(body.p_photo_url) });
+        return me;
+      }
+      case "allocate_circle": {
+        const c = db.circles.find((x) => x.id === body.p_circle);
+        if (c && c.status === "pending" && !c.licence_id) c.licence_id = db.licences[0].id;
+        return { status: c?.status === "conflict" ? "conflict" : "pending" };
+      }
+      case "suggest_slots": case "slot_holders": case "free_licences_for_circle": return [];
+      case "recheck_conflicts": return 0;
+      case "save_settings": return null;
+      case "is_assessor": return (db.assessors ?? []).some((a) => a.email === ctx.user.email);
+      case "save_assessment": {
+        const t = db.trainees.find((x) => x.id === body.p_trainee);
+        const admin = db.admin_emails.some((a) => a.email === ctx.user.email);
+        if (!t || (!admin && t.assigned_to !== ctx.user.email)) return reply(400, { code: "P0001", message: "not_allowed: this trainee is not assigned to you" });
+        Object.assign(t, { assessment: body.p_assessment ?? {}, feedback: body.p_feedback });
+        return t;
+      }
+      default: ctx.unhandled.push(`rpc ${name}`); return null;
+    }
+  }
+
+  function fnDefault({ name, body }) {
+    const a = body?.action;
+    if (name === "framer-sync") {
+      if (a === "snapshot") return db.framer_items;
+      if (a === "preview") return db.framer_preview;
+      if (a === "set_item") return { ok: true, published: true };
+      if (a === "publish") return { published: true };
+      return { created: 0, updated: 0, hidden: 0, skipped: 0, errors: [], published: false };
+    }
+    if (name === "provision-circle") {
+      const c = db.circles.find((x) => x.id === body.circle_id);
+      switch (a) {
+        case "provision":
+          if (c) c.status = "live";
+          return { ok: true, mock: false, email: body.notify === false ? "not sent (approved without email)" : "sent", invite: body.notify === false ? undefined : "invited" };
+        case "cancel": if (c) c.status = "ended"; return { ok: true };
+        case "move_licence": { const l = db.licences.find((x) => x.id === body.licence_id); if (c) c.licence_id = body.licence_id; return { licence: l?.label, email: "sent" }; }
+        case "reschedule": if (c) Object.assign(c, body.patch); return { email: "sent" };
+        case "resend": case "handover": return { email: "sent" };
+        case "test_email": return { to: ctx.user.email };
+        case "invite_admin": return { invite: "invited" };
+        case "sync_attendance": return { sessions_added: 0, more: false, problems: [] };
+        case "list_zoom_meetings": return { accounts: [] };
+        case "set_host_key": return { label: "Zoom 03", host_key: "654321" };
+        case "sync_licences": return { licensed: 3, zoom_users: 4, results: [] };
+        default: return {};
+      }
+    }
+    if (name === "training") {
+      if (a === "probe") return { has_key: true, forms: [] };
+      if (a === "sync") return { forms: { agreement: { found: 3, new: 1, unmatched: 0 } }, problems: [] };
+      if (a === "send_form") {
+        const results = (body.emails ?? []).map((e) => {
+          const t = db.trainees.find((x) => x.id === e.trainee_id);
+          const status = t ? "sent" : "failed";
+          (db.training_sends ??= []).push({ id: `snd-${(db.training_sends.length + 1)}-${e.trainee_id}`, created_at: new Date().toISOString(), trainee_id: e.trainee_id,
+            form_key: e.form_key, to_email: t?.email ?? "", sent_by: ctx.user.email, status, error: t ? null : "unknown trainee" });
+          return { trainee_id: e.trainee_id, form_key: e.form_key, status, ...(t ? {} : { error: "unknown trainee" }) };
+        });
+        return { results };
+      }
+      if (a === "file") {
+        const sub = db.training_submissions.find((x) => x.response_id === body.response_id);
+        // Tally hands out a fresh link each time: mark it so tests can tell.
+        return { answers: (sub?.fields ?? []).map((f) => (f.files ? { ...f, files: f.files.map((x) => ({ ...x, url: `${x.url}?fresh=1` })) } : f)) };
+      }
+      if (a === "invite_assessor") return { invite: (db.assessors ?? []).some((x) => x.email === body.email) ? "invited" : "invite failed: not an assessor" };
+      if (a === "decide") {
+        const t = db.trainees.find((x) => x.id === body.trainee_id);
+        if (t) Object.assign(t, { status: body.decision, decided_at: new Date().toISOString(), decided_by: ctx.user.email, final_email_status: body.send ? "sent" : "not sent", final_email_at: body.send ? new Date().toISOString() : null });
+        return { trainee: t, email: body.send ? "sent" : "not sent" };
+      }
+      return {};
+    }
+    ctx.unhandled.push(`fn ${name}`);
+    return {};
+  }
+
+  async function answer(req, fallback, mockRef) {
+    const keys = req.kind === "fn" ? [`fn ${req.name} ${req.body?.action ?? ""}`.trim(), `fn ${req.name}`]
+      : req.kind === "rpc" ? [`rpc ${req.name}`]
+      : req.kind === "auth" ? [`auth ${req.name}`]
+      : [`${req.method} ${req.table}`];
+    let res;
+    for (const k of keys) {
+      const h = ctx.handlers.get(k);
+      if (h === undefined) continue;
+      res = typeof h === "function" ? await h(req, mockRef) : h;
+      if (res !== undefined) break;
+    }
+    if (res === undefined) res = fallback(req);
+    return res && res[REPLY] ? res : reply(200, res);
+  }
+
+  async function handle(req, mockRef) {
+    if (req.kind === "rest") return answer(req, restDefault, mockRef);
+    if (req.kind === "rpc") return answer(req, rpcDefault, mockRef);
+    if (req.kind === "fn") return answer(req, fnDefault, mockRef);
+    if (req.kind === "storage") {
+      // Public photo URLs load as a tiny PNG; uploads succeed unless a handler says otherwise.
+      if (req.method === "GET") return { status: 200, image: true, headers: {} };
+      const h = ctx.handlers.get(`storage ${req.method}`);
+      const res = h === undefined ? { Key: req.path, Id: `obj-${++seq}` } : typeof h === "function" ? await h(req, mockRef) : h;
+      return res && res[REPLY] ? res : reply(200, res);
+    }
+    if (req.kind === "auth") {
+      return answer(req, ({ name }) => {
+        if (name === "logout") return reply(204, null);
+        if (name === "user") return { id: "user-1", email: ctx.user.email, aud: "authenticated", role: "authenticated" };
+        ctx.unhandled.push(`auth ${name}`);
+        return reply(400, { error: "unsupported", error_description: "mock: not supported" });
+      }, mockRef);
+    }
+    ctx.unhandled.push(`${req.method} ${req.path ?? req.url}`);
+    return reply(404, null);
+  }
+
+  return { handle };
+}

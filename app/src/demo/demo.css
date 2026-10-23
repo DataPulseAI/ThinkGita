@@ -1,0 +1,5 @@
+.demo-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px;
+  background: #e8775a; color: #fff; font-size: 13px; line-height: 1.4; }
+.demo-bar b { letter-spacing: .04em; text-transform: uppercase; margin-right: 4px; }
+.demo-role { display: inline-flex; white-space: nowrap; align-items: center; gap: 8px; font-weight: 600; }
+.demo-role select { font: inherit; font-weight: 500; padding: 3px 6px; border-radius: 6px; border: 0; color: #1f2a30; }

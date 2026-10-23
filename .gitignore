@@ -8,3 +8,5 @@ supabase/.temp/
 test-results/
 playwright-report/
 app/tests/help/out/
+dist-demo/
+!.env.demo

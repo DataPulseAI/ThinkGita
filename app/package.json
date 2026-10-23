@@ -12,7 +12,8 @@
     "test:e2e": "playwright test",
     "test:db": "node scripts/test-db.mjs",
     "test:all": "vitest run && playwright test",
-    "help:shots": "vite build && playwright test -c playwright.help.config.js"
+    "help:shots": "vite build && playwright test -c playwright.help.config.js",
+    "build:demo": "vite build --mode demo --outDir dist-demo"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
