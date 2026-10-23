@@ -1,5 +1,7 @@
-.demo-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; padding: 8px 16px;
-  background: #e8775a; color: #fff; font-size: 13px; line-height: 1.4; }
-.demo-bar b { letter-spacing: .04em; text-transform: uppercase; margin-right: 4px; }
-.demo-role { display: inline-flex; white-space: nowrap; align-items: center; gap: 8px; font-weight: 600; }
-.demo-role select { font: inherit; font-weight: 500; padding: 3px 6px; border-radius: 6px; border: 0; color: #1f2a30; }
+/* A quiet strip: the app's soft coral tint, its own text colours, and both themes through the app's tokens. */
+.demo-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 16px;
+  padding: 5px 16px; background: var(--accent-soft); color: var(--accent-text); border-bottom: 1px solid var(--line);
+  font-size: 12.5px; line-height: 1.4; }
+.demo-bar b { font-weight: 700; letter-spacing: .06em; text-transform: uppercase; font-size: 11px; margin-right: 6px; }
+.demo-role { display: inline-flex; white-space: nowrap; align-items: center; gap: 6px; font-weight: 500; }
+.demo-role select { font: inherit; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
