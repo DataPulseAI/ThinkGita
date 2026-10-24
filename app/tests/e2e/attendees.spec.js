@@ -91,17 +91,28 @@ test.describe("Attendees", () => {
     await expect(box).toBeChecked();
   });
 
-  test("facilitators see their own circles' attendees, without dates of birth", async ({ page, mock }) => {
+  test("facilitators see their own circles' attendees in their own pane, without dates of birth", async ({ page, mock }) => {
     await signIn(page, { role: "facilitator" });
+    const tabs = page.getByRole("tablist", { name: "Portal view" });
+    await expect(tabs.getByRole("tab", { name: /Attendees/ })).toContainText("3");
+    // Each live circle card has a short line that opens the pane for that circle.
     const card = page.locator("main section.card", { has: page.locator("h2", { hasText: NAMES.c01 }) });
-    const att = card.locator(".fac-att");
-    await expect(att.locator(".fac-att-count")).toHaveText("3");
-    await expect(att.locator(".fac-att-row")).toHaveCount(3);
-    await att.getByRole("button", { name: /Olu Example/ }).click();
-    await expect(att).toContainText("Never read it but heard of it");
-    await expect(att).not.toContainText("Date of birth");
-    await expect(att.getByRole("link", { name: "Email" })).toHaveAttribute("href", "mailto:olu.example@example.org");
-    await expect(att.getByRole("link", { name: "WhatsApp" })).toHaveAttribute("href", "https://wa.me/447700900103");
+    await card.getByRole("button", { name: "See attendees" }).click();
+    const pane = page.getByRole("region", { name: "Attendees" });
+    await expect(pane.locator(".fac-att-row")).toHaveCount(3);
+    await expect(pane.getByLabel("Circle")).toHaveValue("c01");
+    await pane.getByRole("button", { name: /Olu Example/ }).click();
+    await expect(pane).toContainText("Never read it but heard of it");
+    await expect(pane).not.toContainText("Date of birth");
+    await expect(pane.getByRole("link", { name: "Email" })).toHaveAttribute("href", "mailto:olu.example@example.org");
+    await expect(pane.getByRole("link", { name: "WhatsApp" })).toHaveAttribute("href", "https://wa.me/447700900103");
+    await pane.getByLabel("Search attendees").fill("bristol");
+    await expect(pane.locator(".fac-att-row")).toHaveCount(1);
     expect(mock.rpc("my_circle_signups")).toHaveLength(1);
+
+    // Back to the circles.
+    await tabs.getByRole("tab", { name: "Your circles" }).click();
+    await expect(page.getByRole("heading", { name: "Your circles" })).toBeVisible();
   });
+
 });

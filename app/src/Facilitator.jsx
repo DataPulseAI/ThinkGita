@@ -11,6 +11,10 @@ export default function Facilitator({ email }) {
   const [parts, setParts] = useState({});
   const [signups, setSignups] = useState([]);
   const [error, setError] = useState(null);
+  // Top toggle: the circle cards, or the attendee list (optionally for one circle).
+  const [view, setView] = useState("circles");
+  const [attCircle, setAttCircle] = useState("all");
+  const showAttendees = (id = "all") => { setAttCircle(id); setView("attendees"); window.scrollTo(0, 0); };
 
   const load = async () => {
     const [c, r, p, s] = await Promise.all([
@@ -29,8 +33,22 @@ export default function Facilitator({ email }) {
 
   if (!circles) return <div className="center muted">Loading…</div>;
 
+  const VIEWS = [["circles", "Your circles", 0], ["attendees", "Attendees", signups.length]];
   return (
     <main className="content narrow">
+      {circles.length > 0 && (
+        <div className="seg fac-views" role="tablist" aria-label="Portal view">
+          {VIEWS.map(([k, label, n]) => (
+            <button key={k} type="button" role="tab" aria-selected={view === k} className={view === k ? "active" : ""}
+              onClick={() => (k === "attendees" ? showAttendees("all") : setView(k))}>
+              {label}{n > 0 && <span className="fac-att-count fac-tab-n">{n}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+      {view === "attendees" ? (
+        <AttendeesPane circles={circles} signups={signups} circle={attCircle} setCircle={setAttCircle} />
+      ) : (<>
       <Profile email={email} />
       <h1>Your circles</h1>
       {error && <p className="error">{error}</p>}
@@ -42,8 +60,9 @@ export default function Facilitator({ email }) {
       )}
       {circles.map((c) => (
         <CircleCard key={c.id} c={c} parts={parts[c.id]} signups={signups.filter((s) => s.circle_id === c.id)}
-          requests={requests.filter((r) => r.circle_id === c.id)} onSent={load} />
+          requests={requests.filter((r) => r.circle_id === c.id)} onSent={load} onAttendees={() => showAttendees(c.id)} />
       ))}
+      </>)}
     </main>
   );
 }
@@ -75,7 +94,7 @@ function CircleLinks({ c, parts }) {
   );
 }
 
-function CircleCard({ c, parts, signups, requests, onSent }) {
+function CircleCard({ c, parts, signups, requests, onSent, onAttendees }) {
   const live = c.status === "live";
   const mock = live && /mock=1/.test(c.join_url ?? "");
   return (
@@ -124,7 +143,12 @@ function CircleCard({ c, parts, signups, requests, onSent }) {
         <p className="muted">Your Zoom link will appear here once the team approves your circle.</p>
       )}
 
-      {["live", "paused", "ended"].includes(c.status) && <Attendees circle={c} signups={signups} />}
+      {["live", "paused", "ended"].includes(c.status) && (
+        <div className="details fac-att-line">
+          <span><span className="section-title">Attendees</span> <span className="fac-att-count">{signups.length}</span></span>
+          <button type="button" className="small" onClick={onAttendees}>{signups.length ? "See attendees" : "Attendees"}</button>
+        </div>
+      )}
 
       {requests.length > 0 && (
         <div className="history">
@@ -146,28 +170,44 @@ function CircleCard({ c, parts, signups, requests, onSent }) {
   );
 }
 
-// People who signed up for this circle on the sign-up form (no dates of birth here). Open by default; long lists
-// show the most recent first with "Show all".
-const FIRST_ATTENDEES = 8;
+// Attendee list helpers (no dates of birth in the portal).
 const shortDay = (iso) => new Date(iso).toLocaleDateString("en-GB", { timeZone: "Europe/London", day: "numeric", month: "short" });
 const initials = (s) => (personName(s).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("") || "?").toUpperCase();
 const waLink = (phone) => { const d = String(phone ?? "").replace(/[^\d]/g, ""); return d.length >= 8 ? `https://wa.me/${d}` : null; };
 
-function Attendees({ circle, signups }) {
+// The Attendees pane (top toggle): everyone who signed up for the facilitator's circles, filter by circle, search,
+// CSV. Click a person for their answers, with Email and WhatsApp buttons.
+function AttendeesPane({ circles, signups, circle, setCircle }) {
+  const [q, setQ] = useState("");
   const [all, setAll] = useState(false);
   const [openId, setOpenId] = useState(null);
-  const shown = all ? signups : signups.slice(0, FIRST_ATTENDEES);
+  const nameOf = (id) => circles.find((c) => c.id === id)?.name ?? "";
+  const needle = q.trim().toLowerCase();
+  const list = signups.filter((s) => (circle === "all" || s.circle_id === circle)
+    && (!needle || [s.first_name, s.last_name, s.email, s.phone, s.city].some((v) => String(v ?? "").toLowerCase().includes(needle))));
+  const shown = all ? list : list.slice(0, 50);
+  const many = circles.length > 1;
   return (
-    <div className="details fac-att">
+    <section className="card fac-att" aria-label="Attendees">
       <div className="fac-att-head">
-        <span className="section-title">Attendees</span>
-        <span className="fac-att-count" aria-label={`${signups.length} signed up`}>{signups.length}</span>
-        {signups.length > 0 && (
-          <button type="button" className="small fac-att-csv" onClick={() => downloadCsv(signups, "attendees.csv", () => circle.name)}>Download CSV</button>
+        <h1 className="fac-att-title">Attendees</h1>
+        <span className="fac-att-count">{list.length}</span>
+        {list.length > 0 && (
+          <button type="button" className="small fac-att-csv" onClick={() => downloadCsv(list, "attendees.csv", nameOf)}>Download CSV</button>
         )}
       </div>
-      {!signups.length && <p className="muted small fac-att-empty">Nobody has signed up with this circle's sign-up link yet. Share it from <b>Links</b> above.</p>}
-      {signups.length > 0 && (
+      <div className="fac-att-filters">
+        {many && (
+          <select value={circle} onChange={(e) => setCircle(e.target.value)} aria-label="Circle">
+            <option value="all">All my circles</option>
+            {circles.map((c) => <option key={c.id} value={c.id}>{c.name} ({signups.filter((s) => s.circle_id === c.id).length})</option>)}
+          </select>
+        )}
+        {signups.length > 0 && <input type="search" placeholder="Search name, email, phone, city" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search attendees" />}
+      </div>
+      {!signups.length && <p className="muted small fac-att-empty">Nobody has signed up yet. Share your circle's <b>Participant sign-up link</b> (under Links on your circle) and sign-ups appear here.</p>}
+      {signups.length > 0 && !list.length && <p className="muted small fac-att-empty">No attendees match.</p>}
+      {list.length > 0 && (
         <ul className="fac-att-list">
           {shown.map((s) => {
             const open = openId === s.id;
@@ -179,6 +219,7 @@ function Attendees({ circle, signups }) {
                   <span className="fac-att-who">
                     <span className="fac-att-name">{personName(s)}</span>
                     <span className="fac-att-sub">{[s.email, s.phone].filter(Boolean).join(" · ")}</span>
+                    {many && circle === "all" && <span className="fac-att-circle">{nameOf(s.circle_id)}</span>}
                   </span>
                   <span className="fac-att-date" title={`Signed up ${fmtDate(String(s.submitted_at).slice(0, 10))}`}>{shortDay(s.submitted_at)}</span>
                   <span className="fac-att-chev" aria-hidden="true">›</span>
@@ -197,12 +238,8 @@ function Attendees({ circle, signups }) {
           })}
         </ul>
       )}
-      {signups.length > FIRST_ATTENDEES && (
-        <button type="button" className="link small fac-att-more" onClick={() => setAll(!all)}>
-          {all ? "Show fewer" : `Show all ${signups.length}`}
-        </button>
-      )}
-    </div>
+      {list.length > shown.length && <button type="button" className="link small fac-att-more" onClick={() => setAll(true)}>Show all {list.length}</button>}
+    </section>
   );
 }
 

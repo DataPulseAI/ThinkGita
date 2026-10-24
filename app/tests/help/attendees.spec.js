@@ -32,8 +32,8 @@ test("attendees", async ({ page }) => {
 
 test("facilitator attendees", async ({ page }) => {
   await signIn(page, { role: "facilitator" });
-  const cardEl = page.locator("main section.card", { has: page.locator("h2", { hasText: NAMES.c01 }) });
-  const att = cardEl.locator(".fac-att");
-  await att.getByRole("button", { name: /Mira Example/ }).click();
-  await snap(page, "fac-attendees-1", { clip: att, hl: att.getByRole("button", { name: "Download CSV" }), pad: 16 });
+  await page.getByRole("tablist", { name: "Portal view" }).getByRole("tab", { name: /Attendees/ }).click();
+  const pane = page.getByRole("region", { name: "Attendees" });
+  await pane.getByRole("button", { name: /Mira Example/ }).click();
+  await snap(page, "fac-attendees-1", { clip: [page.locator(".fac-views"), pane], hl: page.locator(".fac-views"), pad: 16 });
 });

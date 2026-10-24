@@ -120,14 +120,14 @@ export const facilitatorGuides = [
     audience: ["facilitator"],
     icon: "users",
     title: "See who has signed up for your circle",
-    summary: "The people who signed up with your circle's sign-up link: names, emails, WhatsApp numbers and what they hope for.",
+    summary: "A list of the people who signed up with your circle's sign-up link: names, emails, WhatsApp numbers and what they hope for.",
     related: ["fac-start-meeting"],
     steps: [
       {
-        title: "Open Attendees on your circle",
-        body: "On your circle's card, **Attendees** lists everyone who has signed up, newest first, with their email, WhatsApp number and the date. Click a name to see their city, how familiar they are with the Gita, how they heard about us and their goals, with **Email** and **WhatsApp** buttons to get in touch.",
+        title: "Open Attendees",
+        body: "At the top of your portal, switch from **Your circles** to **Attendees** (the number shows how many have signed up). Or click **See attendees** on a circle card to see just that circle.\n\nEveryone is listed newest first with their email, WhatsApp number and sign-up date. If you run more than one circle, pick one in the list or search by name, email, phone or city. Click a name to see their city, how familiar they are with the Gita, how they heard about us and their goals, with **Email** and **WhatsApp** buttons to get in touch.",
         shot: "fac-attendees-1",
-        alt: "The Attendees list on a circle card",
+        alt: "The Attendees pane in the facilitator portal",
       },
       {
         title: "Download the list",

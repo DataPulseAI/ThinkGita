@@ -22,6 +22,13 @@ test.describe("Phone width", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("the facilitator's Attendees pane fits the screen @mobile", async ({ page }) => {
+    await signIn(page, { role: "facilitator" });
+    await page.getByRole("tab", { name: /Attendees/ }).click();
+    await page.getByRole("button", { name: /Mira Example/ }).click();
+    await expectNoHorizontalOverflow(page);
+  });
+
   test("Circles list fits the screen @mobile", async ({ page }) => {
     await signIn(page, { hash: "/Circles" });
     await expect(page.getByRole("heading", { name: /^Circles/ })).toHaveText("Circles (7)");
