@@ -131,7 +131,7 @@ export const zoomGuides = [
       },
       {
         title: "See the emails in Attendance",
-        body: "After the next attendance sync, the email each person registered with appears against them in **Zoom, Attendance**, so the same person is counted once each week even if their Zoom name changes.",
+        body: "After the next attendance sync, the email each person registered with appears against them in **Zoom, Attendance**, so the same person is counted once each week even if their Zoom name changes. Their earlier visits under the same Zoom name join up with that email too.\n\nWhere the email matches a sign-up, the person shows with the name from the sign-up form, a **Signed up** tag and the name they used on Zoom. Below the table, **Signed up, not seen on Zoom yet** lists people who signed up for that circle but haven't joined, ready for a follow-up.",
         note: "Emails are not checked, and every joiner fills in the form once, which takes 10 to 20 seconds. The Zoom app needs the scopes meeting:update:meeting:admin and meeting:read:list_registrants:admin.",
       },
       {

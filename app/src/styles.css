@@ -674,3 +674,6 @@ mark.missing { background: #fdebe6; color: #b8432b; border-radius: 4px; padding:
 .new-person-photo-actions { display: grid; gap: 4px; justify-items: start; }
 .new-person-photo-actions button.link { font-size: 12px; }
 .new-person.standalone { border: 0; padding: 0; background: none; }
+.att-signed { margin-left: 8px; font-size: 11px; background: var(--live-soft); border-color: var(--live); color: var(--live); vertical-align: 1px; }
+.att-notseen { margin: 14px 0 8px; }
+.att-notseen ul { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }

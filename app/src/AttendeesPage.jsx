@@ -200,19 +200,54 @@ export function AttendeesPage({ data, run, initial, onSelect }) {
   );
 }
 
-// Older sign-ups (no circle id in their link) that couldn't be placed for sure: likely circles first, then any circle.
-function MatchList({ rows, focus, circles, circleName, run, onDone }) {
-  const [all, setAll] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const list = rows.filter((s) => waiting(s) || (s.id === focus));
-  const shown = all ? list : list.slice(0, 50);
+// The WhatsApp invite code in a link ("https://chat.whatsapp.com/AbC?x=1" -> "abc"). Mirrors waCode() in the signups function.
+export const waCode = (link) => /chat\.whatsapp\.com\/(?:invite\/)?([A-Za-z0-9]+)/i.exec(String(link ?? ""))?.[1].toLowerCase() ?? null;
 
-  async function pick(s, circleId) {
+// Waiting sign-ups grouped by what their link said: the same WhatsApp group, else the same facilitator, language,
+// course and date. One choice then covers the whole group.
+export function matchGroups(list) {
+  const groups = new Map();
+  for (const s of list) {
+    const u = s.utm ?? {};
+    const wa = waCode(u.utm_wagrp);
+    const said = [u.utm_facilitator, u.utm_lang, u.utm_course, u.utm_date].filter(Boolean);
+    const key = wa ? `wa:${wa}` : said.length ? `link:${said.join("|").toLowerCase()}` : `one:${s.id}`;
+    if (!groups.has(key)) groups.set(key, { key, wa: wa ? u.utm_wagrp.trim() : null, utm: u, rows: [], candidates: [] });
+    const g = groups.get(key);
+    g.rows.push(s);
+    for (const id of s.match_candidates ?? []) if (!g.candidates.includes(id)) g.candidates.push(id);
+  }
+  return [...groups.values()].sort((a, b) => b.rows.length - a.rows.length);
+}
+
+// Older sign-ups (no circle id in their link) that couldn't be placed for sure, grouped so one choice covers everyone
+// who came through the same link.
+function MatchList({ rows, focus, circles, circleName, run, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [openKey, setOpenKey] = useState(null);
+  const focused = rows.find((s) => s.id === focus && !waiting(s));
+  const list = rows.filter(waiting);
+  const groups = useMemo(() => [...(focused ? [{ key: `one:${focused.id}`, utm: focused.utm ?? {}, rows: [focused], candidates: [], wa: null }] : []),
+    ...matchGroups(list)], [list.length, focused?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function pick(g, circleId) {
+    const ids = g.rows.map((s) => s.id);
+    const who = g.rows.length === 1 ? personName(g.rows[0]) : `${g.rows.length} sign-ups`;
+    const c = circles.find((x) => x.id === circleId);
+    // Save the group's WhatsApp link on a circle that has none, so later sign-ups from that group link by themselves.
+    const saveWa = Boolean(circleId && g.wa && c && !c.whatsapp_group_link) &&
+      confirm(`Also save this WhatsApp group on ${shortCircle(c.name)}?\n\n${g.wa}\n\nThe circle has no WhatsApp link yet. It is used in the facilitator's emails and on the website.`);
     await run(async () => {
       const patch = circleId ? { circle_id: circleId } : { circle_id: null, match_method: "none" };
-      const { error } = await supabase.from("circle_signups").update(patch).eq("id", s.id);
-      if (error) throw error;
-    }, circleId ? `${personName(s)} linked to ${circleName(circleId)}` : `${personName(s)} marked as not for a circle`);
+      for (let i = 0; i < ids.length; i += 200) {
+        const { error } = await supabase.from("circle_signups").update(patch).in("id", ids.slice(i, i + 200));
+        if (error) throw error;
+      }
+      if (saveWa) {
+        const { error } = await supabase.from("circles").update({ whatsapp_group_link: g.wa.split("?")[0] }).eq("id", circleId);
+        if (error) throw error;
+      }
+    }, circleId ? `${who} linked to ${circleName(circleId)}${saveWa ? ", WhatsApp link saved on the circle" : ""}` : `${who} marked as not for a circle`);
     onDone();
   }
   async function recheck() {
@@ -225,41 +260,52 @@ function MatchList({ rows, focus, circles, circleName, run, onDone }) {
   return (
     <section className="card at-page">
       <div className="card-head">
-        <h2>Needs matching <span className="muted">({list.length})</span></h2>
+        <h2>Needs matching <span className="muted">({list.length} in {groups.length - (focused ? 1 : 0)} group{groups.length - (focused ? 1 : 0) === 1 ? "" : "s"})</span></h2>
         <button type="button" disabled={busy} onClick={recheck}>{busy ? "Checking…" : "Check again"}</button>
       </div>
       <p className="card-sub muted small">
-        Older sign-ups whose link had no circle id, where the details fit no circle or more than one. Pick the circle, or mark it as not
-        for a circle. <b>Check again</b> retries after a circle's WhatsApp link or facilitator has been filled in. Your choices are kept.
+        Older sign-ups whose link had no circle id, where the details fit no circle or more than one. They are grouped by the link they
+        came through (the same WhatsApp group, or the same facilitator, language and date), so one choice links the whole group. Your choices
+        are kept, and later sign-ups through the same WhatsApp group follow them.
       </p>
       <div className="at-match-list">
-        {shown.map((s) => {
-          const u = s.utm ?? {};
-          const said = [u.utm_facilitator, u.utm_lang, u.utm_course, u.utm_date, u.circle_name, u.utm_wagrp && "WhatsApp group"].filter(Boolean);
-          const likely = (s.match_candidates ?? []).filter((id) => circles.some((c) => c.id === id));
+        {groups.map((g) => {
+          const u = g.utm;
+          const said = [u.utm_facilitator, u.utm_lang, u.utm_course, u.utm_date, u.circle_name].filter(Boolean);
+          const likely = g.candidates.filter((id) => circles.some((c) => c.id === id));
+          const open = openKey === g.key;
+          const one = g.rows.length === 1 ? g.rows[0] : null;
           return (
-            <div key={s.id} className="at-match-row">
+            <div key={g.key} className="at-match-row">
               <div>
-                <b>{personName(s)}</b> <span className="muted small">{s.email} · {fmtDay(s.submitted_at)}</span>
+                {one ? <><b>{personName(one)}</b> <span className="muted small">{one.email} · {fmtDay(one.submitted_at)}</span></>
+                  : <><b>{g.rows.length} sign-ups</b> <span className="muted small">{fmtDay(g.rows.at(-1).submitted_at)} to {fmtDay(g.rows[0].submitted_at)}</span></>}
                 <div className="small">{said.length ? <>Link said: {said.join(" · ")}</> : <span className="muted">No link details</span>}</div>
-                {s.match_note && <div className="muted small">{s.match_note}</div>}
+                {g.wa && <div className="small at-wa">WhatsApp group: <a href={g.wa} target="_blank" rel="noreferrer">{g.wa.replace(/^https?:\/\//, "").split("?")[0]}</a></div>}
+                {one?.match_note && <div className="muted small">{one.match_note}</div>}
+                {!one && g.rows[0].match_note && <div className="muted small">{g.rows[0].match_note}</div>}
+                {!one && (
+                  <button type="button" className="link small" aria-expanded={open} onClick={() => setOpenKey(open ? null : g.key)}>
+                    {open ? "Hide names" : "Show names"}
+                  </button>
+                )}
+                {open && <ul className="at-group-names">{g.rows.map((s) => <li key={s.id}>{personName(s)} <span className="muted small">{s.email} · {fmtDay(s.submitted_at)}</span></li>)}</ul>}
               </div>
               <div className="at-match-actions">
                 {likely.map((id) => (
-                  <button key={id} type="button" className="small" onClick={() => pick(s, id)}>{circleName(id)}</button>
+                  <button key={id} type="button" className="small" onClick={() => pick(g, id)}>{circleName(id)}</button>
                 ))}
-                <select aria-label={`Circle for ${personName(s)}`} value={s.circle_id ?? ""} onChange={(e) => e.target.value && pick(s, e.target.value)}>
+                <select aria-label={`Circle for ${one ? personName(one) : `${g.rows.length} sign-ups`}`} value="" onChange={(e) => e.target.value && pick(g, e.target.value)}>
                   <option value="">{likely.length ? "Another circle…" : "Choose a circle…"}</option>
                   {circles.map((c) => <option key={c.id} value={c.id}>{shortCircle(c.name)} ({STATUS_LABEL[c.status]})</option>)}
                 </select>
-                <button type="button" className="ghost small" onClick={() => pick(s, null)}>Not a circle</button>
+                <button type="button" className="ghost small" onClick={() => pick(g, null)}>Not a circle</button>
               </div>
             </div>
           );
         })}
-        {!list.length && <p className="muted at-empty">Nothing to match. Every sign-up is linked to a circle.</p>}
+        {!groups.length && <p className="muted at-empty">Nothing to match. Every sign-up is linked to a circle.</p>}
       </div>
-      {list.length > shown.length && <button type="button" className="link small" onClick={() => setAll(true)}>Show all {list.length}</button>}
     </section>
   );
 }

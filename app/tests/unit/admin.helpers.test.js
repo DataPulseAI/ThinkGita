@@ -384,6 +384,35 @@ describe("attendance", () => {
     expect(A.cleanAttendance()).toEqual({ sessions: [], rows: [] });
   });
 
+  it("an older name-only visit joins the email that name registered with, in the same circle only", () => {
+    const sessions = [
+      { id: "s1", circle_id: "c1", started_at: "2026-10-11T09:30:00Z" },
+      { id: "s2", circle_id: "c1", started_at: "2026-10-18T09:30:00Z" },
+      { id: "s3", circle_id: "c2", started_at: "2026-10-18T09:30:00Z" },
+    ];
+    const rows = [
+      { session_id: "s1", person_key: "jenisha", name: "Jenisha", email: null, minutes: 50 },
+      { session_id: "s2", person_key: "j@example.org", name: "Jenisha", email: "j@example.org", minutes: 60 },
+      { session_id: "s3", person_key: "jenisha", name: "Jenisha", email: null, minutes: 40 },
+      { session_id: "s1", person_key: "zoom user", name: "Zoom user", email: null, minutes: 30 },
+      { session_id: "s2", person_key: "z@example.org", name: "Zoom user", email: "z@example.org", minutes: 30 },
+    ];
+    const out = A.cleanAttendance(sessions, rows, []);
+    const key = (sid, name) => out.rows.find((r) => r.session_id === sid && r.name === name)?.person_key;
+    expect(key("s1", "Jenisha")).toBe("j@example.org");
+    expect(key("s3", "Jenisha")).toBe("jenisha"); // another circle: not joined
+    expect(key("s1", "Zoom user")).toBe("zoom user"); // generic names never joined
+  });
+  it("two emails used with the same name: the name-only visit stays on its own", () => {
+    const sessions = [{ id: "s1", circle_id: "c1", started_at: "2026-10-11T09:30:00Z" }, { id: "s2", circle_id: "c1", started_at: "2026-10-18T09:30:00Z" }];
+    const rows = [
+      { session_id: "s1", person_key: "priya", name: "Priya", email: null, minutes: 50 },
+      { session_id: "s2", person_key: "a@example.org", name: "Priya", email: "a@example.org", minutes: 60 },
+      { session_id: "s2", person_key: "b@example.org", name: "Priya", email: "b@example.org", minutes: 60 },
+    ];
+    expect(A.cleanAttendance(sessions, rows, []).rows.find((r) => r.session_id === "s1").person_key).toBe("priya");
+  });
+
   it("buildCircle orders sessions and flags people who dropped off", () => {
     const sessions = ["2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05", "2026-10-12"].reverse().map((d, i) => ({ id: `s${d}`, started_at: `${d}T18:00:00Z`, i }));
     const rows = new Map();

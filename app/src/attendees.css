@@ -23,6 +23,8 @@
   padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
 .at-match-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .at-match-actions select { max-width: 280px; }
+.at-wa a { overflow-wrap: anywhere; }
+.at-group-names { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 3px; max-height: 260px; overflow: auto; }
 
 .at-panel { display: grid; gap: 6px; }
 .at-panel-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }

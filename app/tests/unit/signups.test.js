@@ -158,3 +158,38 @@ describe("matching by when they signed up", () => {
     expect(su.matchCircle({ utm_facilitator: "Kirtana", utm_lang: "Eng" }, [c]).circle_id).toBe(c.id);
   });
 });
+
+describe("learning from WhatsApp groups and older link formats", () => {
+  const a = circle({ whatsapp_group_link: null });
+  const b = circle({ id: "88888888-8888-4888-8888-888888888888", name: "Other Asha", whatsapp_group_link: null });
+  it("a group links when every linked sign-up from it went to one circle", () => {
+    const groups = su.learnGroups([
+      { utm: { utm_wagrp: "https://chat.whatsapp.com/GIc?mc_cid=1" }, circle_id: a.id },
+      { utm: { utm_wagrp: "https://chat.whatsapp.com/gic" }, circle_id: a.id },
+      { utm: { utm_wagrp: "https://chat.whatsapp.com/MIXED" }, circle_id: a.id },
+      { utm: { utm_wagrp: "https://chat.whatsapp.com/MIXED" }, circle_id: b.id },
+    ]);
+    expect([...groups]).toEqual([["gic", a.id]]);
+    expect(su.matchCircle({ utm_facilitator: "Asha Example", utm_wagrp: "https://chat.whatsapp.com/GIc" }, [a, b], null, groups))
+      .toMatchObject({ circle_id: a.id, note: "Same WhatsApp group as other sign-ups for this circle" });
+    expect(su.matchCircle({ utm_facilitator: "Asha Example", utm_wagrp: "https://chat.whatsapp.com/MIXED" }, [a, b], null, groups).circle_id).toBeNull();
+  });
+  it("month-only dates pick the circle starting that month", () => {
+    expect(su.parseUtmMonth("aug26")).toBe("2026-08");
+    expect(su.parseUtmMonth("18Oct26")).toBe("2026-10");
+    expect(su.parseUtmMonth("soon")).toBeNull();
+    const aug = circle({ starts_on: "2026-08-03", whatsapp_group_link: null });
+    const oct = circle({ id: "99999999-9999-4999-8999-999999999990", name: "October", starts_on: "2026-10-05", whatsapp_group_link: null });
+    expect(su.matchCircle({ utm_facilitator: "Asha Example", utm_lang: "Eng", utm_date: "aug26" }, [aug, oct]))
+      .toMatchObject({ circle_id: aug.id, note: "Facilitator, language and start month" });
+  });
+  it("BGB means the beginners course", () => {
+    const beg = circle({ circle_type: "Beginners", whatsapp_group_link: null });
+    const reg = circle({ id: "99999999-9999-4999-8999-999999999991", name: "Regular", whatsapp_group_link: null });
+    expect(su.matchCircle({ utm_facilitator: "Asha Example", utm_lang: "Eng", utm_course: "BGB" }, [beg, reg]).circle_id).toBe(beg.id);
+  });
+  it("a name run together still matches by its first word", () => {
+    const c = circle({ facilitator: fac("Ananda-rupa Krsna das"), whatsapp_group_link: null, language: "Spanish" });
+    expect(su.matchCircle({ utm_facilitator: "Ananda-rupaKrsnadas", utm_lang: "Esp" }, [c]).circle_id).toBe(c.id);
+  });
+});

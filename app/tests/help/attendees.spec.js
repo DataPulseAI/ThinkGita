@@ -12,7 +12,7 @@ test("attendees", async ({ page }) => {
   await snap(page, "attendees-2-open", { clip: page.locator(".at-item", { hasText: "Olu Example" }), hl: page.locator(".at-open"), pad: 16 });
   await page.getByRole("tab", { name: /Needs matching/ }).click();
   await page.locator(".at-match-row").first().waitFor();
-  await snap(page, "attendees-3-match", { clip: main, hl: page.locator(".at-match-row", { hasText: "Rosa Example" }).locator(".at-match-actions"), pad: 0, top: true });
+  await snap(page, "attendees-3-match", { clip: main, hl: page.locator(".at-match-row", { hasText: "2 sign-ups" }).locator(".at-match-actions"), pad: 0, top: true });
 
   await page.goto("/#/Circles");
   await page.getByLabel("Show").selectOption("all");

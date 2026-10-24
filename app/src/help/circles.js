@@ -319,9 +319,9 @@ export const circleGuides = [
       },
       {
         title: "Match older sign-ups",
-        body: "Sign-ups from before the circle id was in the link are matched on what their link did say: the **WhatsApp group**, the **facilitator**, the **language** and the **start date**. Only one clear match is linked.\n\nThe rest wait under **Needs matching** (the number on the tab). Each shows what the link said and the likely circles as buttons. Click the right circle, choose another from the list, or click **Not a circle**. Your choice is kept, even after another import.",
+        body: "Sign-ups from before the circle id was in the link are matched on what their link did say: the **WhatsApp group**, the **facilitator**, the **language**, the **course** and the **start date**, and on when they signed up. Only one clear match is linked.\n\nThe rest wait under **Needs matching**, grouped by the link they came through: everyone from the same WhatsApp group (or the same facilitator, language and date) is one row, with **Show names** to see who. Click the right circle, choose another from the list, or click **Not a circle**, and the whole group is done. If the circle has no WhatsApp link yet you are offered to save the group's link on it.\n\nYour choice is kept, even after another import, and later sign-ups through the same WhatsApp group follow it automatically.",
         shot: "attendees-3-match",
-        alt: "Needs matching, with suggested circles for each sign-up",
+        alt: "Needs matching, with sign-ups grouped by WhatsApp group and suggested circles",
       },
       {
         title: "Check again after filling in a circle",

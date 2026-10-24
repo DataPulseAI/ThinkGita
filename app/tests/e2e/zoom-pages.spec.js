@@ -131,6 +131,19 @@ test.describe("Attendance", () => {
     await page.getByRole("button", { name: "Attendance", exact: true }).click();
     await expect(page.locator("table.att-circles")).toBeVisible();
   });
+  test("with emails: an older Zoom-name visit joins the registered email, the sign-up name shows, and sign-ups not seen are listed", async ({ page }) => {
+    await signIn(page, { role: "super", hash: "/Attendance/c01" });
+    await expect(page.getByText("People (4)")).toBeVisible();
+    const mira = page.locator("table.att-grid tbody tr", { hasText: "Mira Example" });
+    await expect(mira).toContainText("Signed up");
+    await expect(mira).toContainText("mira.example@example.org · on Zoom as Participant Three");
+    await expect(mira).toContainText("2 of 7");
+    const notSeen = page.locator(".att-notseen");
+    await expect(notSeen).toContainText("Signed up, not seen on Zoom yet (2)");
+    await expect(notSeen).toContainText("Noah Example");
+    await expect(notSeen).toContainText("Olu Example");
+  });
+
 
   test("by person view shows the heatmap", async ({ page }) => {
     await signIn(page, { hash: "/Attendance" });

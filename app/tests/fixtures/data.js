@@ -239,6 +239,9 @@ export function buildFixtures() {
   for (const [key, [name, email, sessions]] of Object.entries(who)) {
     for (const n of sessions) attendance.push({ session_id: `s-c01-${n}`, person_key: key, name, email, minutes: 70 });
   }
+  // Participant Three registered on Zoom for the latest session (email given; it is Mira from the sign-up form).
+  const p3Last = attendance.find((r) => r.person_key === "p3" && r.session_id === "s-c01-7");
+  Object.assign(p3Last, { person_key: "mira.example@example.org", email: "mira.example@example.org" });
   attendance.push(
     { session_id: "s-ext-1", person_key: "x1", name: "Guest Person", email: null, minutes: 30 },
     { session_id: "s-ext-2", person_key: "x1", name: "Guest Person", email: null, minutes: 25 },
@@ -341,7 +344,8 @@ export function buildFixtures() {
     signup(3, { first_name: "Olu", circle_id: "c01", match_method: "auto", match_note: "Same WhatsApp group", read_before: "Never read it but heard of it", utm: { utm_facilitator: "Kirtana", utm_wagrp: "https://chat.whatsapp.com/EXAMPLE01" } }),
     signup(4, { first_name: "Priya", circle_id: "c02", match_method: "auto", match_note: "Facilitator and language", utm: { utm_facilitator: "Bram Sample", utm_lang: "Hin" } }),
     signup(5, { first_name: "Quinn", circle_id: "c06", match_method: "manual", matched_by: ADMIN_EMAIL, city: "Austin", country: "US" }),
-    signup(6, { first_name: "Rosa", match_note: "2 circles by Devi", match_candidates: ["c05", "c04"], utm: { utm_facilitator: "Devi", utm_lang: "Hin", utm_date: "9Sep26" } }),
+    signup(6, { first_name: "Rosa", match_note: "2 circles by Devi", match_candidates: ["c05", "c04"], utm: { utm_facilitator: "Devi", utm_lang: "Hin", utm_date: "9Sep26", utm_wagrp: "https://chat.whatsapp.com/GROUPDEVI" } }),
+    signup(9, { first_name: "Uma", match_note: "2 circles by Devi", match_candidates: ["c05", "c04"], utm: { utm_facilitator: "Devi", utm_lang: "Hin", utm_date: "9Sep26", utm_wagrp: "https://chat.whatsapp.com/GROUPDEVI?mc_cid=x1" } }),
     signup(7, { first_name: "Sam", match_note: "No circle hosted by Gopal", utm: { utm_facilitator: "Gopal", utm_lang: "Eng" } }),
     signup(8, { first_name: "Tara", match_method: "none", matched_by: ADMIN_EMAIL }),
   ];

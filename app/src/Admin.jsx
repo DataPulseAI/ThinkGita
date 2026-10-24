@@ -3121,6 +3121,34 @@ function personName(raw) {
     .replace(/\s+/g, " ").trim();
   return tidy || String(raw ?? "").toLowerCase().trim();
 }
+// Since joiners give an email (Zoom registration), the same person can appear under their email in newer sessions and
+// under their Zoom name in older ones. Within one circle (or one Zoom meeting), a name-only row joins the email that
+// name was used with, when exactly one email used it. Generic names ("Zoom user", "iPhone") are never joined.
+const GENERIC_NAMES = /^(zoom user|user|guest|iphone|ipad|android|samsung galaxy|samsung|galaxy|unknown|participant)( \d+)?$/;
+function linkNamesToEmails(rows, sessions) {
+  const groupOf = new Map(sessions.map((x) => [x.id, x.circle_id ?? `meeting:${x.zoom_meeting_id}`]));
+  const emailsByName = new Map(); // group|name -> Set(email)
+  for (const r of rows) {
+    if (!r.email) continue;
+    const name = personName(r.name);
+    if (!name || GENERIC_NAMES.test(name)) continue;
+    const k = `${groupOf.get(r.session_id)}|${name}`;
+    if (!emailsByName.has(k)) emailsByName.set(k, new Set());
+    emailsByName.get(k).add(r.email);
+  }
+  const out = new Map();
+  for (const r of rows) {
+    let row = r;
+    if (!r.email) {
+      const found = emailsByName.get(`${groupOf.get(r.session_id)}|${r.person_key}`);
+      if (found?.size === 1) { const email = [...found][0]; row = { ...r, email, person_key: email, linked_by_name: true }; }
+    }
+    const id = `${row.session_id}|${row.person_key}`;
+    const cur = out.get(id);
+    if (cur) cur.minutes += row.minutes ?? 0; else out.set(id, { ...row });
+  }
+  return [...out.values()];
+}
 function cleanAttendance(sessions = [], rows = [], licences = []) {
   const hostEmails = new Set(licences.map((l) => String(l.zoom_user_email ?? "").toLowerCase()).filter(Boolean));
   const hostNames = new Set(licences.map((l) => personName(l.label)));
@@ -3136,7 +3164,7 @@ function cleanAttendance(sessions = [], rows = [], licences = []) {
     if (cur) { cur.minutes += r.minutes ?? 0; if (!cur.email && email) cur.email = email; }
     else merged.set(id, { ...r, person_key: key, email: email || null, minutes: r.minutes ?? 0 });
   }
-  const clean = [...merged.values()];
+  const clean = linkNamesToEmails([...merged.values()], sessions);
   const counts = new Map();
   for (const r of clean) counts.set(r.session_id, (counts.get(r.session_id) ?? 0) + 1);
   return { sessions: sessions.map((x) => ({ ...x, participant_count: counts.get(x.id) ?? 0 })), rows: clean };
@@ -3152,13 +3180,15 @@ function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
   const [notice, setNotice] = useState(null);
 
   const load = useCallback(async () => {
-    const [s, a, l] = await Promise.all([
+    const [s, a, l, su] = await Promise.all([
       fetchAll(() => supabase.from("attendance_sessions").select("*").order("started_at").order("id")),
       fetchAll(() => supabase.from("attendance").select("session_id, person_key, name, email, minutes").order("id")),
       supabase.from("audit_log").select("at, actor, detail").eq("action", "sync_attendance").order("at", { ascending: false }).limit(1),
+      // Sign-ups, to show the name people gave on the form and who signed up but hasn't come yet.
+      fetchAll(() => supabase.from("circle_signups").select("id, circle_id, first_name, last_name, email, submitted_at").not("email", "is", null).order("id")),
     ]);
     const clean = cleanAttendance(s.data, a.data, data.licences);
-    setState({ ...clean, last: l.data?.[0] ?? null, error: s.error?.message ?? a.error?.message });
+    setState({ ...clean, signups: su.data ?? [], last: l.data?.[0] ?? null, error: s.error?.message ?? a.error?.message });
     return l.data?.[0] ?? null;
   }, [data.licences]);
 
@@ -3200,9 +3230,27 @@ function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(s);
     }
+    // The name people gave on the sign-up form, by email (any circle).
+    const formName = new Map();
+    for (const x of state.signups ?? []) {
+      const n = [x.first_name, x.last_name].filter(Boolean).join(" ");
+      if (n && x.email) formName.set(x.email.toLowerCase(), n);
+    }
     const circles = [...groups.entries()].map(([key, sessions]) => {
       const live = data.circles.find((c) => c.id === key);
       const built = buildCircle(sessions, rowsBySession);
+      for (const p of built.people) {
+        const fn = p.email && formName.get(p.email);
+        if (fn) { p.zoomName = p.name; p.name = fn; }
+        p.signedUp = Boolean(fn);
+      }
+      // Signed up for this circle (by email) but not seen on Zoom yet.
+      const seen = new Set(built.people.map((p) => p.email).filter(Boolean));
+      const notSeen = new Map();
+      for (const x of state.signups ?? []) {
+        const e = x.email?.toLowerCase();
+        if (x.circle_id === key && e && !seen.has(e) && !notSeen.has(e)) notSeen.set(e, { email: e, name: formName.get(e) ?? e, at: x.submitted_at });
+      }
       const recent = built.sessions.slice(-4);
       const lastS = sessions[sessions.length - 1];
       return {
@@ -3210,6 +3258,7 @@ function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
         status: live?.status, ours: !!lastS.circle_id, account: lastS.licence_label ?? "", ...built,
         avg: recent.length ? recent.reduce((t, s) => t + s.participant_count, 0) / recent.length : 0,
         drifting: built.people.filter((p) => p.drifting).length,
+        notSeen: [...notSeen.values()].sort((a, b) => String(b.at).localeCompare(String(a.at))),
       };
     }).sort((a, b) => String(b.sessions.at(-1)?.started_at).localeCompare(String(a.sessions.at(-1)?.started_at)));
     const weekAgo = Date.now() - 7 * 86400e3, monthAgo = Date.now() - 28 * 86400e3;
@@ -3300,7 +3349,12 @@ function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
             <tbody>
               {people.map((p) => (
                 <tr key={p.key}>
-                  <td><div className="att-person">{p.name || p.key}{p.email && <span className="muted small">{p.email}</span>}</div></td>
+                  <td>
+                    <div className="att-person">
+                      <span>{p.name || p.key}{p.signedUp && <span className="pill small att-signed" title="Signed up on the circle sign-up form">Signed up</span>}</span>
+                      {(p.email || p.zoomName) && <span className="muted small">{[p.email, p.zoomName && p.zoomName !== p.name ? `on Zoom as ${p.zoomName}` : ""].filter(Boolean).join(" · ")}</span>}
+                    </div>
+                  </td>
                   <td>{p.count} of {circle.sessions.length} <span className="muted small">({Math.round((p.count / circle.sessions.length) * 100)}%)</span></td>
                   <td>{shortDate(p.lastSeen)}{p.drifting && <span className="pill small st-conflict">Not seen in {p.missedSince}</span>}</td>
                   {circle.sessions.map((s) => {
@@ -3315,7 +3369,13 @@ function Attendance({ data, run, focus, onFocused, open, setOpen, onSelect }) {
             </tbody>
           </table>
         </div>
-        <p className="muted small">● attended · absent. Most people are matched by their Zoom name (emails only come through for people signed in to Zoom). Small differences are ignored, like capitals, "(she/her)" or "Priya's iPhone", but a different name such as "Priya" and "Priya Shah" still shows as two people. Host accounts aren't counted.</p>
+        {circle.notSeen.length > 0 && (
+          <div className="att-notseen">
+            <span className="section-title">Signed up, not seen on Zoom yet ({circle.notSeen.length})</span>
+            <ul>{circle.notSeen.map((x) => <li key={x.email}><b>{x.name}</b> <span className="muted small">{x.email} · signed up {shortDate(x.at)}</span></li>)}</ul>
+          </div>
+        )}
+        <p className="muted small">● attended · absent. People are matched by email where Zoom has one (everyone, once a circle collects emails on Zoom), otherwise by their Zoom name. An older name-only visit joins the email that name later registered with. Small differences are ignored, like capitals, "(she/her)" or "Priya's iPhone". Names come from the sign-up form where the email matches. Host accounts aren't counted.</p>
       </section>
     );
   }

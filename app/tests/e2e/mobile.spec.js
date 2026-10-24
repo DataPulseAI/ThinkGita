@@ -15,7 +15,7 @@ test.describe("Phone width", () => {
 
   test("Attendees fits the screen @mobile", async ({ page }) => {
     await signIn(page, { hash: "/Attendees" });
-    await expect(page.locator(".at-page h2")).toContainText("Attendees (7)");
+    await expect(page.locator(".at-page h2")).toContainText("Attendees (8)");
     await expectNoHorizontalOverflow(page);
     await page.getByRole("tab", { name: /Needs matching/ }).click();
     await expect(page.locator(".at-match-row")).toHaveCount(2);
