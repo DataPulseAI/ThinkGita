@@ -286,7 +286,7 @@ export function buildFixtures() {
     application: [{ label: "Why do you want to facilitate?", type: "TEXTAREA", value: "To share the Gita with friends." }],
     intro_attended_at: null, intro_marked_by: null, closing_attended_at: null, closing_marked_by: null,
     assessment: {}, feedback: null, decided_at: null, decided_by: null, final_email_at: null, final_email_status: null, notes: null, facilitator_id: null, other_emails: [],
-    assigned_to: null, assigned_at: null, assigned_by: null, ...o,
+    assigned_to: null, assigned_at: null, assigned_by: null, recommendation: null, assessment_submitted_at: null, assessment_submitted_by: null, ...o,
   });
   const trainees = [
     trainee("gauri.trainee", { first_name: "Gauri", last_name: "Testperson", phone: "+44 7700 900111", intro_attended_at: ago(15000), intro_marked_by: ADMIN_EMAIL }),
@@ -295,6 +295,11 @@ export function buildFixtures() {
       assigned_to: ASSESSOR_EMAIL, assigned_at: ago(1000), assigned_by: ADMIN_EMAIL }),
     trainee("isha.trainee", { first_name: "Isha", last_name: "Placeholder", status: "applied" }),
     trainee("jay.trainee", { first_name: "Jay", last_name: "Fictional", status: "certified", decided_at: ago(1000), decided_by: ADMIN_EMAIL, final_email_at: ago(1000), final_email_status: "sent" }),
+    // Kavi has been assessed by the assessor, who recommends certifying: waiting for an admin to decide.
+    trainee("kavi.trainee", { first_name: "Kavi", last_name: "Example", intro_attended_at: ago(15000), closing_attended_at: ago(2500), intro_marked_by: ADMIN_EMAIL, closing_marked_by: ADMIN_EMAIL,
+      assigned_to: ASSESSOR_EMAIL, assigned_at: ago(1500), assigned_by: ADMIN_EMAIL,
+      assessment: { delivery: { rating: "meets", note: "Calm and clear." }, fidelity: { rating: "meets" }, readiness: { rating: "meets" }, ethos: { rating: "meets" }, technical: { rating: "partly", note: "Sound dipped once." } },
+      feedback: "Kavi held the group well and kept to the material.", recommendation: "certify", assessment_submitted_at: ago(600), assessment_submitted_by: ASSESSOR_EMAIL }),
   ];
   const sub = (id, trainee_id, form_key, mins, fields = []) => ({ id, created_at: ago(mins), trainee_id, form_key, response_id: `r-${id}`, submitted_at: ago(mins),
     email: trainee_id ? `${trainee_id}@example.org` : "unknown.person@example.org", name: null, matched_by: trainee_id ? "tid" : null, fields });
@@ -304,6 +309,7 @@ export function buildFixtures() {
     ...["agreement", "scene", "empowerment", "wisdom"].map((k, i) => sub(`ts-h${i}`, "hari.trainee", k, 12000 - i * 1000)),
     sub("ts-h9", "hari.trainee", "video", 3000, [{ label: "Upload your practice session", type: "FILE_UPLOAD", value: "practice.mp4", files: [{ url: "https://storage.example.org/practice.mp4", name: "practice.mp4" }] }]),
     ...["agreement", "scene", "empowerment", "wisdom", "video"].map((k, i) => sub(`ts-j${i}`, "jay.trainee", k, 9000 - i * 500)),
+    ...["agreement", "scene", "empowerment", "wisdom", "video"].map((k, i) => sub(`ts-k${i}`, "kavi.trainee", k, 10000 - i * 1000)),
     { ...sub("ts-u1", null, "wisdom", 500), name: "Kiran Unknown" },
     // Isha sent two forms from another email: Needs matching suggests her by name.
     { ...sub("ts-u2", null, "agreement", 400), email: "ishaplaceholder108@example.org", name: "Isha Placeholder" },
@@ -321,8 +327,27 @@ export function buildFixtures() {
 
   const assessors = [{ email: ASSESSOR_EMAIL, name: "Asha Assessor", created_at: ago(5000), created_by: ADMIN_EMAIL }];
 
+  // Circle sign-ups (attendees). Linked by the circle id in the link, matched on older link details, and two waiting.
+  const signup = (n, over) => ({
+    id: `su-${n}`, response_id: `resp-su-${n}`, form_id: "zxRkR8", submitted_at: ago(n * 900), circle_id: null, match_method: null,
+    match_note: null, match_candidates: [], matched_by: null, matched_at: null, last_name: "Example", phone: `+44 7700 9001${String(n).padStart(2, "0")}`,
+    city: "Leeds", country: "GB", date_of_birth: "1990-05-04", read_before: "Read it a little and/or attended a course/talk", heard_from: "Think Gita Instagram",
+    goals: "Some calm in a busy week", whatsapp_active: true, consent: true, utm: {}, ...over,
+    email: over.email ?? `${over.first_name.toLowerCase()}.example@example.org`,
+  });
+  const circle_signups = [
+    signup(1, { first_name: "Mira", circle_id: "c01", match_method: "link", match_note: "Circle id in the sign-up link", utm: { circle_id: "c01", circle_name: NAMES.c01, utm_facilitator: "Kirtana" } }),
+    signup(2, { first_name: "Noah", circle_id: "c01", match_method: "link", city: "Bristol", utm: { circle_id: "c01" } }),
+    signup(3, { first_name: "Olu", circle_id: "c01", match_method: "auto", match_note: "Same WhatsApp group", read_before: "Never read it but heard of it", utm: { utm_facilitator: "Kirtana", utm_wagrp: "https://chat.whatsapp.com/EXAMPLE01" } }),
+    signup(4, { first_name: "Priya", circle_id: "c02", match_method: "auto", match_note: "Facilitator and language", utm: { utm_facilitator: "Bram Sample", utm_lang: "Hin" } }),
+    signup(5, { first_name: "Quinn", circle_id: "c06", match_method: "manual", matched_by: ADMIN_EMAIL, city: "Austin", country: "US" }),
+    signup(6, { first_name: "Rosa", match_note: "2 circles by Devi", match_candidates: ["c05", "c04"], utm: { utm_facilitator: "Devi", utm_lang: "Hin", utm_date: "9Sep26" } }),
+    signup(7, { first_name: "Sam", match_note: "No circle hosted by Gopal", utm: { utm_facilitator: "Gopal", utm_lang: "Eng" } }),
+    signup(8, { first_name: "Tara", match_method: "none", matched_by: ADMIN_EMAIL }),
+  ];
+
   return {
-    trainees, training_submissions, training_forms, training_sends, assessors,
+    trainees, training_submissions, training_forms, training_sends, assessors, circle_signups,
     licences, facilitators, circles, circle_cofacilitators, settings: [settings], change_requests, admin_emails,
     audit_log, email_log, email_templates: [], attendance_sessions, attendance, framer_items, framer_preview,
   };

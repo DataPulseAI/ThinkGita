@@ -9,6 +9,7 @@ import { WebsiteReadiness, WebsiteFields, isReadinessNote, websiteMissing } from
 import { WebsitePage } from "./WebsitePage.jsx";
 import { FacilitatorsPage, facilitatorNames } from "./FacilitatorsPage.jsx";
 import { TrainingPage, TallyResync, AssessorsCard } from "./TrainingPage.jsx";
+import { AttendeesPage, CircleSignups, SignupLinkButton, ZoomRegistration, SignupsSettings } from "./AttendeesPage.jsx";
 import { FacilitatorPicker, PersonLine, UnverifiedTag, isVerified } from "./People.jsx";
 import { PLACEHOLDERS, DEFAULT_TEMPLATES, buildVars, render, missingValues, unknownPlaceholders, usedPlaceholders, sampleChanges } from "./emailTemplate.js";
 
@@ -17,7 +18,7 @@ const ACTIVE = ["pending", "approved", "live"];
 const NAV = [
   { label: "Overview", tabs: [["Overview", "Overview"]] },
   { label: "Queue", tabs: [["Queue", "Queue"]] },
-  { label: "Circles", tabs: [["Circles", "All circles"], ["Facilitators", "Facilitators"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
+  { label: "Circles", tabs: [["Circles", "All circles"], ["Facilitators", "Facilitators"], ["Attendees", "Attendees"], ["Schedule", "Weekly schedule"], ["Requests", "Change requests"]] },
   { label: "Training", tabs: [["Training", "Trainees"]] },
   { label: "Zoom", tabs: [["Licences", "Licences"], ["Zoom", "Meetings on Zoom"], ["Attendance", "Attendance"], ["Insights", "Attendance insights"]] },
   { label: "Setup", tabs: [["Website", "Website"], ["Emails", "Email templates"], ["EmailLog", "Sent emails"], ["Settings", "Settings"]] },
@@ -225,7 +226,7 @@ export default function Admin() {
     const { data: { session } } = await supabase.auth.getSession();
     const user = session?.user;
     const weekAgo = new Date(Date.now() - 7 * 86400e3).toISOString();
-    const [circles, licences, settings, requests, log, templates, admins, failed, facilitators] = await Promise.all([
+    const [circles, licences, settings, requests, log, templates, admins, failed, facilitators, awaiting, signupsWaiting] = await Promise.all([
       fetchAll(() => supabase.from("circles").select("*, facilitator:facilitators!circles_facilitator_id_fkey(*), cofacilitators:circle_cofacilitators(facilitator:facilitators(*)), licence:licences(label,is_mock,host_key)").order("ref_weekday").order("ref_start_time").order("id")),
       supabase.from("licences").select("*").order("sort_order").order("label"),
       supabase.from("settings").select("*").eq("id", 1).single(),
@@ -235,6 +236,10 @@ export default function Admin() {
       supabase.from("admin_emails").select("*").order("email"),
       supabase.from("email_log").select("id", { count: "exact", head: true }).eq("status", "failed").gte("sent_at", weekAgo),
       fetchAll(() => supabase.from("facilitators").select("*").order("name").order("id")),
+      // Assessments an assessor has sent in that still need an outcome (Training badge and Overview notice).
+      supabase.from("trainees").select("id", { count: "exact", head: true }).in("status", ["applied", "in_training"]).not("assessment_submitted_at", "is", null),
+      // Sign-ups the system couldn't link to a circle (Attendees badge).
+      supabase.from("circle_signups").select("id", { count: "exact", head: true }).is("circle_id", null).is("match_method", null),
     ]);
     const err = [circles, licences, settings, requests, log, templates, admins].find((r) => r.error);
     if (err) setToast({ kind: "error", text: err.error.message });
@@ -245,6 +250,8 @@ export default function Admin() {
       requests: requests.data ?? [],
       log: log.data ?? [],
       emailFailures: failed.count ?? 0,
+      awaitingDecisions: awaiting?.count ?? 0,
+      signupsWaiting: signupsWaiting?.count ?? 0,
       admins: admins.data ?? [],
       facilitators: facilitators.data ?? [],
       me: (admins.data ?? []).find((a) => a.email === user?.email?.toLowerCase()) ?? { email: user?.email },
@@ -257,9 +264,12 @@ export default function Admin() {
 
   useEffect(() => { load(); }, [load]);
 
+  // One timer for the toast: a new message restarts it, so an older message's timer can't hide the new one early.
+  const toastTimer = useRef(null);
   const notify = (kind, text) => {
     setToast({ kind, text });
-    setTimeout(() => setToast(null), kind === "ok" ? 6000 : 12000);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), kind === "ok" ? 6000 : 12000);
   };
 
   // After any change, push circles marked as changed to the website (debounced, runs in the background).
@@ -332,7 +342,7 @@ export default function Admin() {
       <nav className="tabs">
         <button className="tab nav-back" disabled={!depth} onClick={() => history.back()} aria-label="Back" title="Back">←</button>
         {NAV.map((g) => (
-          <NavGroup key={g.label} group={g} tab={tab} setTab={setTab} counts={{ Queue: queueCount, Requests: openRequests }} />
+          <NavGroup key={g.label} group={g} tab={tab} setTab={setTab} counts={{ Queue: queueCount, Requests: openRequests, Training: data.awaitingDecisions, Attendees: data.signupsWaiting }} />
         ))}
       </nav>
       <main className="content">
@@ -354,11 +364,13 @@ export default function Admin() {
           onNewCircle={(facId) => setSelected({ new: true, facilitator_id: facId })} />}
         {tab === "Settings" && <Settings data={data} run={run} />}
         {tab === "Training" && <TrainingPage key={sub ?? ""} initial={sub} data={data} run={run} />}
+        {tab === "Attendees" && <AttendeesPage key={sub ?? ""} initial={sub} data={data} run={run} onSelect={select} />}
       </main>
       {selected && (
         <CircleDrawer
           key={selected === "new" || selected.new ? `new-${selected.facilitator_id ?? ""}` : selected.id}
           onAttendance={(id) => { setSelected(null); go("Attendance", id); }}
+          onAttendees={(id) => { setSelected(null); go("Attendees", id); }}
           onRequests={() => { setSelected(null); go("Requests"); }}
           onEmails={(name) => { setSelected(null); go("EmailLog", name); }}
           onProfile={(id) => { setSelected(null); go("Facilitators", id); }}
@@ -414,6 +426,13 @@ function Overview({ data, onDay, onTab, go }) {
         <Stat label="Open change requests" value={requests.filter((r) => r.status === "open").length} onClick={() => onTab("Requests")} />
         <Stat label="Licences without Zoom user" value={missingZoom} tone={missingZoom ? "warn" : ""} onClick={() => onTab("Licences")} />
       </div>
+
+      {data.awaitingDecisions > 0 && (
+        <div className="banner">
+          {data.awaitingDecisions} assessment{data.awaitingDecisions > 1 ? "s are" : " is"} waiting for your decision.{" "}
+          <button className="link" onClick={() => (go ? go("Training", "next") : onTab("Training"))}>Open Next steps</button>
+        </div>
+      )}
 
       {data.emailFailures > 0 && (
         <div className="banner">
@@ -1037,7 +1056,7 @@ function Circles({ data, run, onSelect, onNew, onDelete, initial }) {
 }
 
 /* ---------------- Circle drawer ---------------- */
-function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendance, onRequests, onEmails, onProfile, presetFacilitatorId }) {
+function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendance, onAttendees, onRequests, onEmails, onProfile, presetFacilitatorId }) {
   useEffect(() => {
     const onKey = (e) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -1238,7 +1257,12 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
             {licence?.is_mock && <span className="pill">Mock licence</span>}
           </div>
         )}
-        {!isNew && <p className="small"><When c={circle} /></p>}
+        {!isNew && (
+          <div className="at-when">
+            <p className="small"><When c={circle} /></p>
+            {["approved", "live", "paused"].includes(circle.status) && <SignupLinkButton circle={circle} />}
+          </div>
+        )}
         <CircleTeam circle={circle} form={f} setForm={setF} data={data} run={run} editable={editable} onProfile={onProfile} />
 
         {circle?.status === "pending" && circle.licence_id && (
@@ -1314,6 +1338,7 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
               <CopyButton label="Copy for participants" text={circleMessage(circle, null, { forFacilitator: false })} />
             </div>
             <p className="muted small">Facilitator version includes the host key. Participants version is safe to post in the WhatsApp group.</p>
+            <ZoomRegistration circle={circle} run={run} />
             <div className="actions">
               <button onClick={() => run(() => adminAction("resend", circle.id), (o) => withEmail("Details email:", o.email, teamTo(circle)))}>Resend details email</button>
               {onAttendance && <button onClick={() => onAttendance(circle.id)}>See attendance</button>}
@@ -1352,6 +1377,11 @@ function CircleDrawer({ circle, data, run, onClose, onDelete, onOpen, onAttendan
           </Section>
         )}
 
+        {circle && ["approved", "live", "paused", "ended"].includes(circle.status) && (
+          <Section id="attendees" title="Attendees" summary="Sign-up link and who signed up" defaultOpen={false}>
+            <CircleSignups circle={circle} onOpen={onAttendees} />
+          </Section>
+        )}
         {circle && <WebsiteVisibility circle={circle} run={run} />}
         {circle && <CircleEmails circle={circle} onAll={onEmails} />}
 
@@ -2369,6 +2399,7 @@ function Settings({ data, run }) {
       <AssessorsCard data={data} run={run} />
 
       <TallyResync data={data} run={run} />
+      <SignupsSettings data={data} run={run} />
 
       {demoCount > 0 && (
         <section className="card">

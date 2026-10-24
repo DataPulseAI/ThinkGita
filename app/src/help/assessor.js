@@ -10,7 +10,7 @@ export const assessorGuides = [
     steps: [
       {
         title: "See who is assigned to you",
-        body: "After you sign in, **Trainees assigned to you** lists everyone you have been asked to assess, with a row of dots showing how far through the seven steps they are. A trainee with every dot filled is **Ready to assess**.",
+        body: "After you sign in, **Trainees assigned to you** lists everyone you have been asked to assess, with a row of dots showing how far through the seven steps they are. A trainee with every dot filled is **Ready to assess**. Use **To assess** to see the ones still waiting for you, and **Submitted** for the ones you have already sent to the admins.",
         shot: "ass-1-list",
         alt: "The trainees assigned to you",
       },
@@ -39,8 +39,8 @@ export const assessorGuides = [
     section: "Assessing trainees",
     audience: ["assessor"],
     icon: "star",
-    title: "Score the five criteria and give feedback",
-    summary: "Rate each criterion, add notes and overall feedback. The admins then make the final decision.",
+    title: "Score the five criteria and submit to the admins",
+    summary: "Rate each criterion, add notes and overall feedback, save a draft, then submit it with your recommendation. The admins make the final decision.",
     related: ["ass-review"],
     steps: [
       {
@@ -62,9 +62,19 @@ export const assessorGuides = [
         alt: "The Overall feedback box",
       },
       {
-        title: "Save",
-        body: "Your ratings are saved with **Saved** confirming it. You can come back and change them any time before the admins decide. You cannot assess your own record.",
-        note: "You do not choose the outcome. Once your assessment is in, an admin decides whether the trainee is certified.",
+        title: "Save a draft",
+        body: "Click **Save draft** to keep your work. Only you and the admins can see it, and you can come back and change it as often as you like. You cannot assess your own record.",
+      },
+      {
+        title: "Choose your recommendation",
+        body: "Under **Your recommendation**, choose **Recommend certifying** or **Not yet**. You need to choose one before you can submit.",
+        shot: "score-4-submit",
+        alt: "Your recommendation, with Save draft and Submit to admins",
+      },
+      {
+        title: "Submit to the admins",
+        body: "When you are happy with it, click **Submit to admins** and confirm. The admins see it straight away on their Training page. After that the assessment is read only for you and shows **Submitted on** with the date. If something needs changing, ask an admin to reopen it.",
+        note: "You do not choose the outcome. Your recommendation helps the admins, who decide whether the trainee is certified.",
       },
     ],
   },

@@ -14,7 +14,7 @@ export const trainingGuides = [
       },
       {
         title: "Open Training",
-        body: "Click **Training** in the menu. The **Trainees** tab lists everyone with their dots, and filters for **Applied**, **In training**, **Ready to assess**, **Certified**, **Not certified**, **Cancelled** and **Revoked**. A trainee is **Ready to assess** when all seven steps are done.",
+        body: "Click **Training** in the menu. The **Trainees** tab lists everyone with their dots, and filters for **Applied**, **In training**, **Ready to assess**, **Assessed, awaiting decision**, **Certified**, **Not certified**, **Cancelled** and **Revoked**. A trainee is **Ready to assess** when all seven steps are done, and **Assessed, awaiting decision** once their assessor has submitted.",
         shot: "training-1-list",
         alt: "The Trainees list",
       },
@@ -30,7 +30,7 @@ export const trainingGuides = [
       },
       {
         title: "Send the next form",
-        body: "Open the **Next steps** tab. Trainees are grouped by the form they should do next. Click **Send** beside one person, or **Send to all** for the group. Each email is personal: their first name, the form's name and their own link.",
+        body: "Open the **Next steps** tab. At the top, **Awaiting your decision** lists assessments that assessors have submitted (see the next guide). Below that, trainees are grouped by the form they should do next. Click **Send** beside one person, or **Send to all** for the group. Each email is personal: their first name, the form's name and their own link.",
         note: "Send one to your own address first and check it looks right before you use **Send to all**. Emails go out slowly, about 20 at a time, and stop if the mailbox complains.",
         shot: "training-3-next",
         alt: "The Next steps tab",
@@ -103,8 +103,20 @@ export const trainingGuides = [
         alt: "The five assessment criteria",
       },
       {
+        title: "When an assessor submits",
+        body: "Assessors save drafts as they go, then click **Submit to admins** with their recommendation: **Recommend certifying** or **Not yet**. No email is sent. Instead, a number appears on **Training** in the menu, the **Overview** shows a notice such as \"1 assessment is waiting for your decision\", and the trainee shows as **Assessed, awaiting decision**. Click **Open Next steps** on the notice to see the **Awaiting your decision** list, with who assessed, their recommendation and the date.",
+        shot: "training-6-awaiting",
+        alt: "The Awaiting your decision list in Next steps",
+      },
+      {
+        title: "Read it, or reopen it",
+        body: "Open the trainee. The **Assessment** section shows who submitted it and when, with their recommendation. Once submitted the assessor can no longer change it. If it needs more work, click **Reopen for the assessor**: they can edit it and submit again.",
+        shot: "assess-4-submitted",
+        alt: "Who submitted the assessment, with Reopen for the assessor",
+      },
+      {
         title: "Decide the outcome",
-        body: "Expand **Outcome** and choose one:\n\n- **Certified**: they are ready to facilitate. The email includes the link to request a circle.\n- **Not certified**: not ready this time. They can train again.\n- **Cancelled**: training stopped, nothing against them, and they can apply again.\n- **Revoked**: permanent. Future applications from that email arrive as Revoked.",
+        body: "Expand **Outcome**. If the assessor has submitted, it shows **Assessor recommends: Certify** or **Not yet**. Nothing is chosen for you. Choose one:\n\n- **Certified**: they are ready to facilitate. The email includes the link to request a circle.\n- **Not certified**: not ready this time. They can train again.\n- **Cancelled**: training stopped, nothing against them, and they can apply again.\n- **Revoked**: permanent. Future applications from that email arrive as Revoked.",
         shot: "assess-3-outcome",
         alt: "The Outcome section",
       },
@@ -115,7 +127,7 @@ export const trainingGuides = [
       },
       {
         title: "Send the outcome email",
-        body: "Each outcome has an optional email you can read and edit before it goes. Only admins make the final decision. Assessors can record their view but cannot change the status or send anything.",
+        body: "Each outcome has an optional email you can read and edit before it goes. Only admins make the final decision. Assessors give their recommendation but cannot change the status or send anything.",
       },
     ],
   },

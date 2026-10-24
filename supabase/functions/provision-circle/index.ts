@@ -1,7 +1,8 @@
 // Admin-only actions that touch Zoom and email.
 // POST { action: "provision" | "cancel" | "end_on" | "resend" | "reschedule" | "move_licence" | "handover" | "sync_licences"
-//          | "set_host_key" | "rename" | "list_zoom_meetings" | "sync_attendance" | "invite_admin" | "test_email",
-//        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template? }
+//          | "set_host_key" | "rename" | "list_zoom_meetings" | "sync_attendance" | "invite_admin" | "test_email"
+//          | "zoom_registration",
+//        circle_id?, patch?, facilitator?, date?, licence_id?, template_key?, template?, on? }
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { buildVars, render, DEFAULT_TEMPLATES, describeChanges, sampleChanges } from "./template.ts";
 import nodemailer from "npm:nodemailer@6.9.16";
@@ -225,6 +226,23 @@ function mockMeeting() {
   };
 }
 
+// Zoom meeting settings for a new meeting. With registration, attendees register once (name and email) for the
+// whole series and are approved automatically; without it, no registration (approval_type 2).
+const REGISTRATION_ON = { approval_type: 0, registration_type: 1, registrants_confirmation_email: true, registrants_email_notification: true };
+const REGISTRATION_OFF = { approval_type: 2 };
+function meetingSettings(registration = false) {
+  return {
+    join_before_host: true,
+    jbh_time: 0,
+    waiting_room: false,
+    mute_upon_entry: true,
+    host_video: false,
+    participant_video: false,
+    ...(registration ? REGISTRATION_ON : REGISTRATION_OFF),
+    auto_recording: "none",
+  };
+}
+
 // ---------- Actions ----------
 async function provision(circleId: string, actor: string, notify = true) {
   const c = await loadCircle(circleId);
@@ -266,6 +284,8 @@ async function provision(circleId: string, actor: string, notify = true) {
     endsOn = isoDate(d);
   }
 
+  // Registration: on for new meetings when Settings says so, and kept if this circle already had it.
+  const registration = Boolean(s.zoom_registration_new || c.zoom_registration);
   const meeting = c.licence.is_mock ? mockMeeting() : await zoom(`/users/${encodeURIComponent(c.licence.zoom_user_email)}/meetings`, {
     method: "POST",
     body: JSON.stringify({
@@ -275,16 +295,7 @@ async function provision(circleId: string, actor: string, notify = true) {
       timezone: c.timezone,
       duration: c.duration_min,
       recurrence,
-      settings: {
-        join_before_host: true,
-        jbh_time: 0,
-        waiting_room: false,
-        mute_upon_entry: true,
-        host_video: false,
-        participant_video: false,
-        approval_type: 2,
-        auto_recording: "none",
-      },
+      settings: meetingSettings(registration),
     }),
   });
 
@@ -297,6 +308,7 @@ async function provision(circleId: string, actor: string, notify = true) {
       passcode: meeting.password ?? null,
       starts_on: startsOn,
       ends_on: endsOn,
+      ...(registration ? { zoom_registration: true } : {}),
     })
     .eq("id", c.id)
     .select("*")
@@ -491,8 +503,7 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
       body: JSON.stringify({
         topic: c.name, type: 8, start_time: `${startsOn}T${String(c.start_time).slice(0, 5)}:00`,
         timezone: c.timezone, duration: c.duration_min, recurrence,
-        settings: { join_before_host: true, jbh_time: 0, waiting_room: false, mute_upon_entry: true,
-          host_video: false, participant_video: false, approval_type: 2, auto_recording: "none" },
+        settings: meetingSettings(Boolean(c.zoom_registration)),
       }),
     });
   } catch (e) {
@@ -511,6 +522,28 @@ async function moveLicence(circleId: string, actor: string, licenceId: string) {
   const email = await sendDetailsToTeam("updated", updated, c.facilitator, target, actor, changes);
   await audit(actor, "move_licence", c.id, { from: c.licence?.label, to: target.label, old_meeting: c.zoom_meeting_id, new_meeting: meeting.id, email });
   return { licence: target.label, join_url: meeting.join_url, email };
+}
+
+// Turn Zoom registration on or off for a circle's meeting (attendees give their name and email before joining).
+// The join link stays the same. Mock meetings only get the flag.
+async function zoomRegistration(circleId: string, actor: string, on: unknown) {
+  if (typeof on !== "boolean") throw new Error("Say whether registration should be on or off");
+  const { data: c } = await db.from("circles").select("id, status, zoom_meeting_id, licence:licences(is_mock)").eq("id", circleId).maybeSingle();
+  if (!c) throw new Error("Circle not found");
+  if (!c.zoom_meeting_id) throw new Error("Approve the circle first: it has no Zoom meeting yet");
+  if (!["live", "paused"].includes(c.status)) throw new Error("Registration can only be changed for live or paused circles");
+  const mock = Boolean((c.licence as any)?.is_mock) || String(c.zoom_meeting_id).startsWith("MOCK");
+  if (!mock) {
+    try {
+      await zoom(`/meetings/${c.zoom_meeting_id}`, { method: "PATCH", body: JSON.stringify({ settings: on ? REGISTRATION_ON : REGISTRATION_OFF }) });
+    } catch (e) {
+      throw new Error(/4711|scope/i.test(String(e)) ? "The Zoom app needs the meeting:update:meeting:admin scope to change registration." : String((e as Error).message ?? e));
+    }
+  }
+  const { error } = await db.from("circles").update({ zoom_registration: on }).eq("id", c.id);
+  if (error) throw new Error(`Changed in Zoom but not saved here: ${error.message}`);
+  await audit(actor, "zoom_registration", c.id, { on });
+  return { ok: true, on };
 }
 
 // Pull every licensed Zoom user into Licences: existing licences are matched by Zoom user ID or email
@@ -689,6 +722,30 @@ function mergePeople(parts: any[]) {
   return [...byPerson.values()];
 }
 
+// Fill missing participant emails from the meeting's registrants: by registrant_id first, otherwise by a display
+// name equal to "first_name last_name" (ignoring case and spaces) when exactly one registrant has that name.
+// Participants that already have an email are left as they are.
+export function fillRegistrantEmails(parts: any[], registrants: any[]) {
+  if (!registrants?.length) return parts;
+  const norm = (v: unknown) => String(v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  const byId = new Map<string, any>();
+  const byName = new Map<string, any[]>();
+  for (const r of registrants) {
+    if (r?.id != null) byId.set(String(r.id), r);
+    const n = norm(`${r?.first_name ?? ""} ${r?.last_name ?? ""}`);
+    if (n) byName.set(n, [...(byName.get(n) ?? []), r]);
+  }
+  return parts.map((p) => {
+    if (String(p.user_email ?? "").trim()) return p;
+    let r = p.registrant_id ? byId.get(String(p.registrant_id)) : undefined;
+    if (!r) {
+      const same = byName.get(norm(p.name));
+      if (same?.length === 1) r = same[0];
+    }
+    return r?.email ? { ...p, user_email: String(r.email).trim() } : p;
+  });
+}
+
 async function allPages(path: string, key: string) {
   const out: any[] = [];
   let token = "";
@@ -733,13 +790,36 @@ async function syncAttendanceRun(actor: string) {
   const startedRun = Date.now();
   const { data: licences } = await db.from("licences").select("id, label, zoom_user_id, zoom_user_email, attendance_scanned_to")
     .not("zoom_user_email", "is", null).order("sort_order");
-  const { data: circles } = await db.from("circles").select("id, name, zoom_meeting_id").not("zoom_meeting_id", "is", null);
+  const { data: circles } = await db.from("circles").select("id, name, zoom_meeting_id, zoom_registration").not("zoom_meeting_id", "is", null);
   const circleByMeeting = new Map((circles ?? []).map((c) => [String(c.zoom_meeting_id), c]));
   const seen = new Set<string>();
   const problems: string[] = [];
   const today = new Date();
   const earliest = new Date(today.getTime() - REPORT_DAYS * 86400e3);
   let added = 0, people = 0, more = false, windows = 0;
+
+  // Registrants of circles with Zoom registration on, fetched once per meeting per run. A failure (missing scope,
+  // meeting gone) is noted once and the sync carries on without them.
+  const registrantsByMeeting = new Map<string, any[]>();
+  let registrantsNoted = false;
+  async function registrantsFor(meetingId: string) {
+    if (!registrantsByMeeting.has(meetingId)) {
+      let list: any[] = [];
+      try {
+        list = await allPages(`/meetings/${meetingId}/registrants?status=approved`, "registrants");
+      } catch (e) {
+        if (!registrantsNoted) {
+          registrantsNoted = true;
+          const msg = String(e);
+          problems.push(/4711|scope/i.test(msg)
+            ? "Registrant emails skipped: the Zoom app needs the meeting:read:list_registrants:admin scope"
+            : `Registrant emails skipped for meeting ${meetingId}: ${msg.slice(0, 120)}`);
+        }
+      }
+      registrantsByMeeting.set(meetingId, list);
+    }
+    return registrantsByMeeting.get(meetingId)!;
+  }
 
   // Record one past meeting and who joined it. Returns false if it should be retried on a later sync.
   async function record(m: any, l: any) {
@@ -752,8 +832,9 @@ async function syncAttendanceRun(actor: string) {
       // 404: Zoom kept no participant report (for example nobody joined). Recorded as an empty session.
       if (!/404|3001/.test(msg)) { problems.push(`${m.topic} ${m.start_time}: ${msg.slice(0, 120)}`); return false; }
     }
-    const rows = mergePeople(parts);
     const circle = circleByMeeting.get(String(m.id));
+    if (circle?.zoom_registration && parts.length) parts = fillRegistrantEmails(parts, await registrantsFor(String(m.id)));
+    const rows = mergePeople(parts);
     const endedAt = m.end_time ?? rows.map((r) => r.last_leave).filter(Boolean).sort().pop() ?? null;
     const { data: session, error } = await db.from("attendance_sessions").insert({
       circle_id: circle?.id ?? null, circle_name: circle?.name ?? m.topic ?? null, topic: m.topic ?? null,
@@ -827,7 +908,7 @@ Deno.serve(async (req) => {
   if (!admin) return json({ error: "Admins only" }, 403);
 
   try {
-    const { action, circle_id, patch, facilitator, date, licence_id, template_key, template, notify } = await req.json();
+    const { action, circle_id, patch, facilitator, date, licence_id, template_key, template, notify, on } = await req.json();
     switch (action) {
       case "provision": return json(await provision(circle_id, email, notify !== false));
       case "cancel": return json(await cancel(circle_id, email));
@@ -842,6 +923,7 @@ Deno.serve(async (req) => {
       case "rename": return json(await renameMeeting(circle_id));
       case "set_host_key": return json(await setHostKey(email, licence_id));
       case "invite_admin": return json(await inviteAdmin(email, facilitator?.email));
+      case "zoom_registration": return json(await zoomRegistration(circle_id, email, on));
       case "test_email": return json(await testEmail(circle_id, email, template_key === "updated" ? "updated" : "approved", template));
       default: return json({ error: `Unknown action ${action}` }, 400);
     }

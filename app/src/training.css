@@ -106,7 +106,7 @@
 .tr-other-emails { display: flex; flex-wrap: wrap; gap: 4px 10px; overflow-wrap: anywhere; }
 
 /* Assignment: row checkboxes, the bulk bar and the assessor column (admins only). */
-.tr-list-admin .tr-row { grid-template-columns: minmax(190px, 1.6fr) minmax(170px, 1.2fr) minmax(110px, .8fr) minmax(190px, 1.2fr) minmax(110px, .8fr); }
+.tr-list-admin .tr-row { grid-template-columns: minmax(190px, 1.6fr) minmax(170px, 1.2fr) minmax(130px, .9fr) minmax(190px, 1.2fr) minmax(110px, .8fr); }
 .tr-assignee { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .tr-assign { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
 .tr-assign select { max-width: 280px; }
@@ -123,3 +123,15 @@
 .tr-assign-select.unassigned { color: var(--muted); }
 .tr-assign-select:hover, .tr-assign-select:focus { border-color: var(--line); background: var(--surface); }
 .danger-text { color: var(--warn); }
+
+/* Assessments sent to the admins: the status pill, the recommendation and the assessor's submit controls. */
+.ts-assessed { background: var(--pending-soft); border-color: var(--pending); color: var(--pending); }
+.pill.tr-rec { font-size: 11px; padding: 1px 8px; }
+.tr-rec-certify { background: var(--live-soft); border-color: var(--live); color: var(--live); }
+.tr-rec-not_yet { background: var(--accent-soft); border-color: var(--accent-text); color: var(--accent-text); }
+.tr-submitted, .tr-recommends { margin: 0 0 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.tr-recommend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 10px; }
+.tr-awaiting-row { grid-template-columns: minmax(140px, 1.2fr) minmax(160px, 1.4fr) auto auto; }
+/* The longer status ("Assessed, awaiting decision") wraps inside its cell rather than running into the dots. */
+.tr-row > * { min-width: 0; }
+.tr-row .pill { white-space: normal; line-height: 1.25; }

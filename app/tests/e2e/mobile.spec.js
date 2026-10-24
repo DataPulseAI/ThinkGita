@@ -13,6 +13,15 @@ test.describe("Phone width", () => {
     await expectNoHorizontalOverflow(page);
   });
 
+  test("Attendees fits the screen @mobile", async ({ page }) => {
+    await signIn(page, { hash: "/Attendees" });
+    await expect(page.locator(".at-page h2")).toContainText("Attendees (7)");
+    await expectNoHorizontalOverflow(page);
+    await page.getByRole("tab", { name: /Needs matching/ }).click();
+    await expect(page.locator(".at-match-row")).toHaveCount(2);
+    await expectNoHorizontalOverflow(page);
+  });
+
   test("Circles list fits the screen @mobile", async ({ page }) => {
     await signIn(page, { hash: "/Circles" });
     await expect(page.getByRole("heading", { name: /^Circles/ })).toHaveText("Circles (7)");

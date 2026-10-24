@@ -10,7 +10,7 @@ export const fail = (message, status = 400) => reply(status, { message, error: m
 
 const RESERVED = new Set(["select", "order", "limit", "offset", "on_conflict", "columns"]);
 
-// PostgREST filters used by the app: eq, neq, is, in, not.in, like, gt/gte/lt/lte.
+// PostgREST filters used by the app: eq, neq, is, not.is, in, not.in, like, gt/gte/lt/lte.
 function matches(row, query) {
   for (const [col, raw] of Object.entries(query)) {
     if (RESERVED.has(col)) continue;
@@ -21,6 +21,7 @@ function matches(row, query) {
     else if ((m = raw.match(/^in\.\((.*)\)$/))) { if (!m[1].split(",").includes(s)) return false; }
     else if ((m = raw.match(/^eq\.(.*)$/s))) { if (s !== m[1]) return false; }
     else if ((m = raw.match(/^neq\.(.*)$/s))) { if (s === m[1]) return false; }
+    else if ((m = raw.match(/^not\.is\.(.*)$/))) { if (m[1] === "null" ? v == null : String(v) === m[1]) return false; }
     else if ((m = raw.match(/^is\.(.*)$/))) { if (m[1] === "null" ? v != null : String(v) !== m[1]) return false; }
     else if ((m = raw.match(/^like\.(.*)$/))) {
       const re = new RegExp(`^${m[1].replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/[*%]/g, ".*")}$`);
@@ -125,6 +126,10 @@ export function createMockCore(ctx) {
     }
     if (method === "PATCH") {
       for (const r of hit) Object.assign(r, body);
+      // circle_signups_touch: a person choosing the circle is a manual match (or "no circle").
+      if (table === "circle_signups" && ("circle_id" in body || "match_method" in body)) {
+        for (const r of hit) Object.assign(r, { match_method: r.circle_id ? "manual" : "none", matched_by: ctx.user.email, matched_at: new Date().toISOString(), match_note: null });
+      }
       return out(expand(table, hit, query.select));
     }
     if (method === "DELETE") {
@@ -147,6 +152,19 @@ export function createMockCore(ctx) {
   function rpcDefault({ name, body }) {
     switch (name) {
       case "my_circles_v2": return myCircles();
+      case "my_circle_link_parts": return myCircles().map(({ id }) => {
+        const c = db.circles.find((x) => x.id === id);
+        const hosts = [fac(c.facilitator_id), ...db.circle_cofacilitators.filter((x) => x.circle_id === id).map((x) => fac(x.facilitator_id))]
+          .filter(Boolean).map((f) => f.initiated_name || f.name);
+        return { id, name: c.name, name_auto: c.name_auto ?? true, status: c.status, language: c.language, circle_type: c.circle_type, starts_on: c.starts_on,
+          preferred_start: c.preferred_start, whatsapp_group_link: c.whatsapp_group_link, zoom_registration: Boolean(c.zoom_registration), hosts };
+      });
+      case "my_circle_signups": {
+        const mine = new Set(myCircles().map((c) => c.id));
+        return sortRows((db.circle_signups ?? []).filter((s) => mine.has(s.circle_id)), "submitted_at.desc")
+          .map(({ id, circle_id, submitted_at, first_name, last_name, email, phone, city, country, read_before, heard_from, goals, whatsapp_active }) =>
+            ({ id, circle_id, submitted_at, first_name, last_name, email, phone, city, country, read_before, heard_from, goals, whatsapp_active }));
+      }
       case "set_facilitator_verified": {
         const f = db.facilitators.find((x) => x.id === body.p_facilitator);
         if (!f) return reply(400, { code: "P0001", message: "not_found: no such facilitator" });
@@ -173,7 +191,25 @@ export function createMockCore(ctx) {
         const t = db.trainees.find((x) => x.id === body.p_trainee);
         const admin = db.admin_emails.some((a) => a.email === ctx.user.email);
         if (!t || (!admin && t.assigned_to !== ctx.user.email)) return reply(400, { code: "P0001", message: "not_allowed: this trainee is not assigned to you" });
+        if (!admin && t.assessment_submitted_at) return reply(400, { code: "P0001", message: "submitted: this assessment has been sent to the admins; ask an admin to reopen it" });
         Object.assign(t, { assessment: body.p_assessment ?? {}, feedback: body.p_feedback });
+        return t;
+      }
+      case "submit_assessment": {
+        const t = db.trainees.find((x) => x.id === body.p_trainee);
+        const admin = db.admin_emails.some((a) => a.email === ctx.user.email);
+        if (!t || (!admin && t.assigned_to !== ctx.user.email)) return reply(400, { code: "P0001", message: "not_allowed: this trainee is not assigned to you" });
+        if (!["certify", "not_yet"].includes(body.p_recommendation)) return reply(400, { code: "P0001", message: "no_recommendation: choose Recommend certifying or Not yet" });
+        if (t.assessment_submitted_at) return reply(400, { code: "P0001", message: "submitted: this assessment has already been sent to the admins" });
+        Object.assign(t, { assessment: body.p_assessment ?? {}, feedback: body.p_feedback, recommendation: body.p_recommendation,
+          assessment_submitted_at: new Date().toISOString(), assessment_submitted_by: ctx.user.email });
+        return t;
+      }
+      case "reopen_assessment": {
+        if (!db.admin_emails.some((a) => a.email === ctx.user.email)) return reply(400, { code: "P0001", message: "not_admin: only admins can reopen an assessment" });
+        const t = db.trainees.find((x) => x.id === body.p_trainee);
+        if (!t) return reply(400, { code: "P0001", message: "not_found: no such trainee" });
+        Object.assign(t, { assessment_submitted_at: null, assessment_submitted_by: null });
         return t;
       }
       default: ctx.unhandled.push(`rpc ${name}`); return null;
@@ -205,8 +241,15 @@ export function createMockCore(ctx) {
         case "list_zoom_meetings": return { accounts: [] };
         case "set_host_key": return { label: "Zoom 03", host_key: "654321" };
         case "sync_licences": return { licensed: 3, zoom_users: 4, results: [] };
+        case "zoom_registration": if (c) c.zoom_registration = Boolean(body.on); return { ok: true, on: Boolean(body.on) };
         default: return {};
       }
+    }
+    if (name === "signups") {
+      const rows = db.circle_signups ?? [];
+      if (a === "sync") { db.settings[0].signups_synced_at = new Date().toISOString(); return { found: rows.length, stored: rows.length, linked: rows.filter((s) => s.circle_id).length, waiting: rows.filter((s) => !s.circle_id && !s.match_method).length }; }
+      if (a === "rematch") { const w = rows.filter((s) => !s.circle_id && !s.match_method).length; return { checked: w, linked: 0, waiting: w }; }
+      return {};
     }
     if (name === "training") {
       if (a === "probe") return { has_key: true, forms: [] };

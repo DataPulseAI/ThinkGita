@@ -2,20 +2,28 @@ import { useEffect, useState } from "react";
 import { supabase, DAY_NAMES, hhmm, endTime, STATUS_LABEL, tzName, fmtDate, circleMessage, REQUEST_TYPES, requestSummary } from "./lib.js";
 import { CopyButton } from "./ui.jsx";
 import Profile from "./Profile.jsx";
+import { signupLink } from "./signupLink.js";
+import { SignupDetail, personName, downloadCsv } from "./AttendeesPage.jsx";
 
 export default function Facilitator({ email }) {
   const [circles, setCircles] = useState(null);
   const [requests, setRequests] = useState([]);
+  const [parts, setParts] = useState({});
+  const [signups, setSignups] = useState([]);
   const [error, setError] = useState(null);
 
   const load = async () => {
-    const [c, r] = await Promise.all([
+    const [c, r, p, s] = await Promise.all([
       supabase.rpc("my_circles_v2"),
       supabase.from("change_requests").select("*").order("created_at", { ascending: false }),
+      supabase.rpc("my_circle_link_parts"),
+      supabase.rpc("my_circle_signups"),
     ]);
     if (c.error) setError(c.error.message);
     setCircles(c.data ?? []);
     setRequests(r.data ?? []);
+    setParts(Object.fromEntries((p.data ?? []).map((x) => [x.id, x])));
+    setSignups(s.data ?? []);
   };
   useEffect(() => { load(); }, []);
 
@@ -33,7 +41,8 @@ export default function Facilitator({ email }) {
         </div>
       )}
       {circles.map((c) => (
-        <CircleCard key={c.id} c={c} requests={requests.filter((r) => r.circle_id === c.id)} onSent={load} />
+        <CircleCard key={c.id} c={c} parts={parts[c.id]} signups={signups.filter((s) => s.circle_id === c.id)}
+          requests={requests.filter((r) => r.circle_id === c.id)} onSent={load} />
       ))}
     </main>
   );
@@ -42,10 +51,12 @@ export default function Facilitator({ email }) {
 const REQUEST_STATUS = { open: "Waiting for the team", done: "Done", dismissed: "Closed" };
 
 // WhatsApp group, participant sign-up and resources, when the team has set them.
-function CircleLinks({ c }) {
+function CircleLinks({ c, parts }) {
+  // The sign-up link carries the circle's id, so each sign-up shows under Attendees.
+  const signup = parts ? signupLink(parts) : c.participant_signup_link;
   const links = [
     ["WhatsApp group", c.whatsapp_group_link],
-    ["Participant sign-up link", c.participant_signup_link, "Share this exact link so sign-ups are linked to your circle."],
+    ["Participant sign-up link", signup, "Share this exact link so sign-ups are linked to your circle."],
     ["YouTube playlist", c.youtube_playlist_link],
     ["Google Drive folder", c.drive_folder_link, "Request access and the team will approve it."],
   ].filter(([, v]) => v);
@@ -64,7 +75,7 @@ function CircleLinks({ c }) {
   );
 }
 
-function CircleCard({ c, requests, onSent }) {
+function CircleCard({ c, parts, signups, requests, onSent }) {
   const live = c.status === "live";
   const mock = live && /mock=1/.test(c.join_url ?? "");
   return (
@@ -102,15 +113,18 @@ function CircleCard({ c, requests, onSent }) {
           </div>
           <ol className="steps">
             <li>Open the join link a few minutes before your circle.</li>
+            {parts?.zoom_registration && <li>Zoom asks for your first name, last name and email. Fill them in and choose <b>Register</b> (once; it's approved straight away). Everyone joining does the same.</li>}
             <li>In Zoom, open <b>Participants</b> and choose <b>Claim host</b>.</li>
             <li>Enter the host key above. You now have host controls.</li>
           </ol>
           <p className="muted small">The link is the same every week, from {fmtDate(c.starts_on)} until {fmtDate(c.ends_on)}. Pin it in your WhatsApp group.</p>
-          <CircleLinks c={c} />
+          <CircleLinks c={c} parts={parts} />
         </>
       ) : (
         <p className="muted">Your Zoom link will appear here once the team approves your circle.</p>
       )}
+
+      {["live", "paused", "ended"].includes(c.status) && <Attendees circle={c} signups={signups} />}
 
       {requests.length > 0 && (
         <div className="history">
@@ -129,6 +143,66 @@ function CircleCard({ c, requests, onSent }) {
 
       <ChangeRequest circle={c} onSent={onSent} />
     </section>
+  );
+}
+
+// People who signed up for this circle on the sign-up form (no dates of birth here). Open by default; long lists
+// show the most recent first with "Show all".
+const FIRST_ATTENDEES = 8;
+const shortDay = (iso) => new Date(iso).toLocaleDateString("en-GB", { timeZone: "Europe/London", day: "numeric", month: "short" });
+const initials = (s) => (personName(s).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("") || "?").toUpperCase();
+const waLink = (phone) => { const d = String(phone ?? "").replace(/[^\d]/g, ""); return d.length >= 8 ? `https://wa.me/${d}` : null; };
+
+function Attendees({ circle, signups }) {
+  const [all, setAll] = useState(false);
+  const [openId, setOpenId] = useState(null);
+  const shown = all ? signups : signups.slice(0, FIRST_ATTENDEES);
+  return (
+    <div className="details fac-att">
+      <div className="fac-att-head">
+        <span className="section-title">Attendees</span>
+        <span className="fac-att-count" aria-label={`${signups.length} signed up`}>{signups.length}</span>
+        {signups.length > 0 && (
+          <button type="button" className="small fac-att-csv" onClick={() => downloadCsv(signups, "attendees.csv", () => circle.name)}>Download CSV</button>
+        )}
+      </div>
+      {!signups.length && <p className="muted small fac-att-empty">Nobody has signed up with this circle's sign-up link yet. Share it from <b>Links</b> above.</p>}
+      {signups.length > 0 && (
+        <ul className="fac-att-list">
+          {shown.map((s) => {
+            const open = openId === s.id;
+            const wa = waLink(s.phone);
+            return (
+              <li key={s.id} className={`fac-att-row ${open ? "open" : ""}`}>
+                <button type="button" aria-expanded={open} onClick={() => setOpenId(open ? null : s.id)}>
+                  <span className="fac-att-avatar" aria-hidden="true">{initials(s)}</span>
+                  <span className="fac-att-who">
+                    <span className="fac-att-name">{personName(s)}</span>
+                    <span className="fac-att-sub">{[s.email, s.phone].filter(Boolean).join(" · ")}</span>
+                  </span>
+                  <span className="fac-att-date" title={`Signed up ${fmtDate(String(s.submitted_at).slice(0, 10))}`}>{shortDay(s.submitted_at)}</span>
+                  <span className="fac-att-chev" aria-hidden="true">›</span>
+                </button>
+                {open && (
+                  <div className="fac-att-open">
+                    <SignupDetail s={s} contact={false} />
+                    <div className="fac-att-contact">
+                      {s.email && <a href={`mailto:${s.email}`}>Email</a>}
+                      {wa && <a href={wa} target="_blank" rel="noreferrer">WhatsApp</a>}
+                    </div>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {signups.length > FIRST_ATTENDEES && (
+        <button type="button" className="link small fac-att-more" onClick={() => setAll(!all)}>
+          {all ? "Show fewer" : `Show all ${signups.length}`}
+        </button>
+      )}
+    </div>
   );
 }
 

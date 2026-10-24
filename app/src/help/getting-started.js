@@ -136,13 +136,13 @@ export const gettingStarted = [
       },
       {
         title: "Filter the list",
-        body: "The buttons above the list filter by stage: **Applied**, **In training**, **Ready to assess**, **Certified**, **Not certified**, **Cancelled** and **Revoked**. Start with **Ready to assess**, which means the trainee has sent all their forms and the video.",
+        body: "The buttons above the list filter the trainees: **To assess** (still waiting for your assessment), **Submitted** (sent to the admins), then the outcomes **Certified**, **Not certified**, **Cancelled** and **Revoked**. Start with **To assess**. A trainee marked **Ready to assess** has sent all their forms and the video.",
         shot: "tour-ass-2-filters",
         alt: "The status filter buttons",
       },
       {
         title: "Open a trainee",
-        body: "Click a row to open the trainee. You can read their answers, watch their video and record your assessment. You cannot send emails, change their status or decide the outcome. The admins do that once your assessment is in.",
+        body: "Click a row to open the trainee. You can read their answers, watch their video, record your assessment and submit it to the admins with your recommendation. You cannot send emails, change their status or decide the outcome. The admins do that once you have submitted.",
         shot: "tour-ass-3-row",
         alt: "A trainee row in the list",
       },

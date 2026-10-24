@@ -16,6 +16,18 @@ test.describe("Settings", () => {
     expect(mock.rpc("save_settings")).toEqual([{ p_buffer: 10, p_duration: 75, p_timezone: "Europe/London", p_term_start: "2026-09-01", p_term_end: "2027-07-31" }]);
   });
 
+  test("a new message isn't hidden early by the previous message's timer", async ({ page }) => {
+    await signIn(page, { hash: "/Settings" });
+    const save = sectionOf(page, "Scheduling rules").getByRole("button", { name: "Save" });
+    await save.click();
+    await expect(toast(page)).toHaveText("Settings saved");
+    await page.waitForTimeout(4500);
+    await save.click();
+    // The first message's 6 second timer ends about now; the second message must stay.
+    await page.waitForTimeout(2500);
+    await expect(toast(page)).toHaveText("Settings saved");
+  });
+
   test("settings that would cause a clash are refused in plain English", async ({ page, mock }) => {
     mock.handle("rpc save_settings", fail('new row violates "no_licence_clash"'));
     await signIn(page, { hash: "/Settings" });

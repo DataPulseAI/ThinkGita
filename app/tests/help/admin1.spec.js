@@ -12,7 +12,7 @@ test("admin: tour", async ({ page }) => {
   await nav.getByRole("button", { name: /^Circles/ }).click();
   await snap(page, "tour-admin-2-menu", { clip: [nav, page.getByRole("menuitem", { name: /^Change requests/ })], hl: page.getByRole("menuitem", { name: /^Facilitators/ }), pad: 20 });
   await page.keyboard.press("Escape");
-  await page.mouse.click(900, 600);
+  await page.locator("main").click({ position: { x: 2, y: 2 } });
   await snap(page, "tour-admin-3-stats", { clip: page.locator(".stats"), hl: page.locator(".stats"), pad: 16 });
   await snap(page, "tour-admin-4-header", { clip: topbar(page), hl: page.locator(".who"), pad: 6 });
   await snap(page, "tour-admin-5-overview", { full: false });

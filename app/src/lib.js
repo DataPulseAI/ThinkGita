@@ -68,6 +68,20 @@ export async function trainingAction(action, extra = {}) {
   return data;
 }
 
+// Calls the signups edge function (attendees from the circle sign-up form: Tally backfill, re-check matches).
+export async function signupsAction(action, extra = {}) {
+  const { data, error } = await supabase.functions.invoke("signups", { body: { action, ...extra } });
+  if (error) {
+    let msg = error.message;
+    try {
+      const body = await error.context.json();
+      msg = body.error ?? msg;
+    } catch (_) { /* keep generic message */ }
+    throw new Error(msg);
+  }
+  return data;
+}
+
 export const STATUS_LABEL = {
   pending: "Awaiting approval",
   conflict: "Clash: no licence",

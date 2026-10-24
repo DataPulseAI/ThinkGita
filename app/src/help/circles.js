@@ -283,4 +283,56 @@ export const circleGuides = [
       },
     ],
   },
+  {
+    id: "attendees",
+    section: "Running circles",
+    audience: ["admin"],
+    icon: "users",
+    title: "See who signed up for each circle (Attendees)",
+    summary: "Everyone who filled in the circle sign-up form, linked to their circle. Share each circle's sign-up link, match older sign-ups and download a list.",
+    related: ["zoom-registration", "process-overview", "attendance"],
+    steps: [
+      {
+        title: "Open Attendees",
+        body: "Go to **Circles, Attendees**. Everyone who signed up on the Tally form **Think Gita Circles Sign Up** is listed with their email, WhatsApp number, circle and the date they signed up. New sign-ups arrive within seconds.\n\nPick a circle in the **Circle** list to see only its people, or search by name, email, phone or city. **Download CSV** gives you the list shown as a spreadsheet.",
+        shot: "attendees-1-page",
+        alt: "The Attendees page with the circle filter",
+      },
+      {
+        title: "Open a person",
+        body: "Click a row to see what they wrote: city, how familiar they are with the Gita, how they heard about us and their goals. It also says how they were linked to the circle.",
+        shot: "attendees-2-open",
+        alt: "One attendee opened, with their answers",
+      },
+      {
+        title: "Share each circle's own sign-up link",
+        body: "Open a live circle and click **Copy sign-up link** at the top of the panel, next to the day and time. Share that exact link (on the website, in WhatsApp, in emails).\n\nThe link carries the circle's id and name, so everyone who signs up with it is linked to this circle automatically. Facilitators see the same link on their portal.",
+        shot: "attendees-6-top",
+        alt: "Copy sign-up link at the top of a circle panel",
+        note: "Website listings made by the dashboard get the new link automatically. Hand-made website listings keep their own link until it is replaced.",
+      },
+      {
+        title: "See who signed up from the circle",
+        body: "Lower down the panel, expand **Attendees**. It shows how many people have signed up, the full link with its own copy button, and **See attendees** to open the list for this circle.",
+        shot: "attendees-4-panel",
+        alt: "The Attendees section of a circle with the count and the full link",
+      },
+      {
+        title: "Match older sign-ups",
+        body: "Sign-ups from before the circle id was in the link are matched on what their link did say: the **WhatsApp group**, the **facilitator**, the **language** and the **start date**. Only one clear match is linked.\n\nThe rest wait under **Needs matching** (the number on the tab). Each shows what the link said and the likely circles as buttons. Click the right circle, choose another from the list, or click **Not a circle**. Your choice is kept, even after another import.",
+        shot: "attendees-3-match",
+        alt: "Needs matching, with suggested circles for each sign-up",
+      },
+      {
+        title: "Check again after filling in a circle",
+        body: "If a circle was missing its WhatsApp link or facilitator, fill it in on the circle and click **Check again** on **Needs matching**. It retries every waiting sign-up without contacting Tally.",
+      },
+      {
+        title: "Import past sign-ups",
+        body: "In **Setup, Settings, Circle attendees**, click **Import sign-ups from Tally** once to bring in everyone who signed up before. It is safe to run again (nobody is doubled and your matches are kept), and it can run once every 15 minutes. After that, new sign-ups come in by themselves.",
+        shot: "attendees-5-settings",
+        alt: "The Circle attendees card in Settings",
+      },
+    ],
+  },
 ];

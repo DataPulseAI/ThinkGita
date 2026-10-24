@@ -29,8 +29,16 @@ test("training: admin", async ({ page }) => {
   await snap(page, "assess-3-outcome", { clip: out, hl: out.locator(".tr-decision"), pad: 16 });
   await closeDrawer(page);
 
+  await page.locator(".tr-row", { hasText: "Kavi" }).first().click();
+  await drawer.waitFor();
+  await page.waitForTimeout(400);
+  await openSection(page, "Assessment");
+  await snap(page, "assess-4-submitted", { clip: drawer.locator(".tr-submitted"), hl: drawer.getByRole("button", { name: "Reopen for the assessor" }), pad: 16 });
+  await closeDrawer(page);
+
   await view(page, "Next steps").click();
   await page.locator(".tr-next").waitFor();
+  await snap(page, "training-6-awaiting", { clip: page.locator(".tr-awaiting"), hl: page.locator(".tr-awaiting-row").first(), pad: 16 });
   await snap(page, "training-3-next", { clip: page.locator("main"), hl: page.locator(".tr-next").getByRole("button", { name: /^Send to all/ }).first(), pad: 0, top: true });
   await snap(page, "training-4-chase", { clip: page.locator(".tr-chase"), hl: page.locator(".tr-chase").getByRole("button", { name: /^Resend/ }), pad: 16 });
 

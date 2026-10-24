@@ -153,6 +153,7 @@ const ONGOING = "Join anytime";
 const hasStarted = (c: any) => { const st = startDate(c); return st ? st <= localToday(c.timezone) : RUNNING.includes(c.status); };
 const lessonText = (c: any) => (hasStarted(c) ? ONGOING : `Starts ${shortDate(startDate(c)!)}`);
 // Same format as the working hand-made links: encoded facilitator name, capitalised codes, raw WhatsApp URL last.
+// Mirrored in app/src/signupLink.js (the dashboard's sign-up link buttons): keep in step.
 function link(c: any) {
   const p = [
     `utm_facilitator=${encodeURIComponent(hostName(c))}`, `utm_course=${isBeginners(c) ? "Beg" : "Circle"}`,
@@ -160,6 +161,8 @@ function link(c: any) {
   ];
   const st = startDate(c);
   if (st) p.push(`utm_date=${utmDate(st)}`);
+  // The circle's id and name come back from the form as hidden fields, linking each sign-up to its circle.
+  p.push(`circle_id=${c.id}`, `circle_name=${encodeURIComponent(c.name ?? "")}`);
   if (c.whatsapp_group_link) p.push(`utm_wagrp=${c.whatsapp_group_link.trim()}`);
   return `${SIGNUP}?${p.join("&")}`;
 }

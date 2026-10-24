@@ -1,6 +1,6 @@
 // Training page helpers: personal form links, step progress, list status, links text and filtering.
 import { describe, it, expect } from "vitest";
-import { formLink, progress, traineeStatus, linksText, filterTrainees, traineeNames, STEPS } from "../../src/TrainingPage.jsx";
+import { formLink, progress, traineeStatus, linksText, filterTrainees, traineeNames, STEPS, STATUS, assessorStatus, awaitingDecision, nextSteps, RECOMMEND, RECOMMEND_SHORT, recommendLabel } from "../../src/TrainingPage.jsx";
 import { buildTrainingVars, render, DEFAULT_TEMPLATES } from "../../src/emailTemplate.js";
 
 const forms = [
@@ -230,5 +230,53 @@ describe("isSelf", () => {
     expect(isSelf(t, "ana.work@example.org")).toBe(true);
     expect(isSelf(t, "bo@example.org")).toBe(false);
     expect(isSelf(t, "")).toBe(false);
+  });
+});
+
+describe("submitted assessments", () => {
+  const all = ["agreement", "scene", "empowerment", "wisdom", "video"].map((k) => sub(k));
+  const done = t({ status: "in_training", intro_attended_at: "x", closing_attended_at: "y" });
+  const sent = (o = {}) => ({ ...done, recommendation: "certify", assessment_submitted_at: "2026-10-06T10:00:00Z", assessment_submitted_by: "asha@example.org", ...o });
+
+  it("traineeStatus: assessed comes before ready and in training, but decided outcomes still win", () => {
+    expect(traineeStatus(sent(), progress(done, all, forms))).toBe("assessed");
+    expect(traineeStatus(sent(), progress(done, [], forms))).toBe("assessed");
+    expect(traineeStatus(sent({ status: "certified" }), progress(done, all, forms))).toBe("certified");
+    expect(traineeStatus(sent({ status: "rejected" }), progress(done, all, forms))).toBe("rejected");
+    expect(traineeStatus(sent({ assessment_submitted_at: null }), progress(done, all, forms))).toBe("ready");
+    expect(STATUS.assessed.label).toBe("Assessed, awaiting decision");
+  });
+
+  it("assessorStatus: to assess until submitted, then submitted; outcomes keep theirs", () => {
+    expect(assessorStatus(done)).toBe("to_assess");
+    expect(assessorStatus(t())).toBe("to_assess");
+    expect(assessorStatus(sent())).toBe("submitted");
+    expect(assessorStatus(sent({ status: "not_certified" }))).toBe("not_certified");
+    expect(assessorStatus(t({ status: "revoked" }))).toBe("revoked");
+  });
+
+  it("awaitingDecision: submitted and undecided, oldest first", () => {
+    const list = [
+      sent({ id: "b", assessment_submitted_at: "2026-10-06T12:00:00Z" }),
+      sent({ id: "a", assessment_submitted_at: "2026-10-05T12:00:00Z" }),
+      sent({ id: "c", status: "certified" }),
+      sent({ id: "d", status: "rejected" }),
+      { ...done, id: "e" },
+    ];
+    expect(awaitingDecision(list).map((x) => x.id)).toEqual(["a", "b"]);
+    expect(awaitingDecision()).toEqual([]);
+  });
+
+  it("nextSteps includes the assessments awaiting a decision", () => {
+    const steps = nextSteps([sent({ id: "k" })], all.map((s) => ({ ...s, trainee_id: "k" })), forms, [], Date.parse("2026-10-07T10:00:00Z"));
+    expect(steps.awaiting.map((x) => x.id)).toEqual(["k"]);
+  });
+
+  it("recommendation labels", () => {
+    expect(RECOMMEND.map(([k]) => k)).toEqual(["certify", "not_yet"]);
+    expect(recommendLabel("certify")).toBe("Recommend certifying");
+    expect(recommendLabel("not_yet")).toBe("Not yet");
+    expect(recommendLabel(null)).toBe("");
+    expect(RECOMMEND_SHORT).toEqual({ certify: "Certify", not_yet: "Not yet" });
   });
 });

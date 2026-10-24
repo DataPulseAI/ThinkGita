@@ -105,13 +105,21 @@ export const STATUS = {
   applied: { label: "Applied", cls: "ts-applied" },
   in_training: { label: "In training", cls: "ts-training" },
   ready: { label: "Ready to assess", cls: "ts-ready" },
+  assessed: { label: "Assessed, awaiting decision", cls: "ts-assessed" },
   certified: { label: "Certified", cls: "ts-certified" },
   not_certified: { label: "Not certified", cls: "ts-not" },
   cancelled: { label: "Cancelled", cls: "ts-cancelled" },
   revoked: { label: "Revoked", cls: "ts-revoked" },
   rejected: { label: "Rejected", cls: "ts-rejected" },
 };
-const FILTERS = ["all", "applied", "in_training", "ready", "certified", "not_certified", "cancelled", "revoked"];
+const FILTERS = ["all", "applied", "in_training", "ready", "assessed", "certified", "not_certified", "cancelled", "revoked"];
+// The assessor's own view: what still needs their assessment, what they have sent to the admins, then the outcomes.
+const ASSESSOR_STATUS = { to_assess: { label: "To assess", cls: "ts-ready" }, submitted: { label: "Submitted", cls: "ts-assessed" } };
+const ASSESSOR_FILTERS = ["all", "to_assess", "submitted", "certified", "not_certified", "cancelled", "revoked"];
+// The assessor's recommendation when they submit: admins still decide.
+export const RECOMMEND = [["certify", "Recommend certifying"], ["not_yet", "Not yet"]];
+export const RECOMMEND_SHORT = { certify: "Certify", not_yet: "Not yet" };
+export const recommendLabel = (r) => RECOMMEND.find(([k]) => k === r)?.[1] ?? "";
 // Final outcomes. Cancelled: training stopped, nothing against them. Revoked: permanent (see migration 034).
 export const DECIDED = ["certified", "not_certified", "cancelled", "revoked"];
 export const OUTCOMES = [
@@ -158,9 +166,11 @@ export function progress(trainee, submissions = [], forms = []) {
   });
 }
 
-// Status for the list: decided and rejected trainees keep theirs; everyone with all seven steps done is ready to assess.
+// Status for the list: decided and rejected trainees keep theirs; an assessment sent to the admins waits for their decision;
+// everyone with all seven steps done is ready to assess.
 export function traineeStatus(trainee, prog) {
   if ([...DECIDED, "rejected"].includes(trainee.status)) return trainee.status;
+  if (trainee.assessment_submitted_at) return "assessed";
   if (prog.every((p) => p.done)) return "ready";
   return trainee.status === "in_training" || prog.some((p) => p.done) ? "in_training" : "applied";
 }
@@ -189,6 +199,18 @@ export function lastSent(sends = [], traineeId, formKey) {
     .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] ?? null;
 }
 
+// The assessor's view of a row: to assess, submitted (waiting for the admins), or the outcome once decided.
+export function assessorStatus(trainee) {
+  if ([...DECIDED, "rejected"].includes(trainee.status)) return trainee.status;
+  return trainee.assessment_submitted_at ? "submitted" : "to_assess";
+}
+
+// Assessments sent to the admins and waiting for their decision, oldest first.
+export function awaitingDecision(trainees = []) {
+  return trainees.filter((t) => t.assessment_submitted_at && !DECIDED.includes(t.status) && t.status !== "rejected")
+    .sort((a, b) => String(a.assessment_submitted_at).localeCompare(String(b.assessment_submitted_at)));
+}
+
 // What admins need to do: send each trainee their next form, and chase anyone sent it a while ago who hasn't filled it in.
 // Only people still in training (applied or in training) are included.
 export function nextSteps(trainees = [], subs = [], forms = [], sends = [], now = Date.now(), chaseDays = CHASE_DAYS) {
@@ -202,7 +224,7 @@ export function nextSteps(trainees = [], subs = [], forms = [], sends = [], now 
     if (!last) toSend.push({ trainee, form });
     else if (now - Date.parse(last.created_at) > chaseDays * DAY_MS) chase.push({ trainee, form, sentAt: last.created_at });
   }
-  return { toSend, chase };
+  return { toSend, chase, awaiting: awaitingDecision(trainees) };
 }
 
 // One next form email, filled in for one trainee: their name, the form and their personal link.
@@ -321,8 +343,9 @@ export function TrainingPage({ data, run, initial }) {
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
   const [assignee, setAssignee] = useState("all");
-  const [openId, setOpenId] = useState(initial ?? null);
-  const [view, setView] = useState("list");
+  // #/Training/next opens Next steps (the Overview notice links there); #/Training/<trainee id> opens that trainee.
+  const [openId, setOpenId] = useState(initial && initial !== "next" ? initial : null);
+  const [view, setView] = useState(initial === "next" ? "next" : "list");
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 30e3); return () => clearInterval(id); }, []);
   const [tick, setTick] = useState(0);
@@ -361,7 +384,7 @@ export function TrainingPage({ data, run, initial }) {
   const shown = useMemo(() => filterTrainees(rows, { status, q, assignee: assignee === "me" ? me : assignee }), [rows, status, q, assignee, me]);
   const unmatched = useMemo(() => needsMatching(state?.subs, state?.trainees), [state]);
   const open = openId && rows.find((r) => r.id === openId);
-  const steps = useMemo(() => (state ? nextSteps(state.trainees, state.subs, state.forms, state.sends, now) : { toSend: [], chase: [] }), [state, now]);
+  const steps = useMemo(() => (state ? nextSteps(state.trainees, state.subs, state.forms, state.sends, now) : { toSend: [], chase: [], awaiting: [] }), [state, now]);
   async function assign(ids, to) {
     if (!ids.length) return;
     const who = to ? assigneeLabel(to, options) : "nobody";
@@ -375,7 +398,7 @@ export function TrainingPage({ data, run, initial }) {
   }
 
   if (!state) return <section className="card"><p className="muted">Loading trainees…</p></section>;
-  const todo = steps.toSend.length + steps.chase.length;
+  const todo = steps.toSend.length + steps.chase.length + steps.awaiting.length;
   const toMatch = groupByEmail(unmatched.recent).length;
   const VIEWS = [["list", "Trainees", 0], ["next", "Next steps", todo], ["match", "Needs matching", toMatch], ["emails", "Email wording", 0]];
   return (
@@ -388,7 +411,7 @@ export function TrainingPage({ data, run, initial }) {
         ))}
       </div>
       {view === "next" && (
-        <NextSteps steps={steps} templates={state.templates} data={data} run={run} now={now} onDone={reload} onOpen={(id) => setOpenId(id)} />
+        <NextSteps steps={steps} templates={state.templates} data={data} run={run} now={now} onDone={reload} onOpen={(id) => setOpenId(id)} options={options} />
       )}
       {view === "list" && (<>
       <section className="card tr-page">
@@ -466,7 +489,7 @@ export function TrainingPage({ data, run, initial }) {
 }
 
 // Next steps: everyone's next form to send (grouped by form, in training order), and who to chase.
-function NextSteps({ steps, templates, data, run, now, onDone, onOpen }) {
+function NextSteps({ steps, templates, data, run, now, onDone, onOpen, options = [] }) {
   const [busy, setBusy] = useState(false);
   const template = templates.training_form ?? DEFAULT_TEMPLATES.training_form;
   const groups = STEPS.filter((s) => !s.session).map((s) => ({ key: s.key, items: steps.toSend.filter((x) => x.form.key === s.key) })).filter((g) => g.items.length);
@@ -493,6 +516,22 @@ function NextSteps({ steps, templates, data, run, now, onDone, onOpen }) {
   };
   return (
     <>
+      <section className="card tr-awaiting" aria-label="Awaiting your decision">
+        <div className="card-head"><h2>Awaiting your decision <span className="muted">({steps.awaiting.length})</span></h2></div>
+        <p className="muted small">Assessors have sent these assessments to the admins. Open the trainee, read the assessment and record the outcome.</p>
+        {!steps.awaiting.length && <p className="muted small">No assessments are waiting.</p>}
+        {steps.awaiting.map((t) => {
+          const n = traineeNames(t);
+          return (
+            <div key={t.id} className="tr-next-row tr-awaiting-row">
+              <button type="button" className="link tr-next-name" onClick={() => onOpen(t.id)}>{n.title}</button>
+              <span className="small muted">By {assigneeLabel(t.assessment_submitted_by, options)} · {fmtDate(t.assessment_submitted_at)}</span>
+              <span>{t.recommendation && <span className={`pill tr-rec tr-rec-${t.recommendation}`}>{recommendLabel(t.recommendation)}</span>}</span>
+              <button type="button" className="small primary" onClick={() => onOpen(t.id)} aria-label={`Open ${n.title}`}>Open</button>
+            </div>
+          );
+        })}
+      </section>
       <section className="card tr-next" aria-label="Send next form">
         <div className="card-head"><h2>Send next form <span className="muted">({steps.toSend.length})</span></h2></div>
         <p className="muted small">Each trainee's next form, not sent yet. The email uses the "Next form" wording below, with their name and personal link.</p>
@@ -755,8 +794,12 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
   const [assessment, setAssessment] = useState(() => structuredClone(t.assessment ?? {}));
   const [feedback, setFeedback] = useState(t.feedback ?? "");
   const [busy, setBusy] = useState(false);
+  const [rec, setRec] = useState(t.recommendation ?? null);
   const dirty = JSON.stringify(assessment) !== JSON.stringify(t.assessment ?? {}) || feedback !== (t.feedback ?? "");
   const decided = DECIDED.includes(t.status);
+  const submitted = Boolean(t.assessment_submitted_at);
+  // Once sent to the admins, the assessor can only read it (an admin can reopen it); admins can always edit.
+  const locked = !admin && (submitted || decided);
 
   const update = (patch, msg) => run(async () => {
     const { error } = await supabase.from("trainees").update(patch).eq("id", t.id);
@@ -769,10 +812,30 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
   const setRating = (k, rating) => setAssessment((a) => ({ ...a, [k]: { ...(a[k] ?? {}), rating } }));
   const setNote = (k, note) => setAssessment((a) => ({ ...a, [k]: { ...(a[k] ?? {}), note } }));
   const rated = CRITERIA.filter(([k]) => assessment[k]?.rating).length;
+  const assessError = (error) => new Error(/not_allowed/.test(error.message) ? "This trainee is no longer assigned to you."
+    : /^submitted/.test(error.message) ? "This assessment has already been sent to the admins. Ask an admin to reopen it." : error.message);
   const saveAssessment = () => run(async () => {
     const { error } = await supabase.rpc("save_assessment", { p_trainee: t.id, p_assessment: assessment, p_feedback: feedback });
-    if (error) throw new Error(/not_allowed/.test(error.message) ? "This trainee is no longer assigned to you." : error.message);
-  }, "Assessment saved").then(onChanged);
+    if (error) throw assessError(error);
+  }, admin ? "Assessment saved" : "Draft saved").then(onChanged);
+  async function submitAssessment() {
+    if (!rec) return;
+    if (!confirm(`Send your assessment of ${n.title} to the admins? You won't be able to change it after this unless an admin reopens it.`)) return;
+    setBusy(true);
+    await run(async () => {
+      const { error } = await supabase.rpc("submit_assessment", { p_trainee: t.id, p_assessment: assessment, p_feedback: feedback, p_recommendation: rec });
+      if (error) throw assessError(error);
+    }, "Submitted. The admins will see it on the Training page.");
+    setBusy(false);
+    onChanged();
+  }
+  const reopen = () => {
+    if (!confirm(`Reopen this assessment for ${assigneeLabel(t.assessment_submitted_by, options)}? They can change it and submit it again.`)) return;
+    run(async () => {
+      const { error } = await supabase.rpc("reopen_assessment", { p_trainee: t.id });
+      if (error) throw error;
+    }, "Assessment reopened for the assessor.").then(onChanged);
+  };
   const linkForms = STEPS.filter((s) => !s.session).map((s) => forms.find((f) => f.key === s.key)).filter((f) => f?.url);
 
   return (
@@ -874,7 +937,15 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
           <CopyButton text={linksText(t, forms)} label="Copy all links" />
         </Fold>}
 
-        <Fold title="Assessment" summary={`${rated} of ${CRITERIA.length} rated`}>
+        <Fold title="Assessment" summary={submitted ? `Submitted ${fmtDate(t.assessment_submitted_at)}` : `${rated} of ${CRITERIA.length} rated`}>
+          {submitted && (
+            <p className="small tr-submitted">
+              {admin ? <>Submitted by <b>{assigneeLabel(t.assessment_submitted_by, options)}</b> on {fmtStamp(t.assessment_submitted_at)}</> : <>Submitted on {fmtStamp(t.assessment_submitted_at)}</>}
+              {t.recommendation && <>: <span className={`pill tr-rec tr-rec-${t.recommendation}`}>{recommendLabel(t.recommendation)}</span></>}
+              {admin && !decided && <>{" "}<button type="button" className="link small" onClick={reopen}>Reopen for the assessor</button></>}
+              {!admin && !decided && <span className="muted"> An admin will record the outcome.</span>}
+            </p>
+          )}
           <div className="tr-criteria">
             {CRITERIA.map(([k, label]) => (
               <div key={k} className="tr-criterion">
@@ -882,20 +953,37 @@ function TraineeDrawer({ row, subs, forms, sends = [], now = Date.now(), templat
                   <span>{label}</span>
                   <div className="seg" role="radiogroup" aria-label={label}>
                     {RATINGS.map(([r, rl]) => (
-                      <button key={r} type="button" role="radio" aria-checked={assessment[k]?.rating === r} className={assessment[k]?.rating === r ? "on" : ""} onClick={() => setRating(k, r)}>{rl}</button>
+                      <button key={r} type="button" role="radio" aria-checked={assessment[k]?.rating === r} className={assessment[k]?.rating === r ? "on" : ""} disabled={locked} onClick={() => setRating(k, r)}>{rl}</button>
                     ))}
                   </div>
                 </div>
-                <input value={assessment[k]?.note ?? ""} placeholder="Note (optional)" aria-label={`${label} note`} onChange={(e) => setNote(k, e.target.value)} />
+                <input value={assessment[k]?.note ?? ""} placeholder={locked ? "" : "Note (optional)"} aria-label={`${label} note`} readOnly={locked} onChange={(e) => setNote(k, e.target.value)} />
               </div>
             ))}
           </div>
           <label className="tr-feedback">{admin ? "Overall feedback (goes into the email)" : "Overall feedback (admins use it in the final email)"}
-            <textarea rows="5" value={feedback} onChange={(e) => setFeedback(e.target.value)} />
+            <textarea rows="5" value={feedback} readOnly={locked} onChange={(e) => setFeedback(e.target.value)} />
           </label>
-          <div className="actions">
-            <button className="primary" disabled={!dirty || busy} onClick={saveAssessment}>{dirty ? "Save assessment" : "Saved"}</button>
-          </div>
+          {!admin && (
+            <div className="tr-recommend">
+              <span className="small">Your recommendation</span>
+              <div className="seg" role="radiogroup" aria-label="Your recommendation">
+                {RECOMMEND.map(([k, label]) => (
+                  <button key={k} type="button" role="radio" aria-checked={rec === k} className={rec === k ? "on" : ""} disabled={locked} onClick={() => setRec(k)}>{label}</button>
+                ))}
+              </div>
+            </div>
+          )}
+          {admin ? (
+            <div className="actions">
+              <button className="primary" disabled={!dirty || busy} onClick={saveAssessment}>{dirty ? "Save assessment" : "Saved"}</button>
+            </div>
+          ) : !locked && (
+            <div className="actions">
+              <button disabled={!dirty || busy} onClick={saveAssessment}>{dirty ? "Save draft" : "Draft saved"}</button>
+              <button className="primary" disabled={!rec || busy} onClick={submitAssessment} title={rec ? "" : "Choose your recommendation first"}>Submit to admins</button>
+            </div>
+          )}
         </Fold>
 
         {admin
@@ -954,6 +1042,9 @@ function Outcome({ t, row, templates, data, run, assessment, feedback, busy, set
           {" "}Email: {t.final_email_status === "sent" ? `sent ${fmtStamp(t.final_email_at)}` : t.final_email_status || "not sent"}.
         </p>
       )}
+      {t.recommendation && t.assessment_submitted_at && (
+        <p className="small tr-recommends">Assessor recommends: <span className={`pill tr-rec tr-rec-${t.recommendation}`}>{RECOMMEND_SHORT[t.recommendation]}</span></p>
+      )}
       <div className="seg tr-decision" role="radiogroup" aria-label="Outcome">
         {OUTCOMES.map(([k, label]) => (
           <button key={k} type="button" role="radio" aria-checked={decision === k} className={`${decision === k ? "on" : ""} ${k === "revoked" ? "tr-revoke" : ""}`} disabled={busy} onClick={() => choose(k)}>{label}</button>
@@ -987,7 +1078,13 @@ function TrainingEmails({ templates, data, run, onSaved }) {
   const saved = templates[key] ?? { key, ...DEFAULT_TEMPLATES[key] };
   const [draft, setDraft] = useState({ subject: saved.subject, body: saved.body });
   const bodyRef = useRef(null);
-  useEffect(() => { setDraft({ subject: saved.subject, body: saved.body }); }, [key, saved.subject, saved.body]);
+  // Switching email starts from its saved wording. When the saved wording reloads, unsaved edits are kept.
+  const shown = useRef({ key, subject: saved.subject, body: saved.body });
+  useEffect(() => {
+    const prev = shown.current;
+    shown.current = { key, subject: saved.subject, body: saved.body };
+    setDraft((d) => (prev.key !== key || (d.subject === prev.subject && d.body === prev.body) ? { subject: saved.subject, body: saved.body } : d));
+  }, [key, saved.subject, saved.body]);
   const dirty = draft.subject !== saved.subject || draft.body !== saved.body;
   const unknown = unknownPlaceholders(draft);
   const FORM_ONLY = ["form_name", "form_link"];
@@ -1115,7 +1212,13 @@ export function AssessorPage({ email }) {
     return () => { live = false; };
   }, [me, tick]);
 
-  const notify = (kind, text) => { setToast({ kind, text }); setTimeout(() => setToast(null), 6000); };
+  // One timer for the toast, so an older message's timer can't hide a newer one early.
+  const toastTimer = useRef(null);
+  const notify = (kind, text) => {
+    setToast({ kind, text });
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 6000);
+  };
   const run = async (fn, okText) => {
     try {
       const out = await fn();
@@ -1129,14 +1232,14 @@ export function AssessorPage({ email }) {
 
   const rows = useMemo(() => (state ? state.trainees.map((t) => {
     const prog = progress(t, state.subs, state.forms);
-    return { id: t.id, t, prog, status: traineeStatus(t, prog), done: prog.filter((p) => p.done).length };
+    return { id: t.id, t, prog, status: traineeStatus(t, prog), mine: assessorStatus(t), done: prog.filter((p) => p.done).length };
   }) : []), [state]);
   const counts = useMemo(() => {
     const n = { all: rows.length };
-    for (const r of rows) n[r.status] = (n[r.status] ?? 0) + 1;
+    for (const r of rows) n[r.mine] = (n[r.mine] ?? 0) + 1;
     return n;
   }, [rows]);
-  const shown = useMemo(() => filterTrainees(rows, { status, q }), [rows, status, q]);
+  const shown = useMemo(() => filterTrainees(rows, { q }).filter((r) => status === "all" || r.mine === status), [rows, status, q]);
   const open = openId && rows.find((r) => r.id === openId);
   const data = useMemo(() => ({ me: { email: me }, settings: {} }), [me]);
 
@@ -1150,12 +1253,12 @@ export function AssessorPage({ email }) {
               <input type="search" placeholder="Search name, email, phone" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search trainees" />
             </div>
           </div>
-          <p className="card-sub muted small">Open a trainee to see their application, their training forms and videos, and to record your assessment. Admins make the final decision.</p>
+          <p className="card-sub muted small">Open a trainee to see their application, their training forms and videos, and to record your assessment. Save a draft as you go, then submit it to the admins with your recommendation. Admins make the final decision.</p>
           {loadErr && <p className="hint warn">{loadErr}</p>}
           <div className="web-filter" role="group" aria-label="Training status">
-            {FILTERS.map((k) => (
+            {ASSESSOR_FILTERS.map((k) => (
               <button key={k} type="button" className={`web-chip ${status === k ? "on" : ""}`} aria-pressed={status === k} onClick={() => setStatus(k)}>
-                {k === "all" ? "All" : STATUS[k].label} <span className="ws-n">{counts[k] ?? 0}</span>
+                {k === "all" ? "All" : (ASSESSOR_STATUS[k] ?? STATUS[k]).label} <span className="ws-n">{counts[k] ?? 0}</span>
               </button>
             ))}
           </div>
@@ -1176,7 +1279,7 @@ export function AssessorPage({ email }) {
                     <span className="tr-names"><b>{n.title}</b>{n.sub && <span className="muted small">{n.sub}</span>}</span>
                   </span>
                   <span className="tr-email small" role="cell">{r.t.email}</span>
-                  <span role="cell"><span className={`pill tr-status ${STATUS[r.status].cls}`}>{STATUS[r.status].label}</span></span>
+                  <span role="cell"><span className={`pill tr-status ${r.mine === "submitted" ? ASSESSOR_STATUS.submitted.cls : STATUS[r.status].cls}`}>{r.mine === "submitted" ? ASSESSOR_STATUS.submitted.label : STATUS[r.status].label}</span></span>
                   <span className="tr-progress" role="cell"><Dots prog={r.prog} /> <span className="muted small">{r.done} of {STEPS.length}</span></span>
                 </div>
               );

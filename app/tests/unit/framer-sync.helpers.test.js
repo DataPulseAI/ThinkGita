@@ -275,7 +275,7 @@ describe("link", () => {
   it("builds the signup link with encoded name, codes, date and WhatsApp last", () => {
     const c = readyCircle({ facilitator: person({ initiated_name: "Ananda-rupa Krsna das" }), whatsapp_group_link: " https://chat.whatsapp.com/ABC?x=1 ", starts_on: "2026-10-18" });
     const url = fs.link(c);
-    expect(url).toBe("https://forms.thinkgita.org/circlesignup?utm_facilitator=Ananda-rupa%20Krsna%20das&utm_course=Circle&utm_lang=Eng&utm_date=18Oct26&utm_wagrp=https://chat.whatsapp.com/ABC?x=1");
+    expect(url).toBe("https://forms.thinkgita.org/circlesignup?utm_facilitator=Ananda-rupa%20Krsna%20das&utm_course=Circle&utm_lang=Eng&utm_date=18Oct26&circle_id=circle-1&circle_name=Gita%20Circles%20%7C%20Asha%20Example%20%7C%20Wednesday%2019%3A30%20(UK)&utm_wagrp=https://chat.whatsapp.com/ABC?x=1");
     expect(url.split("&").pop().startsWith("utm_wagrp=")).toBe(true);
   });
   it("encodes ampersands in co-facilitator names", () => {

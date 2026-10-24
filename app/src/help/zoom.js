@@ -106,4 +106,38 @@ export const zoomGuides = [
       },
     ],
   },
+  {
+    id: "zoom-registration",
+    section: "Zoom and attendance",
+    audience: ["admin"],
+    icon: "mail",
+    title: "Collect attendees' emails on Zoom (registration)",
+    summary: "Ask people joining a circle's Zoom meeting for their name and email once, so attendance shows who came by email.",
+    related: ["attendance", "attendees", "zoom-meetings"],
+    steps: [
+      {
+        title: "What it does",
+        body: "With registration on, the first time someone opens the circle's join link Zoom asks for their **first name, last name and email**. They click **Register**, are approved straight away and join. They register once for the whole series and get a confirmation email with a calendar invite.\n\nThe join link and the WhatsApp link stay the same. Nothing changes in ThinkGita's Zoom account settings: it is set on one meeting at a time.",
+      },
+      {
+        title: "Turn it on for one circle",
+        body: "Open a live circle, find **Zoom details** and, under **Collect emails on Zoom**, click **Turn on**. Click **Turn off** to go back to joining without a form.",
+        shot: "zoomreg-1-panel",
+        alt: "Collect emails on Zoom in a circle's Zoom details",
+      },
+      {
+        title: "Facilitators register too",
+        body: "Facilitators fill in the same short form, then **Claim host** with the host key as usual. Their portal shows the extra step while registration is on.",
+      },
+      {
+        title: "See the emails in Attendance",
+        body: "After the next attendance sync, the email each person registered with appears against them in **Zoom, Attendance**, so the same person is counted once each week even if their Zoom name changes.",
+        note: "Emails are not checked, and every joiner fills in the form once, which takes 10 to 20 seconds. The Zoom app needs the scopes meeting:update:meeting:admin and meeting:read:list_registrants:admin.",
+      },
+      {
+        title: "New circles",
+        body: "To have every newly approved circle ask for emails, tick **Ask for name and email on new circles' Zoom meetings** in **Setup, Settings, Circle attendees**. Existing circles are only changed one by one from their panel.",
+      },
+    ],
+  },
 ];

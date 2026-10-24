@@ -1,0 +1,75 @@
+/* Circle attendees (AttendeesPage.jsx, Facilitator.jsx). Uses the tokens and base classes from styles.css. */
+.at-page .filters input[type="search"] { width: 240px; }
+.at-page .card-sub { margin: 0 0 10px; max-width: 760px; }
+.at-circle-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 10px; }
+
+.at-list { display: grid; }
+.at-row { display: grid; align-items: center; gap: 12px; padding: 9px 8px; border-bottom: 1px solid var(--line);
+  grid-template-columns: minmax(180px, 1.3fr) minmax(170px, 1.2fr) minmax(120px, .8fr) minmax(160px, 1.3fr) minmax(90px, .6fr); }
+.at-item > .at-row { cursor: pointer; }
+.at-item > .at-row:hover { background: var(--surface-2); }
+.at-item > .at-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.at-head { font-size: 12px; color: var(--muted); font-weight: 600; padding-top: 4px; padding-bottom: 6px; }
+.at-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.at-open { padding: 8px 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.at-empty { padding: 16px 8px; }
+
+.at-detail { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; margin: 0 0 6px; }
+.at-detail dt { font-size: 12px; color: var(--muted); }
+.at-detail dd { margin: 2px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.at-match-list { display: grid; gap: 6px; }
+.at-match-row { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(260px, 1.2fr); gap: 10px; align-items: center;
+  padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.at-match-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.at-match-actions select { max-width: 280px; }
+
+.at-panel { display: grid; gap: 6px; }
+.at-panel-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.at-link { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--surface-2); padding: 3px 6px; border-radius: 6px; }
+.at-when { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.at-zoomreg { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 10px 0 2px; margin-top: 8px; border-top: 1px solid var(--line); }
+
+/* Facilitator portal: attendees on a circle card */
+.fac-att { gap: 0; padding: 14px 16px; }
+.fac-att-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.fac-att-count { display: inline-grid; place-items: center; min-width: 22px; height: 20px; padding: 0 7px; box-sizing: border-box;
+  border-radius: 99px; background: var(--surface); border: 1px solid var(--line); font-size: 12px; font-weight: 600; color: var(--ink); }
+.fac-att-csv { margin-left: auto; }
+.fac-att-empty { margin: 4px 0 0; }
+.fac-att-list { list-style: none; margin: 0; padding: 0; }
+.fac-att-row + .fac-att-row { border-top: 1px solid var(--line); }
+.fac-att-row > button { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: grid; align-items: center; gap: 12px;
+  grid-template-columns: 34px minmax(0, 1fr) auto 12px; padding: 10px 6px; border-radius: 8px; }
+.fac-att-row > button:hover { background: var(--surface); }
+.fac-att-row > button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.fac-att-avatar { width: 34px; height: 34px; border-radius: 99px; display: grid; place-items: center; font-size: 12.5px; font-weight: 700;
+  background: var(--accent-soft); color: var(--accent-text); }
+.fac-att-who { display: grid; gap: 2px; min-width: 0; }
+.fac-att-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fac-att-sub { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fac-att-date { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.fac-att-chev { color: var(--muted); font-size: 18px; line-height: 1; transition: transform .15s ease; }
+.fac-att-row.open .fac-att-chev { transform: rotate(90deg); }
+.fac-att-open { margin: 0 6px 12px 52px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.fac-att-open .at-detail { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); margin: 0; }
+.fac-att-contact { display: flex; gap: 8px; margin-top: 10px; }
+.fac-att-contact a { padding: 5px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-2); color: var(--ink);
+  font-size: 12.5px; font-weight: 600; text-decoration: none; }
+.fac-att-contact a:hover { border-color: var(--muted); }
+.fac-att-more { margin-top: 8px; justify-self: start; }
+
+@media (max-width: 720px) {
+  .at-row { grid-template-columns: 1fr auto; }
+  .at-head { display: none; }
+  .at-row > :nth-child(2), .at-row > :nth-child(3), .at-row > :nth-child(4) { grid-column: 1 / -1; }
+  .at-match-row { grid-template-columns: 1fr; }
+  .at-page .filters input[type="search"] { width: 100%; }
+  .fac-att-row > button { grid-template-columns: 34px minmax(0, 1fr) 12px; }
+  .fac-att-date { display: none; }
+  .fac-att-sub { white-space: normal; overflow-wrap: anywhere; }
+  .fac-att-open { margin-left: 6px; }
+}
+.detail-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }

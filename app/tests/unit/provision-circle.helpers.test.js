@@ -122,6 +122,52 @@ describe("mergePeople", () => {
   it("missing duration counts as zero", () => expect(pc.mergePeople([{ name: "X" }])[0].seconds).toBe(0));
 });
 
+describe("meetingSettings", () => {
+  const base = { join_before_host: true, jbh_time: 0, waiting_room: false, mute_upon_entry: true, host_video: false, participant_video: false, auto_recording: "none" };
+  it("without registration: approval_type 2, as before", () => {
+    expect(pc.meetingSettings()).toEqual({ ...base, approval_type: 2 });
+    expect(pc.meetingSettings(false)).toEqual({ ...base, approval_type: 2 });
+  });
+  it("with registration: register once for the series, approved automatically, emails on", () => {
+    expect(pc.meetingSettings(true)).toEqual({
+      ...base, approval_type: 0, registration_type: 1, registrants_confirmation_email: true, registrants_email_notification: true,
+    });
+  });
+});
+
+describe("fillRegistrantEmails", () => {
+  const regs = [
+    { id: "r1", first_name: "Asha", last_name: "Example", email: "asha@example.org" },
+    { id: "r2", first_name: "Ravi", last_name: "Example", email: "ravi1@example.org" },
+    { id: "r3", first_name: "ravi", last_name: "example", email: "ravi2@example.org" },
+    { id: "r4", first_name: "Bela", last_name: "Example", email: "bela@example.org" },
+  ];
+  it("by registrant_id, even when the display name differs", () => {
+    expect(pc.fillRegistrantEmails([{ name: "Asha (phone)", registrant_id: "r1" }], regs)[0].user_email).toBe("asha@example.org");
+  });
+  it("by a unique name, ignoring case and spaces", () => {
+    expect(pc.fillRegistrantEmails([{ name: "  BELA   example " }], regs)[0].user_email).toBe("bela@example.org");
+  });
+  it("an ambiguous name is left blank", () => {
+    expect(pc.fillRegistrantEmails([{ name: "Ravi Example" }], regs)[0].user_email).toBeUndefined();
+  });
+  it("an email Zoom already has is kept", () => {
+    expect(pc.fillRegistrantEmails([{ name: "Asha Example", registrant_id: "r1", user_email: "own@example.org" }], regs)[0].user_email).toBe("own@example.org");
+  });
+  it("no registrants or no match leaves participants unchanged", () => {
+    const parts = [{ name: "Nobody" }];
+    expect(pc.fillRegistrantEmails(parts, [])).toBe(parts);
+    expect(pc.fillRegistrantEmails(parts, regs)).toEqual(parts);
+  });
+  it("feeds mergePeople so rejoins under different names merge by email", () => {
+    const out = pc.mergePeople(pc.fillRegistrantEmails([
+      { name: "Asha Example", registrant_id: "r1", duration: 60 },
+      { name: "Asha's iPad", registrant_id: "r1", duration: 30 },
+    ], regs));
+    expect(out).toEqual([expect.objectContaining({ person_key: "asha@example.org", seconds: 90 })]);
+  });
+});
+
 describe("constants", () => {
   it("Zoom day names are Sunday first", () => {
     expect(pc.ZOOM_DAYS[1]).toBe("Sunday");

@@ -22,7 +22,10 @@ test.describe("Facilitator portal", () => {
     await expect(live).toContainText(dateText("from Mon 7 Sept 2026 until Mon 28 Jun 2027"));
     const links = live.locator(".details", { hasText: "Links" });
     await expect(links).toContainText("https://chat.whatsapp.com/EXAMPLE01");
-    await expect(links).toContainText("https://signup.example.org/?circle=c01");
+    // The sign-up link is built for the circle and carries its id and name back from the form.
+    await expect(links).toContainText("https://forms.thinkgita.org/circlesignup?utm_facilitator=Kirtana%20%26%20Esha%20Specimen&");
+    await expect(links).toContainText("&circle_id=c01&circle_name=Gita%20Circles%20%7C%20Kirtana");
+    await expect(links).toContainText("utm_wagrp=https://chat.whatsapp.com/EXAMPLE01");
     await expect(links).toContainText("https://drive.example.org/shared-folder");
 
     // c08: their own, still awaiting approval.

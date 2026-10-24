@@ -7,15 +7,16 @@ const row = (page, name) => page.locator(".tr-row", { hasText: name });
 const panel = (page) => page.locator("aside.tr-drawer");
 
 test.describe("Assessors", () => {
-  test("an assessor sees only their trainees, can play a video and save the assessment", async ({ page, mock }) => {
+  test("an assessor sees only their trainees, can play a video and save a draft", async ({ page, mock }) => {
     await page.route("https://storage.example.org/**", (r) => r.fulfill({ status: 200, contentType: "video/mp4", body: "not a video" }));
     await signIn(page, { role: "assessor", email: ASSESSOR_EMAIL });
     await expect(page.locator(".topbar .role")).toHaveText("Assessor");
     await expect(page.locator("nav.tabs")).toHaveCount(0);
     const list = page.getByRole("region", { name: "Trainees assigned to you" });
-    await expect(list.getByRole("heading")).toContainText("(1)");
-    await expect(list.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
+    await expect(list.getByRole("heading")).toContainText("(2)");
+    await expect(list.locator(".tr-row:not(.tr-head)")).toHaveCount(2);
     await expect(row(page, "Haridas")).toContainText("Ready to assess");
+    await expect(row(page, "Kavi")).toContainText("Submitted");
 
     await row(page, "Haridas").click();
     const p = panel(page);
@@ -32,8 +33,8 @@ test.describe("Assessors", () => {
 
     await p.getByRole("radiogroup", { name: "Facilitation readiness" }).getByRole("radio", { name: "Meets" }).click();
     await p.getByRole("textbox", { name: /Overall feedback/ }).fill("Calm and clear.");
-    await p.getByRole("button", { name: "Save assessment" }).click();
-    await expect(toast(page)).toContainText("Assessment saved");
+    await p.getByRole("button", { name: "Save draft" }).click();
+    await expect(toast(page)).toContainText("Draft saved");
     expect(mock.rpc("save_assessment").at(-1)).toEqual({ p_trainee: "hari.trainee", p_assessment: { readiness: { rating: "meets" } }, p_feedback: "Calm and clear." });
   });
 
@@ -51,7 +52,7 @@ test.describe("Assessors", () => {
     await expect(page.getByRole("checkbox", { name: /^Select / })).toHaveCount(0);
 
     await page.getByRole("combobox", { name: "Assessor filter" }).selectOption({ label: "Asha Assessor (assessor)" });
-    await expect(page.locator(".tr-row:not(.tr-head)")).toHaveCount(3);
+    await expect(page.locator(".tr-row:not(.tr-head)")).toHaveCount(4);
     await page.getByRole("combobox", { name: "Assessor filter" }).selectOption({ label: "Unassigned" });
     await expect(page.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
     await expect(row(page, "Jay")).toBeVisible();
@@ -73,15 +74,20 @@ test.describe("Assessors", () => {
     await expect(page.locator("aside.drawer")).toHaveCount(0);
   });
 
-  test("the assessor view has the same status filters", async ({ page }) => {
+  test("the assessor view filters by To assess and Submitted", async ({ page }) => {
     await signIn(page, { role: "assessor", email: ASSESSOR_EMAIL });
     const list = page.getByRole("region", { name: "Trainees assigned to you" });
     const chips = list.getByRole("group", { name: "Training status" });
-    await expect(chips.getByRole("button", { name: /^All\s*1$/ })).toBeVisible();
-    await chips.getByRole("button", { name: /^Applied/ }).click();
+    await expect(chips.getByRole("button", { name: /^All\s*2$/ })).toBeVisible();
+    await expect(chips.getByRole("button", { name: /^Applied/ })).toHaveCount(0);
+    await chips.getByRole("button", { name: /^Certified/ }).click();
     await expect(list.locator(".tr-row:not(.tr-head)")).toHaveCount(0);
-    await chips.getByRole("button", { name: /^Ready to assess/ }).click();
+    await chips.getByRole("button", { name: /^To assess/ }).click();
     await expect(list.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
+    await expect(row(page, "Haridas")).toBeVisible();
+    await chips.getByRole("button", { name: /^Submitted/ }).click();
+    await expect(list.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
+    await expect(row(page, "Kavi")).toBeVisible();
   });
 
   test("removing an assessor asks first, and says their trainees become unassigned", async ({ page, mock, dialogs }) => {
@@ -89,7 +95,7 @@ test.describe("Assessors", () => {
     await navTo(page, "Setup", "Settings");
     const card = page.getByRole("region", { name: "Assessors" });
     await card.getByRole("button", { name: `Remove ${ASSESSOR_EMAIL} as an assessor` }).click();
-    expect(dialogs.messages.at(-1)).toMatch(/Their 1 assigned trainee will become unassigned\./);
+    expect(dialogs.messages.at(-1)).toMatch(/Their 2 assigned trainees will become unassigned\./);
     await expect(toast(page)).toContainText("removed as an assessor");
     expect(mock.rest("assessors", "DELETE")).toHaveLength(1);
   });
@@ -138,7 +144,7 @@ test.describe("Assessors", () => {
     await navTo(page, "Setup", "Settings");
     const card = page.getByRole("region", { name: "Assessors" });
     await expect(card).toContainText("Asha Assessor");
-    await expect(card).toContainText("1 assigned");
+    await expect(card).toContainText("2 assigned");
 
     const form = card.getByRole("form", { name: "Add an assessor" });
     await form.getByRole("textbox", { name: "Email" }).fill("helper@example.org");

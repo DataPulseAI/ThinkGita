@@ -68,5 +68,7 @@ test("assessor view", async ({ page }) => {
   await snap(page, "score-2-criteria", { clip: assess, hl: assess.locator(".tr-criterion").first(), pad: 16 });
   const fb = assess.locator("textarea").last();
   await fb.fill("Warm and clear. Keep slowing down at the key verses.");
-  await snap(page, "score-3-feedback", { clip: [fb, assess.getByRole("button", { name: /Save assessment|Saved/ })], hl: fb, pad: 16 });
+  await snap(page, "score-3-feedback", { clip: [fb, assess.getByRole("button", { name: /Save draft|Draft saved/ })], hl: fb, pad: 16 });
+  await assess.getByRole("radiogroup", { name: "Your recommendation" }).getByRole("radio", { name: "Recommend certifying" }).click();
+  await snap(page, "score-4-submit", { clip: [assess.locator(".tr-recommend"), assess.getByRole("button", { name: "Submit to admins" })], hl: assess.getByRole("button", { name: "Submit to admins" }), pad: 16 });
 });

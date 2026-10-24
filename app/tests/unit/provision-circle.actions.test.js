@@ -22,7 +22,7 @@ beforeAll(async () => {
 afterAll(() => restoreEnv());
 
 // fake Zoom
-let zoomCalls, zoomFail, nextMeeting;
+let zoomCalls, zoomFail, nextMeeting, zoomGet;
 function zoomFetch() {
   return vi.fn(async (url, init = {}) => {
     const u = String(url);
@@ -34,6 +34,8 @@ function zoomFetch() {
     const fail = zoomFail.find((f) => f.method === method && path.startsWith(f.path));
     if (fail) return new Response(fail.body ?? "{\"message\":\"nope\"}", { status: fail.status ?? 400 });
     if (method === "POST" && /\/meetings$/.test(path)) return new Response(JSON.stringify(nextMeeting), { status: 201 });
+    const got = method === "GET" && zoomGet.find((g) => path.startsWith(g.path));
+    if (got) return new Response(JSON.stringify(got.body), { status: 200 });
     return new Response(null, { status: 204 });
   });
 }
@@ -61,7 +63,7 @@ function setup({ circles = [circle()], settings = {}, licences = [licence()], co
 const row = (id = "c1") => db.row("circles", id);
 
 beforeEach(() => {
-  zoomCalls = []; zoomFail = []; nextMeeting = { id: 987654321, join_url: "https://zoom.us/j/987654321?pwd=x", password: "abc123" };
+  zoomCalls = []; zoomFail = []; zoomGet = []; nextMeeting = { id: 987654321, join_url: "https://zoom.us/j/987654321?pwd=x", password: "abc123" };
   sent.length = 0;
   vi.stubGlobal("fetch", zoomFetch());
 });
@@ -143,6 +145,34 @@ describe("provision", () => {
     expect(sent.map((m) => m.to)).toEqual(["asha@example.org", "bela@example.org"]);
     expect(sent[1].subject).toContain("Bela");
     expect(db.invites).toEqual(["asha@example.org", "bela@example.org"]);
+  });
+
+  it("Zoom registration off by default: approval_type 2 and the flag is not set", async () => {
+    freeze("2026-10-10T12:00:00Z");
+    setup();
+    await pc.provision("c1", "a", false);
+    const settings = zoomApi("POST")[0].body.settings;
+    expect(settings.approval_type).toBe(2);
+    expect(settings.registration_type).toBeUndefined();
+    expect(row().zoom_registration).toBeUndefined();
+  });
+
+  it("with zoom_registration_new on, the meeting has registration and the circle is flagged", async () => {
+    freeze("2026-10-10T12:00:00Z");
+    setup({ settings: { zoom_registration_new: true } });
+    await pc.provision("c1", "a", false);
+    expect(zoomApi("POST")[0].body.settings).toMatchObject({
+      join_before_host: true, approval_type: 0, registration_type: 1, registrants_confirmation_email: true, registrants_email_notification: true,
+    });
+    expect(row()).toMatchObject({ status: "live", zoom_registration: true });
+  });
+
+  it("a circle that already has registration keeps it even when new meetings default to off", async () => {
+    freeze("2026-10-10T12:00:00Z");
+    setup({ circles: [circle({ zoom_registration: true })] });
+    await pc.provision("c1", "a", false);
+    expect(zoomApi("POST")[0].body.settings).toMatchObject({ approval_type: 0, registration_type: 1 });
+    expect(row().zoom_registration).toBe(true);
   });
 
   it("mock licences never call Zoom", async () => {
@@ -401,6 +431,17 @@ describe("moveLicence", () => {
     expect(sent[0].subject).toContain("have changed");
   });
 
+  it("the new meeting keeps the circle's registration setting", async () => {
+    freeze("2026-10-10T12:00:00Z");
+    setup({ circles: [live({ zoom_registration: true })], licences: [licence(), target] });
+    await pc.moveLicence("c1", "a", "lic-2");
+    expect(zoomApi("POST")[0].body.settings).toMatchObject({ approval_type: 0, registration_type: 1, registrants_confirmation_email: true });
+    setup({ circles: [live()], licences: [licence(), target] });
+    zoomCalls = [];
+    await pc.moveLicence("c1", "a", "lic-2");
+    expect(zoomApi("POST")[0].body.settings.approval_type).toBe(2);
+  });
+
   it("the move email says the Zoom link and host key are new", async () => {
     freeze("2026-10-10T12:00:00Z");
     setup({ circles: [live({ join_url: "https://zoom.us/j/555" })], licences: [licence(), target] });
@@ -431,6 +472,114 @@ describe("moveLicence", () => {
     setup({ circles: [live()], licences: over ? [licence(), { ...target, ...over }] : [licence()] });
     await expect(pc.moveLicence("c1", "a", "lic-2")).rejects.toThrow(msg);
   });
+});
+
+describe("zoomRegistration", () => {
+  const live = (over = {}) => circle({ status: "live", zoom_meeting_id: "555", join_url: "https://zoom.us/j/555", ...over });
+
+  it("on: patches the meeting to register and auto approve, keeps the link, sets the flag and audits", async () => {
+    setup({ circles: [live()] });
+    const r = await pc.zoomRegistration("c1", "admin@example.org", true);
+    expect(r).toEqual({ ok: true, on: true });
+    expect(zoomCalls).toHaveLength(1);
+    expect(zoomCalls[0]).toMatchObject({ method: "PATCH", path: "/meetings/555", body: {
+      settings: { approval_type: 0, registration_type: 1, registrants_confirmation_email: true, registrants_email_notification: true },
+    } });
+    expect(row()).toMatchObject({ zoom_registration: true, join_url: "https://zoom.us/j/555" });
+    expect(db.tables.audit_log.at(-1)).toMatchObject({ actor: "admin@example.org", action: "zoom_registration", circle_id: "c1", detail: { on: true } });
+  });
+
+  it("off: patches approval_type 2 only", async () => {
+    setup({ circles: [live({ status: "paused", zoom_registration: true })] });
+    expect(await pc.zoomRegistration("c1", "a", false)).toEqual({ ok: true, on: false });
+    expect(zoomCalls[0]).toMatchObject({ method: "PATCH", path: "/meetings/555", body: { settings: { approval_type: 2 } } });
+    expect(Object.keys(zoomCalls[0].body.settings)).toEqual(["approval_type"]);
+    expect(row().zoom_registration).toBe(false);
+  });
+
+  it("mock meetings and mock licences skip Zoom but still set the flag", async () => {
+    setup({ circles: [live({ zoom_meeting_id: "MOCK1234567890" })] });
+    await pc.zoomRegistration("c1", "a", true);
+    expect(row().zoom_registration).toBe(true);
+    setup({ circles: [live({ licence: licence({ is_mock: true }) })] });
+    await pc.zoomRegistration("c1", "a", true);
+    expect(row().zoom_registration).toBe(true);
+    expect(zoomCalls).toEqual([]);
+  });
+
+  it("Zoom refusing leaves the flag alone; a missing scope is named", async () => {
+    setup({ circles: [live()] });
+    zoomFail.push({ method: "PATCH", path: "/meetings/555", body: "{\"code\":4711,\"message\":\"Invalid access token, does not contain scopes\"}" });
+    await expect(pc.zoomRegistration("c1", "a", true)).rejects.toThrow("meeting:update:meeting:admin");
+    expect(row().zoom_registration).toBeUndefined();
+    expect(db.tables.audit_log).toEqual([]);
+  });
+
+  it.each([
+    ["no circle", "nope", live(), true, "Circle not found"],
+    ["no meeting", "c1", live({ status: "pending", zoom_meeting_id: null }), true, "Approve the circle first: it has no Zoom meeting yet"],
+    ["ended", "c1", live({ status: "ended" }), true, "Registration can only be changed for live or paused circles"],
+    ["pending with a meeting", "c1", live({ status: "approved" }), false, "Registration can only be changed for live or paused circles"],
+    ["no on/off", "c1", live(), undefined, "Say whether registration should be on or off"],
+  ])("refuses: %s", async (_, id, c, on, msg) => {
+    setup({ circles: [c] });
+    await expect(pc.zoomRegistration(id, "a", on)).rejects.toThrow(msg);
+    expect(zoomCalls).toEqual([]);
+  });
+});
+
+describe("syncAttendanceRun with registration", () => {
+  const seed = (zoom_registration) => ({
+    circles: [circle({ status: "live", zoom_meeting_id: "555", zoom_registration })],
+    licences: [licence({ attendance_scanned_to: "2026-10-09" })],
+  });
+  const meetings = [
+    { id: 555, uuid: "u1", topic: "Circle", start_time: "2026-10-08T18:30:00Z", end_time: "2026-10-08T19:30:00Z" },
+    { id: 555, uuid: "u2", topic: "Circle", start_time: "2026-10-09T18:30:00Z", end_time: "2026-10-09T19:30:00Z" },
+  ];
+  const parts = [
+    { name: "Asha Example", registrant_id: "r1", duration: 600 },
+    { name: "Asha (phone)", registrant_id: "r1", duration: 300 },
+    { name: "  bela   EXAMPLE ", duration: 900 },
+  ];
+  const registrants = [
+    { id: "r1", first_name: "Asha", last_name: "Example", email: "asha@example.org" },
+    { id: "r2", first_name: "Bela", last_name: "Example", email: "bela@example.org" },
+  ];
+  const run = async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-10T12:00:00Z"));
+    return pc.syncAttendanceRun("a");
+  };
+
+  it("fills emails from registrants (once per meeting) so rejoins merge by email", async () => {
+    setup(seed(true));
+    zoomGet.push({ path: "/report/users/", body: { meetings } }, { path: "/report/meetings/", body: { participants: parts } },
+      { path: "/meetings/555/registrants", body: { registrants } });
+    const r = await run();
+    expect(r).toMatchObject({ sessions_added: 2, problems: [] });
+    expect(zoomCalls.filter((c) => c.path.startsWith("/meetings/555/registrants"))).toHaveLength(1);
+    expect(zoomCalls.find((c) => c.path.startsWith("/meetings/555/registrants")).path).toContain("status=approved");
+    const rows = db.tables.attendance.filter((a) => a.session_id === db.tables.attendance_sessions[0].id);
+    expect(rows.map((a) => [a.email, a.minutes])).toEqual([["asha@example.org", 15], ["bela@example.org", 15]]);
+  }, 10000);
+
+  it("a registrants failure is noted once and the sync carries on", async () => {
+    setup(seed(true));
+    zoomGet.push({ path: "/report/users/", body: { meetings } }, { path: "/report/meetings/", body: { participants: parts } });
+    zoomFail.push({ method: "GET", path: "/meetings/555/registrants", body: "{\"code\":4711,\"message\":\"scopes\"}" });
+    const r = await run();
+    expect(r.sessions_added).toBe(2);
+    expect(r.problems).toEqual(["Registrant emails skipped: the Zoom app needs the meeting:read:list_registrants:admin scope"]);
+    expect(db.tables.attendance.every((a) => a.email === null)).toBe(true);
+  }, 10000);
+
+  it("circles without registration never ask for registrants", async () => {
+    setup(seed(false));
+    zoomGet.push({ path: "/report/users/", body: { meetings } }, { path: "/report/meetings/", body: { participants: parts } });
+    await run();
+    expect(zoomCalls.some((c) => c.path.includes("registrants"))).toBe(false);
+  }, 10000);
 });
 
 describe("handover", () => {

@@ -38,10 +38,11 @@ export const facilitatorGuides = [
         body: "A few minutes before the start:\n\n1. Open the join link.\n2. In Zoom, open **Participants** and choose **Claim host**.\n3. Enter the host key. You now have host controls.\n\nThe link is the same every week for the whole term, so pin it in your group.",
         shot: "portal-5-steps",
         alt: "The three steps to claim host",
+        note: "If the team has turned on email collection for your circle, Zoom first asks for your first name, last name and email. Fill them in and choose **Register** (only once), then claim host as usual. Your group does the same.",
       },
       {
         title: "Other links",
-        body: "Below your details, **Links** can show your **WhatsApp group**, the **Participant sign-up link** (share this exact one so sign-ups are linked to your circle), the **YouTube playlist** and the **Google Drive folder**. A link only appears once the team has added it.",
+        body: "Below your details, **Links** shows your **WhatsApp group**, your circle's own **Participant sign-up link** (share this exact one so sign-ups are linked to your circle), the **YouTube playlist** and the **Google Drive folder**. A link only appears once the team has added it.",
         shot: "portal-6-links",
         alt: "The Links section",
       },
@@ -110,6 +111,32 @@ export const facilitatorGuides = [
       {
         title: "Save",
         body: "Click **Save**. The button is greyed out until something has changed. **Cancel** closes the form without saving.",
+      },
+    ],
+  },
+  {
+    id: "fac-attendees",
+    section: "Your circle",
+    audience: ["facilitator"],
+    icon: "users",
+    title: "See who has signed up for your circle",
+    summary: "The people who signed up with your circle's sign-up link: names, emails, WhatsApp numbers and what they hope for.",
+    related: ["fac-start-meeting"],
+    steps: [
+      {
+        title: "Open Attendees on your circle",
+        body: "On your circle's card, **Attendees** lists everyone who has signed up, newest first, with their email, WhatsApp number and the date. Click a name to see their city, how familiar they are with the Gita, how they heard about us and their goals, with **Email** and **WhatsApp** buttons to get in touch.",
+        shot: "fac-attendees-1",
+        alt: "The Attendees list on a circle card",
+      },
+      {
+        title: "Download the list",
+        body: "Click **Download CSV** for a spreadsheet of everyone who signed up, for example to add them to your WhatsApp group.",
+      },
+      {
+        title: "Get more people linked",
+        body: "Share your circle's **Participant sign-up link** from **Links**. Everyone who signs up with it appears here automatically. If someone signed up another way, the team can link them for you.",
+        note: "Only you, your co-facilitators and the team can see your attendees.",
       },
     ],
   },

@@ -10,7 +10,7 @@ test.describe("Training", () => {
     await signIn(page);
     await navTo(page, "Training");
     await expect(page).toHaveURL(/#\/Training$/);
-    await expect(page.getByRole("heading", { name: /^Trainees/ })).toContainText("(4)");
+    await expect(page.getByRole("heading", { name: /^Trainees/ })).toContainText("(5)");
 
     // Gauri: intro, agreement and scene done. Hari: everything done, so ready to assess.
     await expect(row(page, "Gauri").locator(".tr-dot.done")).toHaveCount(3);
@@ -19,12 +19,17 @@ test.describe("Training", () => {
     await expect(row(page, "Haridas")).toContainText("Ready to assess");
     await expect(row(page, "Isha")).toContainText("Applied");
     await expect(row(page, "Jay")).toContainText("Certified");
+    // Kavi's assessor has sent in their assessment: waiting for an admin to decide.
+    await expect(row(page, "Kavi")).toContainText("Assessed, awaiting decision");
     await expect(row(page, "Gauri").locator(".tr-dot").first()).toHaveAttribute("title", /^Intro session: done/);
 
     const chips = page.getByRole("group", { name: "Training status" });
     await chips.getByRole("button", { name: "Ready to assess 1" }).click();
     await expect(page.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
-    await chips.getByRole("button", { name: "All 4" }).click();
+    await chips.getByRole("button", { name: "Assessed, awaiting decision 1" }).click();
+    await expect(page.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
+    await expect(row(page, "Kavi")).toBeVisible();
+    await chips.getByRole("button", { name: "All 5" }).click();
     await page.getByRole("searchbox", { name: "Search trainees" }).fill("isha");
     await expect(page.locator(".tr-row:not(.tr-head)")).toHaveCount(1);
     await expectNoHorizontalOverflow(page);
@@ -194,7 +199,9 @@ test.describe("Training", () => {
     await page.getByRole("tab", { name: "Email wording" }).click();
     await page.locator(".tr-emails").getByRole("button", { name: "Certified", exact: true }).click();
     const subject = page.locator(".tr-emails").getByLabel("Subject");
+    await expect(subject).not.toHaveValue("");
     await subject.fill("Congratulations, {{first_name}}");
+    await expect(page.locator(".tr-emails").getByRole("button", { name: "Save email" })).toBeEnabled();
     await page.locator(".tr-emails").getByRole("button", { name: "Save email" }).click();
     await expect(toast(page)).toContainText("Email wording saved");
     expect(mock.rest("email_templates", "POST")[0].body).toMatchObject({ key: "training_certified", subject: "Congratulations, {{first_name}}" });
@@ -205,7 +212,8 @@ test.describe("Training", () => {
     await navTo(page, "Training");
     // Isha's Agreement email failed, so she still needs it; Gauri was sent Empowerment 8 days ago.
     await page.getByRole("tab", { name: /Next steps/ }).click();
-    await expect(page.getByRole("tab", { name: /Next steps/ })).toContainText("2");
+    // Two forms to send or chase, plus Kavi's assessment waiting for a decision.
+    await expect(page.getByRole("tab", { name: /Next steps/ })).toContainText("3");
     const send = page.getByRole("region", { name: "Send next form" });
     await expect(send.getByRole("heading", { name: "Agreement form (1)" })).toBeVisible();
     await expect(send).toContainText("Isha Placeholder");
