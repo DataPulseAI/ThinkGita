@@ -114,3 +114,47 @@ describe("small helpers", () => {
     expect(su.waCode(null)).toBeNull();
   });
 });
+
+describe("reading link details", () => {
+  it("accepts older spellings of the hidden fields", () => {
+    const u = su.utmFrom([
+      { label: "UTM Facilitator", type: "HIDDEN_FIELDS", value: "Asha" },
+      { label: "utm-wagrp", type: "HIDDEN_FIELDS", value: "https://chat.whatsapp.com/AB1" },
+      { label: "circleid", type: "HIDDEN_FIELDS", value: "abcd1234" },
+      { label: "First Name", type: "INPUT_TEXT", value: "Mira" },
+    ]);
+    expect(u).toEqual({ utm_facilitator: "Asha", utm_wagrp: "https://chat.whatsapp.com/AB1", circle_id: "abcd1234" });
+  });
+  it("reads utm values from a passed-along page address, keeping the WhatsApp link whole", () => {
+    const u = su.utmFrom([{ label: "url", type: "HIDDEN_FIELDS",
+      value: "https://forms.thinkgita.org/circlesignup?utm_facilitator=Ananda%20das&utm_lang=Eng&utm_wagrp=https://chat.whatsapp.com/XY9?mode=r" }]);
+    expect(u).toEqual({ utm_facilitator: "Ananda das", utm_lang: "Eng", utm_wagrp: "https://chat.whatsapp.com/XY9?mode=r" });
+  });
+  it("question answers that merely mention a facilitator are not link details", () => {
+    expect(su.utmKey("Who is your facilitator?")).toBeNull();
+    expect(su.utmKey("utm_course")).toBe("utm_course");
+  });
+});
+
+describe("matching by when they signed up", () => {
+  const old = circle({ id: "66666666-6666-4666-8666-666666666666", name: "Spring", status: "ended", starts_on: "2026-01-12", ends_on: "2026-04-27", whatsapp_group_link: null });
+  const now = circle({ id: "77777777-7777-4777-8777-777777777777", name: "Autumn", starts_on: "2026-09-07", ends_on: null, whatsapp_group_link: null });
+  it("picks the facilitator's circle that was running at the time", () => {
+    expect(su.matchCircle({ utm_facilitator: "Asha Example", utm_lang: "Eng" }, [old, now], "2026-02-03T10:00:00Z"))
+      .toMatchObject({ circle_id: old.id, note: "Facilitator and language, running when they signed up" });
+    expect(su.matchCircle({ utm_facilitator: "Asha Example", utm_lang: "Eng" }, [old, now], "2026-08-20T10:00:00Z").circle_id).toBe(now.id);
+  });
+  it("without a sign-up date, still leaves it for an admin", () => {
+    expect(su.matchCircle({ utm_facilitator: "Asha Example", utm_lang: "Eng" }, [old, now]).circle_id).toBeNull();
+  });
+  it("runningAt allows a little before the start and after the end", () => {
+    expect(su.runningAt(old, "2025-12-01")).toBe(true);
+    expect(su.runningAt(old, "2025-10-01")).toBe(false);
+    expect(su.runningAt(old, "2026-05-05")).toBe(true);
+    expect(su.runningAt(old, "2026-06-30")).toBe(false);
+  });
+  it("matches the website name too", () => {
+    const c = circle({ facilitator: fac("Real Name"), website_name: "Kirtana", whatsapp_group_link: null });
+    expect(su.matchCircle({ utm_facilitator: "Kirtana", utm_lang: "Eng" }, [c]).circle_id).toBe(c.id);
+  });
+});

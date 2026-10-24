@@ -81,15 +81,42 @@ const low = (a: Answer) => a.label.toLowerCase();
 const firstOf = (answers: Answer[], test: (a: Answer) => boolean) => answers.find((a) => test(a) && a.value)?.value ?? "";
 const nul = (s: string) => (s && s.trim() ? s.trim() : null);
 const UTM_KEYS = ["utm_facilitator", "utm_course", "utm_lang", "utm_date", "utm_wagrp", "circle_id", "circle_name"];
+// Hidden field names as they may have been spelt over time ("UTM Facilitator", "utm-wagrp", "wagrp", "circleid").
+export function utmKey(label: string): string | null {
+  const k = String(label ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  if (UTM_KEYS.includes(k)) return k;
+  const bare = k.replace(/^utm_?/, "");
+  const alias: Record<string, string> = {
+    facilitator: "utm_facilitator", fac: "utm_facilitator", host: "utm_facilitator", course: "utm_course", lang: "utm_lang",
+    language: "utm_lang", date: "utm_date", start: "utm_date", wagrp: "utm_wagrp", wa: "utm_wagrp", whatsapp: "utm_wagrp",
+    circleid: "circle_id", circle_id: "circle_id", circlename: "circle_name", circle_name: "circle_name",
+  };
+  return k.startsWith("utm") || k.startsWith("circle") ? alias[bare] ?? null : null;
+}
+// The link details of a sign-up: hidden fields, plus any utm_ values inside a URL that was passed along (a referrer).
+export function utmFrom(answers: Answer[]): Record<string, string> {
+  const utm: Record<string, string> = {};
+  for (const a of answers) {
+    const key = utmKey(a.label);
+    if (key && a.value && !utm[key]) utm[key] = a.value.trim();
+  }
+  for (const a of answers) {
+    if (!/[?&](utm_|circle_id=)/.test(a.value ?? "")) continue;
+    try {
+      // utm_wagrp holds a raw URL, so everything after it belongs to it.
+      const m = /[?&]utm_wagrp=(.*)$/.exec(a.value);
+      const q = new URL(a.value.replace(/[?&]utm_wagrp=.*$/, "")).searchParams;
+      for (const [k, v] of q) { const key = utmKey(k); if (key && v && !utm[key]) utm[key] = v.trim(); }
+      if (m && !utm.utm_wagrp) utm.utm_wagrp = decodeURIComponent(m[1]).trim();
+    } catch { /* not a URL */ }
+  }
+  return utm;
+}
 
 // The columns stored for one sign-up, from its answers.
 export function signupFields(answers: Answer[]) {
-  const utm: Record<string, string> = {};
-  for (const a of answers) {
-    const k = a.label.trim().toLowerCase().replace(/[\s-]+/g, "_");
-    if (UTM_KEYS.includes(k) && a.value) utm[k] = a.value.trim();
-  }
-  const isHidden = (a: Answer) => UTM_KEYS.includes(a.label.trim().toLowerCase().replace(/[\s-]+/g, "_"));
+  const utm = utmFrom(answers);
+  const isHidden = (a: Answer) => a.type === "HIDDEN_FIELDS" || Boolean(utmKey(a.label));
   const qs = answers.filter((a) => !isHidden(a));
   const email = (firstOf(qs, (a) => a.type === "INPUT_EMAIL") || firstOf(qs, (a) => /e-?mail/.test(low(a)) && EMAIL_RE.test(a.value))).toLowerCase();
   const dob = firstOf(qs, (a) => a.type === "INPUT_DATE" || /date of birth|birthday/.test(low(a)));
@@ -157,6 +184,7 @@ type Person = { name?: string | null; initiated_name?: string | null; first_name
 export type MatchCircle = {
   id: string; name: string; name_auto?: boolean; status: string; language?: string | null; circle_type?: string | null;
   starts_on?: string | null; preferred_start?: string | null; ends_on?: string | null; whatsapp_group_link?: string | null;
+  created_at?: string | null; website_name?: string | null;
   facilitator?: Person; cofacilitators?: { facilitator: Person }[];
 };
 
@@ -167,6 +195,7 @@ function hostWordSets(c: MatchCircle): string[][] {
   if (!c.name_auto && /^TG\b/i.test(segs[0] ?? "") && segs.length >= 3) {
     for (const s of segs.slice(2)) if (!/\d/.test(s) && !LANGS.includes(s)) for (const part of s.split(/&| and /)) out.push(words(part));
   }
+  if (c.website_name) for (const part of c.website_name.split(/&| and /)) out.push(words(part));
   for (const p of [c.facilitator, ...(c.cofacilitators ?? []).map((x) => x.facilitator)]) {
     if (!p) continue;
     for (const n of [p.initiated_name, p.name, [p.first_name, p.last_name].filter(Boolean).join(" ")]) {
@@ -188,7 +217,18 @@ export function hostMatches(utmName: string, c: MatchCircle) {
 
 export type Match = { circle_id: string | null; method: "link" | "auto" | null; note: string | null; candidates: string[] };
 
-export function matchCircle(utm: Record<string, string>, circles: MatchCircle[]): Match {
+// Was the circle running (or about to start) when this person signed up? Unknown dates count as yes.
+export function runningAt(c: MatchCircle, at: string | null | undefined) {
+  if (!at) return true;
+  const day = String(at).slice(0, 10);
+  const from = c.starts_on ?? c.preferred_start ?? (c.created_at ? String(c.created_at).slice(0, 10) : null);
+  const plus = (d: string, n: number) => new Date(Date.parse(`${d}T12:00:00Z`) + n * 86400e3).toISOString().slice(0, 10);
+  if (from && day < plus(from, -60)) return false; // signed up more than 2 months before it began
+  if (c.ends_on && day > plus(c.ends_on, 14)) return false; // and not long after it ended
+  return true;
+}
+
+export function matchCircle(utm: Record<string, string>, circles: MatchCircle[], at?: string | null): Match {
   const none = (note: string | null, candidates: string[] = []): Match => ({ circle_id: null, method: null, note, candidates: candidates.slice(0, 5) });
   const one = (c: MatchCircle, method: "link" | "auto", note: string): Match => ({ circle_id: c.id, method, note, candidates: [] });
 
@@ -222,6 +262,8 @@ export function matchCircle(utm: Record<string, string>, circles: MatchCircle[])
     if (hit.length > 1) {
       const narrowed = hit.filter((c) => utm.utm_facilitator && hostMatches(utm.utm_facilitator, c));
       if (narrowed.length === 1) return one(narrowed[0], "auto", "Same WhatsApp group and facilitator");
+      const then = (narrowed.length ? narrowed : hit).filter((c) => runningAt(c, at));
+      if (then.length === 1) return one(then[0], "auto", "Same WhatsApp group, running when they signed up");
       return none(`${hit.length} circles share this WhatsApp group`, hit.map((c) => c.id));
     }
   }
@@ -233,13 +275,18 @@ export function matchCircle(utm: Record<string, string>, circles: MatchCircle[])
   const dated = fitting.filter(sameDate);
   if (dated.length === 1) return one(dated[0], "auto", "Facilitator, language and start date");
   if (fitting.length === 1) return one(fitting[0], "auto", "Facilitator and language");
-  if (fitting.length > 1) return none(`${fitting.length} circles by ${utm.utm_facilitator}`, (dated.length ? dated : fitting).map((c) => c.id));
+  // Several circles by this facilitator: the one running when they signed up.
+  const then = fitting.filter((c) => runningAt(c, at));
+  if (then.length === 1) return one(then[0], "auto", "Facilitator and language, running when they signed up");
+  const thenDated = then.filter(sameDate);
+  if (thenDated.length === 1) return one(thenDated[0], "auto", "Facilitator, language and start date");
+  if (fitting.length > 1) return none(`${fitting.length} circles by ${utm.utm_facilitator}`, (dated.length ? dated : then.length ? then : fitting).map((c) => c.id));
   return none(`${utm.utm_facilitator} hosts a circle, but not in this language or course`, byHost.map((c) => c.id));
 }
 
 /* ---------------- Storing ---------------- */
 
-const CIRCLE_SELECT = "id, name, name_auto, status, language, circle_type, starts_on, preferred_start, ends_on, whatsapp_group_link, " +
+const CIRCLE_SELECT = "id, name, name_auto, status, language, circle_type, starts_on, preferred_start, ends_on, whatsapp_group_link, created_at, website_name, " +
   "facilitator:facilitators!circles_facilitator_id_fkey(name, initiated_name, first_name, last_name), " +
   "cofacilitators:circle_cofacilitators(facilitator:facilitators(name, initiated_name, first_name, last_name))";
 async function loadCircles(): Promise<MatchCircle[]> {
@@ -251,7 +298,7 @@ async function loadCircles(): Promise<MatchCircle[]> {
 type Sub = { formId: string; responseId: string; submittedAt: string; answers: Answer[] };
 function row(s: Sub, circles: MatchCircle[]) {
   const f = signupFields(s.answers);
-  const m = matchCircle(f.utm, circles);
+  const m = matchCircle(f.utm, circles, s.submittedAt);
   return {
     response_id: s.responseId, form_id: s.formId, submitted_at: s.submittedAt, ...f, answers: s.answers,
     circle_id: m.circle_id, match_method: m.method, match_note: m.note, match_candidates: m.candidates,
@@ -327,20 +374,28 @@ async function sync(actor: string, formId?: string) {
 async function rematch(actor: string) {
   const circles = await loadCircles();
   let linked = 0, checked = 0;
-  for (let from = 0; ; from += 500) {
-    const { data, error } = await db.from("circle_signups").select("id, utm").is("circle_id", null).is("match_method", null)
-      .order("submitted_at").range(from, from + 499);
+  // Read every waiting sign-up first: linking one takes it out of the list, which would shift later pages.
+  const waiting: any[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db.from("circle_signups").select("id, utm, answers, submitted_at, match_note, match_candidates").is("circle_id", null).is("match_method", null)
+      .order("submitted_at").order("id").range(from, from + 999);
     if (error) throw new Error(error.message);
-    for (const s of data ?? []) {
-      checked++;
-      const m = matchCircle(s.utm ?? {}, circles);
-      const patch = m.circle_id
-        ? { circle_id: m.circle_id, match_method: m.method, match_note: m.note, match_candidates: [], matched_by: "system", matched_at: new Date().toISOString() }
-        : { match_note: m.note, match_candidates: m.candidates };
-      if (m.circle_id) linked++;
-      await db.from("circle_signups").update(patch).eq("id", s.id).is("match_method", null);
-    }
-    if (!data || data.length < 500) break;
+    waiting.push(...(data ?? []));
+    if (!data || data.length < 1000) break;
+  }
+  for (const s of waiting) {
+    checked++;
+    // Link details read again from the stored answers, so reading improvements apply without asking Tally.
+    const utm = { ...(s.utm ?? {}), ...utmFrom(Array.isArray(s.answers) ? s.answers : []) };
+    const m = matchCircle(utm, circles, s.submitted_at);
+    const patch = m.circle_id
+      ? { utm, circle_id: m.circle_id, match_method: m.method, match_note: m.note, match_candidates: [], matched_by: "system", matched_at: new Date().toISOString() }
+      : { utm, match_note: m.note, match_candidates: m.candidates };
+    if (m.circle_id) linked++;
+    // Still waiting with nothing new to say: no write (keeps a run over thousands of sign-ups quick).
+    const same = !m.circle_id && m.note === s.match_note && JSON.stringify(m.candidates) === JSON.stringify(s.match_candidates ?? [])
+      && JSON.stringify(utm) === JSON.stringify(s.utm ?? {});
+    if (!same) await db.from("circle_signups").update(patch).eq("id", s.id).is("match_method", null);
   }
   await db.from("audit_log").insert({ actor, action: "signups_rematch", circle_id: null, detail: { checked, linked } });
   return { checked, linked, waiting: checked - linked };
